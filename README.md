@@ -1,2 +1,3 @@
 # ai-dev-orchestrator
-Local-first AI development orchestrator for GitHub, Codex CLI and Gemini CLI.
+
+Orquestrador local-first de desenvolvimento com IA para GitHub, Codex CLI e Gemini CLI.

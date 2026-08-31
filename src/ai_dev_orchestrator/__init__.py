@@ -1,2 +1,3 @@
-def main() -> None:
-    print("Hello from ai-dev-orchestrator!")
+"""Pacote do AI Dev Orchestrator."""
+
+__version__ = "0.1.0"
