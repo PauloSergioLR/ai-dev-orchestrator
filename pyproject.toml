@@ -1,0 +1,29 @@
+[project]
+name = "ai-dev-orchestrator"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "PauloSergioLR", email = "paulo1999.sergio.lopes@gmail.com" }
+]
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "pydantic>=2.13.5",
+    "pydantic-settings>=2.15.0",
+    "rich>=15.0.0",
+    "typer>=0.27.2",
+]
+
+[project.scripts]
+ai-dev-orchestrator = "ai_dev_orchestrator:main"
+
+[build-system]
+requires = ["uv_build>=0.12.8,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.16.5",
+]
