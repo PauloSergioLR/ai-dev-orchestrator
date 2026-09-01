@@ -31,7 +31,9 @@ class CodexExecution:
 class ProcessRunner(Protocol):
     """Contrato mínimo do executor de processos usado pelo adapter."""
 
-    def run(self, arguments: Sequence[str]) -> CommandResult:
+    def run(
+        self, arguments: Sequence[str], input_text: str | None = None
+    ) -> CommandResult:
         """Executa um processo local."""
 
 
@@ -48,7 +50,9 @@ class CodexAdapter:
     def execute(self, worktree: str | Path, prompt: str) -> CodexExecution:
         """Inicia uma sessão persistida do Codex no worktree explicitamente informado."""
         path = self._validate_worktree(worktree)
-        result = self._run(["codex", "exec", "-C", str(path), "--json", prompt], "executar")
+        result = self._run(
+            ["codex", "exec", "-C", str(path), "--json", "-"], prompt, "executar"
+        )
         session_id, final_message = self._parse_jsonl(result.stdout, require_session=True)
         assert session_id is not None
         return CodexExecution(
@@ -67,7 +71,8 @@ class CodexAdapter:
             raise CodexError("O identificador da sessão Codex é obrigatório para retomar")
         path = self._validate_worktree(worktree)
         result = self._run(
-            ["codex", "exec", "-C", str(path), "resume", session_id, prompt, "--json"],
+            ["codex", "exec", "-C", str(path), "--json", "resume", session_id, "-"],
+            prompt,
             "retomar a sessão",
         )
         returned_session_id, final_message = self._parse_jsonl(
@@ -93,8 +98,8 @@ class CodexAdapter:
             raise CodexError(f"O worktree informado não é um diretório acessível: {path}")
         return path.resolve()
 
-    def _run(self, arguments: list[str], operation: str) -> CommandResult:
-        result = self.runner.run(arguments)
+    def _run(self, arguments: list[str], input_text: str, operation: str) -> CommandResult:
+        result = self.runner.run(arguments, input_text=input_text)
         if result.error:
             raise CodexError(f"Não foi possível executar Codex ao {operation}: {result.error}")
         if not result.succeeded:
