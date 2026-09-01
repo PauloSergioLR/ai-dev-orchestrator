@@ -6,7 +6,7 @@ from pathlib import Path
 import tomllib
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, field_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 
@@ -26,7 +26,13 @@ class GitHubConfig(BaseModel):
     repository: str = Field(min_length=1)
     project_number: int = Field(gt=0)
     ready_status: str = Field(min_length=1)
+    in_progress_status: str = Field(default="In Progress", min_length=1)
     status_field_name: str = Field(default="Status", min_length=1)
+
+    @property
+    def repository_full_name(self) -> str:
+        """Retorna o identificador completo do repositório no GitHub."""
+        return f"{self.owner}/{self.repository}"
 
 
 class ExecutionConfig(BaseModel):
@@ -37,6 +43,24 @@ class ExecutionConfig(BaseModel):
     max_attempts: int = Field(gt=0)
     max_parallel_runs: int = Field(gt=0)
     auto_merge: StrictBool
+
+
+class WorkspaceConfig(BaseModel):
+    """Locais e referência usados para preparar um worktree."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    repository_path: Path
+    worktrees_dir: Path
+    base_ref: str = Field(min_length=1)
+
+    @field_validator("repository_path", "worktrees_dir")
+    @classmethod
+    def paths_must_be_absolute(cls, value: Path) -> Path:
+        """Recusa paths relativos para não depender do cwd do processo."""
+        if not value.is_absolute():
+            raise ValueError("deve ser um caminho absoluto")
+        return value
 
 
 class _EnvironmentSettingsSource(PydanticBaseSettingsSource):
@@ -74,6 +98,7 @@ class OrchestratorConfig(BaseSettings):
 
     github: GitHubConfig
     execution: ExecutionConfig
+    workspace: WorkspaceConfig
 
     @classmethod
     def settings_customise_sources(

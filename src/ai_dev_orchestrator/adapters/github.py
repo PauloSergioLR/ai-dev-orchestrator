@@ -18,6 +18,7 @@ from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRun
 
 GITHUB_ISSUE_TIMEOUT_SECONDS = 20
 GITHUB_PROJECT_TIMEOUT_SECONDS = 20
+GITHUB_PROJECT_ITEM_LIMIT = 1000
 
 
 class GitHubIssueError(Exception):
@@ -148,7 +149,7 @@ class GitHubProjectAdapter:
         """Carrega os itens do Project por meio do GitHub CLI autenticado."""
         arguments = [
             "gh", "project", "item-list", str(self.config.project_number), "--owner",
-            self.config.owner, "--format", "json",
+            self.config.owner, "--limit", str(GITHUB_PROJECT_ITEM_LIMIT), "--format", "json",
         ]
         result = self.runner.run(arguments)
         if result.error:
@@ -169,7 +170,13 @@ class GitHubProjectAdapter:
         except json.JSONDecodeError as error:
             raise GitHubProjectError("GitHub CLI retornou JSON inválido para o Project") from error
 
-        return self._parse_items(payload)
+        items = self._parse_items(payload)
+        if len(items) >= GITHUB_PROJECT_ITEM_LIMIT:
+            raise GitHubProjectError(
+                "A leitura do Project atingiu o limite de "
+                f"{GITHUB_PROJECT_ITEM_LIMIT} itens e pode estar truncada"
+            )
+        return items
 
     @classmethod
     def _parse_items(cls, payload: Any) -> tuple[ProjectItem, ...]:

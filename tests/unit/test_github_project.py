@@ -7,7 +7,11 @@ import json
 
 import pytest
 
-from ai_dev_orchestrator.adapters.github import GitHubProjectAdapter, GitHubProjectError
+from ai_dev_orchestrator.adapters.github import (
+    GITHUB_PROJECT_ITEM_LIMIT,
+    GitHubProjectAdapter,
+    GitHubProjectError,
+)
 from ai_dev_orchestrator.config import GitHubConfig
 from ai_dev_orchestrator.domain.project import is_eligible_for_execution
 from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner
@@ -62,7 +66,8 @@ def test_reads_and_maps_project_item() -> None:
         "Ready", "High", "M", "Low", "Codex"
     )
     assert runner.arguments == [
-        "gh", "project", "item-list", "6", "--owner", "acme", "--format", "json"
+        "gh", "project", "item-list", "6", "--owner", "acme", "--limit",
+        str(GITHUB_PROJECT_ITEM_LIMIT), "--format", "json"
     ]
     assert isinstance(runner.arguments, list)
 
@@ -133,6 +138,22 @@ def test_reports_invalid_json_with_original_cause() -> None:
         GitHubProjectAdapter(github_config(), FakeRunner(CommandResult(0, "invalid"))).list_items()
 
     assert error.value.__cause__ is not None
+
+
+def test_requests_more_than_the_gh_default_project_item_limit() -> None:
+    runner = FakeRunner(CommandResult(0, project_payload()))
+
+    GitHubProjectAdapter(github_config(), runner).list_items()
+
+    assert int(runner.arguments[runner.arguments.index("--limit") + 1]) > 30
+
+
+def test_reports_possible_project_truncation_at_explicit_limit() -> None:
+    item = json.loads(project_payload())["items"][0]
+    payload = json.dumps({"items": [item] * GITHUB_PROJECT_ITEM_LIMIT})
+
+    with pytest.raises(GitHubProjectError, match="pode estar truncada"):
+        GitHubProjectAdapter(github_config(), FakeRunner(CommandResult(0, payload))).list_items()
 
 
 @pytest.mark.parametrize(
