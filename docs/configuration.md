@@ -33,6 +33,11 @@ remote_name = "origin"
 max_attempts = 2
 max_parallel_runs = 1
 auto_merge = false
+
+[ci]
+required_checks = ["test"]
+poll_interval_seconds = 5
+timeout_seconds = 900
 ```
 
 Em `[github]`, `owner`, `repository` e `ready_status` devem ser textos não
@@ -50,6 +55,11 @@ de origem, `worktrees_dir` é a raiz explícita e absoluta dos worktrees e
 `base_ref` é a referência Git usada sem `fetch` ou `pull` automático. Paths
 relativos são rejeitados para que a execução não dependa do diretório atual. Em
 `[github]`, `in_progress_status` tem como padrão `In Progress`.
+
+Em `[ci]`, `required_checks` define os checks que devem existir e terminar com
+`SUCCESS` para liberar o fluxo. O padrão é `["test"]`; a lista não pode ser
+vazia. `poll_interval_seconds` (padrão `5`) e `timeout_seconds` (padrão `900`)
+devem ser positivos. Checks fora da lista não bloqueiam o gate.
 
 ## Variáveis de ambiente
 
@@ -71,6 +81,9 @@ ORCH_WORKSPACE__REMOTE_NAME
 ORCH_EXECUTION__MAX_ATTEMPTS
 ORCH_EXECUTION__MAX_PARALLEL_RUNS
 ORCH_EXECUTION__AUTO_MERGE
+ORCH_CI__REQUIRED_CHECKS
+ORCH_CI__POLL_INTERVAL_SECONDS
+ORCH_CI__TIMEOUT_SECONDS
 ```
 
 Por exemplo, `ORCH_EXECUTION__MAX_ATTEMPTS=3` substitui apenas esse valor. A

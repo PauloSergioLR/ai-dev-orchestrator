@@ -1,19 +1,25 @@
-# Fluxo pretendido
+# Fluxo
 
-O fluxo abaixo descreve a operação de alto nível pretendida. Ele é apenas documentação e ainda não está implementado.
+O final implementado do fluxo é:
 
 ```text
-Issue em Ready
-    ↓
-Orquestrador
-    ↓
 Codex
     ↓
-Testes
+gates locais
+    ↓
+commit
+    ↓
+push
     ↓
 Pull Request
     ↓
-Revisão do Gemini
+AI Review
     ↓
-Revisão humana
+aguarda CI do HEAD exato
+    ↓
+CI verde: pronto para futura etapa de review
 ```
+
+Ainda não há revisão Gemini, feedback, merge, limpeza ou automação da próxima
+Issue. Se a CI falhar, expirar ou o HEAD mudar, PR, branch, commit e worktree são
+preservados e o Status continua em `AI Review`.

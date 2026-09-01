@@ -8,6 +8,7 @@ import re
 from typing import Any, Protocol, Sequence
 
 from ai_dev_orchestrator.config import GitHubConfig, OrchestratorConfig
+from ai_dev_orchestrator.domain.ci import PullRequestCiSnapshot, StatusCheck
 from ai_dev_orchestrator.domain.issue import Issue
 from ai_dev_orchestrator.domain.project import (
     ProjectItem,
@@ -23,6 +24,7 @@ GITHUB_ISSUE_TIMEOUT_SECONDS = 20
 GITHUB_PROJECT_TIMEOUT_SECONDS = 20
 GITHUB_PROJECT_ITEM_LIMIT = 1000
 GITHUB_PULL_REQUEST_TIMEOUT_SECONDS = 30
+GITHUB_CI_TIMEOUT_SECONDS = 30
 
 
 class GitHubIssueError(Exception):
@@ -138,6 +140,10 @@ class GitHubPullRequestError(Exception):
     """Indica que um Pull Request não pôde ser criado."""
 
 
+class GitHubCiError(Exception):
+    """Indica que a CI de um Pull Request não pôde ser consultada com segurança."""
+
+
 @dataclass(frozen=True)
 class PullRequest:
     """Dados mínimos do Pull Request publicado."""
@@ -218,6 +224,68 @@ class GitHubPullRequestAdapter:
         if not isinstance(value, str):
             raise ValueError(field)
         return value
+
+
+class GitHubCiAdapter:
+    """Lê HEAD e checks por ``gh``; a decisão de aprovação fica no serviço."""
+
+    def __init__(
+        self, config: GitHubConfig | OrchestratorConfig, runner: ProcessRunner | None = None
+    ) -> None:
+        self.config = config.github if isinstance(config, OrchestratorConfig) else config
+        self.runner = runner or CommandRunner(timeout=GITHUB_CI_TIMEOUT_SECONDS)
+
+    def get_ci_snapshot(self, pull_request_number: int) -> PullRequestCiSnapshot:
+        arguments = [
+            "gh", "pr", "view", str(pull_request_number), "--repo",
+            self.config.repository_full_name, "--json", "headRefOid,statusCheckRollup",
+        ]
+        result = self.runner.run(arguments)
+        if result.error:
+            raise GitHubCiError(f"Não foi possível executar o GitHub CLI ao consultar a CI: {result.error}")
+        if not result.succeeded:
+            detail = result.stderr.strip() or result.stdout.strip()
+            message = f"GitHub CLI retornou código {result.returncode} ao consultar a CI do Pull Request #{pull_request_number}"
+            raise GitHubCiError(f"{message}: {detail}" if detail else message)
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raise GitHubCiError("GitHub CLI retornou JSON inválido para a CI do Pull Request") from error
+        return self._parse_snapshot(payload)
+
+    @classmethod
+    def _parse_snapshot(cls, payload: Any) -> PullRequestCiSnapshot:
+        if not isinstance(payload, dict):
+            raise GitHubCiError("Resposta da CI inválida: objeto JSON esperado")
+        head_sha = payload.get("headRefOid")
+        if not isinstance(head_sha, str) or not re.fullmatch(
+            r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", head_sha
+        ):
+            raise GitHubCiError("Resposta da CI inválida: campo 'headRefOid' deve ser um SHA válido")
+        raw_checks = payload.get("statusCheckRollup")
+        if raw_checks is None:
+            raw_checks = []
+        if not isinstance(raw_checks, list):
+            raise GitHubCiError("Resposta da CI inválida: campo 'statusCheckRollup' deve ser uma lista")
+        return PullRequestCiSnapshot(head_sha, tuple(cls._parse_check(check) for check in raw_checks))
+
+    @staticmethod
+    def _parse_check(payload: Any) -> StatusCheck:
+        if not isinstance(payload, dict):
+            raise GitHubCiError("Resposta da CI inválida: cada check deve ser um objeto")
+        name = payload.get("name", payload.get("context"))
+        status = payload.get("status")
+        conclusion = payload.get("conclusion")
+        details_url = payload.get("detailsUrl")
+        if not isinstance(name, str) or not name:
+            raise GitHubCiError("Resposta da CI inválida: check sem nome")
+        if not isinstance(status, str) or not status:
+            raise GitHubCiError("Resposta da CI inválida: check sem status")
+        if conclusion is not None and not isinstance(conclusion, str):
+            raise GitHubCiError("Resposta da CI inválida: conclusão do check deve ser texto ou nula")
+        if details_url is not None and not isinstance(details_url, str):
+            raise GitHubCiError("Resposta da CI inválida: URL de detalhes do check deve ser texto ou nula")
+        return StatusCheck(name, status, conclusion, details_url)
 
 
 class GitHubProjectAdapter:

@@ -76,6 +76,16 @@ def _show_run_result(result: RunResult) -> None:
     typer.echo(f"Remote: {result.remote_name}")
     typer.echo(f"Pull Request: #{result.pull_request_number} {result.pull_request_url}")
     typer.echo(f"Base do Pull Request: {result.pull_request_base}")
+    if result.ci_status is not None:
+        typer.echo(f"HEAD validado do Pull Request: {result.pull_request_head_sha}")
+        typer.echo(f"CI: {result.ci_status}")
+        typer.echo(
+            "Checks obrigatórios observados: "
+            + ", ".join(
+                f"{check.name} ({check.status}/{check.conclusion or 'sem conclusão'})"
+                for check in result.ci_checks
+            )
+        )
 
 
 def main() -> None:

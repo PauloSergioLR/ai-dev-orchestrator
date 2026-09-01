@@ -47,6 +47,27 @@ class ExecutionConfig(BaseModel):
     auto_merge: StrictBool
 
 
+class CiConfig(BaseModel):
+    """Política local para aguardar os checks obrigatórios do Pull Request."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    required_checks: tuple[str, ...] = ("test",)
+    poll_interval_seconds: float = Field(default=5, gt=0)
+    timeout_seconds: float = Field(default=900, gt=0)
+
+    @field_validator("required_checks")
+    @classmethod
+    def required_checks_must_be_unambiguous(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value:
+            raise ValueError("deve conter ao menos um check obrigatório")
+        if any(not name for name in value):
+            raise ValueError("não pode conter nomes vazios")
+        if len(set(value)) != len(value):
+            raise ValueError("não pode conter checks duplicados")
+        return value
+
+
 class WorkspaceConfig(BaseModel):
     """Locais e referência usados para preparar um worktree."""
 
@@ -102,6 +123,7 @@ class OrchestratorConfig(BaseSettings):
     github: GitHubConfig
     execution: ExecutionConfig
     workspace: WorkspaceConfig
+    ci: CiConfig = Field(default_factory=CiConfig)
 
     @classmethod
     def settings_customise_sources(

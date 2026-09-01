@@ -163,6 +163,22 @@ def test_environment_overrides_publication_defaults(tmp_path: Path, monkeypatch:
     assert (config.workspace.remote_name, config.github.pull_request_base, config.github.ai_review_status) == ("upstream", "release", "Revisão IA")
 
 
+def test_ci_defaults_and_environment_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ORCH_CI__REQUIRED_CHECKS", '["unit", "integration"]')
+    monkeypatch.setenv("ORCH_CI__POLL_INTERVAL_SECONDS", "2")
+    config = load_config(write_config(tmp_path / "config.toml", valid_toml(tmp_path)))
+    assert config.ci.required_checks == ("unit", "integration")
+    assert config.ci.poll_interval_seconds == 2
+    assert config.ci.timeout_seconds == 900
+
+
+@pytest.mark.parametrize("ci", ["required_checks = []", "poll_interval_seconds = 0", "timeout_seconds = -1"])
+def test_rejects_invalid_ci_configuration(tmp_path: Path, ci: str) -> None:
+    content = valid_toml(tmp_path) + f"\n[ci]\n{ci}\n"
+    with pytest.raises(ConfigurationError, match="ci"):
+        load_config(write_config(tmp_path / "config.toml", content))
+
+
 def test_environment_variables_have_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ORCH_GITHUB__REPOSITORY", "environment-repository")
 

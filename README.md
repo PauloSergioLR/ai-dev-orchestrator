@@ -21,8 +21,10 @@ orch run --issue <numero> --branch <nome-da-branch>
 ```
 
 O comando lê a Issue explícita, valida seu item em `Ready`, prepara um worktree,
-move somente o Status para `In Progress` e executa o Codex. Nesta etapa, não
-cria commit, push, Pull Request, review ou merge.
+executa o Codex, valida localmente, cria commit, faz push, abre o Pull Request e
+move o item para `AI Review`. Em seguida, aguarda a CI do HEAD exato do PR: todos
+os checks obrigatórios precisam terminar com `SUCCESS`. A CI verde deixa o PR
+pronto para uma futura etapa de review; esta versão não executa reviewer ou merge.
 
 ## Configuração
 
