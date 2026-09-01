@@ -42,10 +42,11 @@ configuração atual apenas registra esse valor; ela não executa merge automát
 Campos fora desses três grupos ou com nomes incorretos são rejeitados, para que
 erros de digitação não passem despercebidos.
 
-Em `[workspace]`, `repository_path` é a raiz explícita do repositório de origem,
-`worktrees_dir` é a raiz explícita dos worktrees e `base_ref` é a referência Git
-usada sem `fetch` ou `pull` automático. Em `[github]`, `in_progress_status`
-tem como padrão `In Progress`.
+Em `[workspace]`, `repository_path` é a raiz explícita e absoluta do repositório
+de origem, `worktrees_dir` é a raiz explícita e absoluta dos worktrees e
+`base_ref` é a referência Git usada sem `fetch` ou `pull` automático. Paths
+relativos são rejeitados para que a execução não dependa do diretório atual. Em
+`[github]`, `in_progress_status` tem como padrão `In Progress`.
 
 ## Variáveis de ambiente
 

@@ -20,10 +20,10 @@ from ai_dev_orchestrator.services.pipeline import (
 )
 
 
-def config(tmp_path: Path) -> OrchestratorConfig:
+def config(tmp_path: Path, in_progress_status: str = "In Progress") -> OrchestratorConfig:
     return OrchestratorConfig(
         github={"owner": "acme", "repository": "repo", "project_number": 1,
-                "ready_status": "Ready", "in_progress_status": "In Progress"},
+                "ready_status": "Ready", "in_progress_status": in_progress_status},
         workspace={"repository_path": str(tmp_path / "repo"),
                    "worktrees_dir": str(tmp_path / "worktrees"), "base_ref": "origin/main"},
         execution={"max_attempts": 1, "max_parallel_runs": 1, "auto_merge": False},
@@ -154,6 +154,19 @@ def test_codex_failure_preserves_worktree_without_cleanup(tmp_path: Path) -> Non
         service.run(17, "feat/pipeline")
 
     assert len(worktree.calls) == len(status.calls) == len(codex.calls) == 1
+
+
+def test_partial_failure_mentions_the_configured_status(tmp_path: Path) -> None:
+    status, worktree, codex = FakeStatusWriter(), FakeWorktreeCreator(), FakeCodex(
+        error=RuntimeError("Codex falhou")
+    )
+    service = RunPipeline(
+        config(tmp_path, "Em execução"), FakeIssueReader(), FakeProjectReader((item(),)),
+        status, worktree, codex,
+    )
+
+    with pytest.raises(RunPipelineError, match="Em execução"):
+        service.run(17, "feat/pipeline")
 
 
 @pytest.mark.parametrize("branch", ["../escape", "feature/../escape", "/absolute", "C:\\absolute", "feature//name"])

@@ -44,6 +44,16 @@ def test_loads_a_valid_toml(tmp_path: Path) -> None:
     assert config.execution.auto_merge is False
 
 
+def test_accepts_absolute_workspace_paths(tmp_path: Path) -> None:
+    content = VALID_TOML.replace("C:/repos/orchestrator", (tmp_path / "repository").as_posix())
+    content = content.replace("C:/repos/worktrees", (tmp_path / "worktrees").as_posix())
+
+    config = load_config(write_config(tmp_path / "config.toml", content))
+
+    assert config.workspace.repository_path.is_absolute()
+    assert config.workspace.worktrees_dir.is_absolute()
+
+
 def test_allows_valid_direct_instantiation() -> None:
     config = OrchestratorConfig(
         github={
@@ -139,6 +149,18 @@ def test_validation_error_identifies_invalid_field(tmp_path: Path) -> None:
     assert isinstance(error.value.__cause__, ValidationError)
 
 
+@pytest.mark.parametrize("field", ["repository_path", "worktrees_dir"])
+def test_rejects_relative_workspace_path_identifying_the_field(
+    tmp_path: Path, field: str
+) -> None:
+    content = VALID_TOML.replace(f'{field} = "C:/repos/{"orchestrator" if field == "repository_path" else "worktrees"}"', f'{field} = "relative/{field}"')
+
+    with pytest.raises(ConfigurationError, match=f"workspace.{field}") as error:
+        load_config(write_config(tmp_path / "config.toml", content))
+
+    assert "caminho absoluto" in str(error.value)
+
+
 def test_rejects_unknown_fields(tmp_path: Path) -> None:
     content = VALID_TOML.replace('owner = "acme"', 'owner = "acme"\nunexpected = true')
 
@@ -166,3 +188,17 @@ def test_environment_variables_have_precedence(tmp_path: Path, monkeypatch: pyte
     config = load_config(write_config(tmp_path / "config.toml"))
 
     assert config.github.repository == "environment-repository"
+
+
+def test_environment_variables_override_absolute_workspace_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repository-from-environment"
+    worktrees = tmp_path / "worktrees-from-environment"
+    monkeypatch.setenv("ORCH_WORKSPACE__REPOSITORY_PATH", str(repository))
+    monkeypatch.setenv("ORCH_WORKSPACE__WORKTREES_DIR", str(worktrees))
+
+    config = load_config(write_config(tmp_path / "config.toml"))
+
+    assert config.workspace.repository_path == repository
+    assert config.workspace.worktrees_dir == worktrees

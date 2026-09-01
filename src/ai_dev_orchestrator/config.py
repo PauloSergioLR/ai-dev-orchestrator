@@ -6,7 +6,7 @@ from pathlib import Path
 import tomllib
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, field_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 
@@ -53,6 +53,14 @@ class WorkspaceConfig(BaseModel):
     repository_path: Path
     worktrees_dir: Path
     base_ref: str = Field(min_length=1)
+
+    @field_validator("repository_path", "worktrees_dir")
+    @classmethod
+    def paths_must_be_absolute(cls, value: Path) -> Path:
+        """Recusa paths relativos para não depender do cwd do processo."""
+        if not value.is_absolute():
+            raise ValueError("deve ser um caminho absoluto")
+        return value
 
 
 class _EnvironmentSettingsSource(PydanticBaseSettingsSource):

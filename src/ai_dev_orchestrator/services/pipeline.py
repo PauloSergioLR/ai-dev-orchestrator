@@ -142,13 +142,15 @@ class RunPipeline:
             self.status_writer.set_status(item.id, self.config.github.in_progress_status)
         except Exception as error:
             raise RunPipelineError(
-                "Falha ao alterar o Status para In Progress; worktree e branch foram preservados em "
+                f"Falha ao alterar o Status para '{self.config.github.in_progress_status}'; "
+                "worktree e branch foram preservados em "
                 f"{worktree.path}: {error}") from error
         try:
             execution = self.codex_executor.execute(worktree.path, build_initial_prompt(issue))
         except Exception as error:
             raise RunPipelineError(
-                "Falha ao executar o Codex; o Status está em In Progress e o worktree foi preservado em "
+                f"Falha ao executar o Codex; o Status está em '{self.config.github.in_progress_status}' "
+                "e o worktree foi preservado em "
                 f"{worktree.path}: {error}") from error
         return RunResult(issue.number, item.id, worktree.branch, worktree.path, worktree.base_ref,
                          execution.session_id, execution.final_message,
