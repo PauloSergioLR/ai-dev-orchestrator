@@ -41,9 +41,11 @@ def successful_results() -> dict[tuple[str, ...], CommandResult]:
 
 
 def write_valid_config(path: Path) -> Path:
+    repository = (path.parent / "repository").as_posix()
+    worktrees = (path.parent / "worktrees").as_posix()
     path.write_text(
         "[github]\nowner = 'a'\nrepository = 'b'\nproject_number = 1\nready_status = 'Ready'\n"
-        "[workspace]\nrepository_path = 'C:/repos/a'\nworktrees_dir = 'C:/worktrees'\nbase_ref = 'main'\n"
+        f"[workspace]\nrepository_path = '{repository}'\nworktrees_dir = '{worktrees}'\nbase_ref = 'main'\n"
         "[execution]\nmax_attempts = 1\nmax_parallel_runs = 1\nauto_merge = false\n",
         encoding="utf-8",
     )
