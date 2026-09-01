@@ -10,6 +10,9 @@ from ai_dev_orchestrator.domain.issue import Issue
 from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner
 
 
+GITHUB_ISSUE_TIMEOUT_SECONDS = 20
+
+
 class GitHubIssueError(Exception):
     """Indica que uma issue não pôde ser carregada do GitHub."""
 
@@ -30,7 +33,11 @@ class GitHubIssueAdapter:
         runner: ProcessRunner | None = None,
     ) -> None:
         self.config = config.github if isinstance(config, OrchestratorConfig) else config
-        self.runner = runner or CommandRunner()
+        self.runner = (
+            runner
+            if runner is not None
+            else CommandRunner(timeout=GITHUB_ISSUE_TIMEOUT_SECONDS)
+        )
 
     def get_issue(self, number: int) -> Issue:
         """Carrega uma issue pelo número usando o GitHub CLI autenticado."""

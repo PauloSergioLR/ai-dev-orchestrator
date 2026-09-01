@@ -8,7 +8,7 @@ import pytest
 
 from ai_dev_orchestrator.adapters.github import GitHubIssueAdapter, GitHubIssueError
 from ai_dev_orchestrator.config import GitHubConfig
-from ai_dev_orchestrator.infrastructure.process import CommandResult
+from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner
 
 
 @dataclass
@@ -55,6 +55,15 @@ def test_reads_and_converts_issue_from_configured_repository() -> None:
         "number,title,body,state,url,labels,assignees",
     ]
     assert isinstance(runner.arguments, list)
+
+
+def test_uses_twenty_second_timeout_only_for_default_runner() -> None:
+    adapter = GitHubIssueAdapter(github_config())
+    custom_runner = FakeRunner(CommandResult(0, valid_payload()))
+
+    assert isinstance(adapter.runner, CommandRunner)
+    assert adapter.runner.timeout == 20
+    assert GitHubIssueAdapter(github_config(), custom_runner).runner is custom_runner
 
 
 def test_normalizes_missing_body_to_empty_string() -> None:

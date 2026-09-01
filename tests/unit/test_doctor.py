@@ -12,10 +12,9 @@ import pytest
 from typer.testing import CliRunner
 
 from ai_dev_orchestrator.cli import app
+from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner
 from ai_dev_orchestrator.services.doctor import (
     CheckStatus,
-    CommandResult,
-    CommandRunner,
     DoctorCheck,
     DoctorService,
     has_errors,
