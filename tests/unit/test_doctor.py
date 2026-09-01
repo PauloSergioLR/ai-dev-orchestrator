@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 import shutil
 import subprocess
@@ -72,7 +73,7 @@ def test_command_runner_handles_missing_executable(monkeypatch: pytest.MonkeyPat
 
 
 def test_command_runner_handles_failed_process(monkeypatch: pytest.MonkeyPatch) -> None:
-    completed = subprocess.CompletedProcess(["tool"], 2, "", "falhou")
+    completed = subprocess.CompletedProcess(["tool"], 2, b"", b"falhou")
     monkeypatch.setattr(shutil, "which", lambda command: command)
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: completed)
 
@@ -85,7 +86,9 @@ def test_command_runner_handles_failed_process(monkeypatch: pytest.MonkeyPatch) 
 def test_command_runner_handles_utf8_output_independently_of_system_locale(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    completed = subprocess.CompletedProcess(["tool"], 0, "emoji: 😀", "漢字")
+    completed = subprocess.CompletedProcess(
+        ["tool"], 0, "emoji: 😀".encode(), "漢字".encode()
+    )
     monkeypatch.setattr(shutil, "which", lambda command: command)
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: completed)
 
@@ -99,8 +102,8 @@ def test_command_runner_handles_utf8_output_independently_of_system_locale(
 def test_command_runner_normalizes_utf8_decoding_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def run(*args: object, **kwargs: object) -> None:
-        raise UnicodeDecodeError("utf-8", b"\x80", 0, 1, "invalid start byte")
+    def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(args[0], 0, b"\x80", b"")
 
     monkeypatch.setattr(shutil, "which", lambda command: command)
     monkeypatch.setattr(subprocess, "run", run)
@@ -130,29 +133,101 @@ def test_command_runner_handles_timeout(monkeypatch: pytest.MonkeyPatch) -> None
 def test_command_runner_uses_safe_subprocess_options(monkeypatch: pytest.MonkeyPatch) -> None:
     received: dict[str, object] = {}
 
-    def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+    def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         received.update(kwargs)
-        return subprocess.CompletedProcess(args[0], 0, "", "")
+        return subprocess.CompletedProcess(args[0], 0, b"", b"")
 
     monkeypatch.setattr(shutil, "which", lambda command: command)
     monkeypatch.setattr(subprocess, "run", run)
-    CommandRunner(timeout=7).run(["tool", "--version"])
+    CommandRunner(timeout=7).run(["tool", "--version"], input_text=None)
 
     assert received == {
         "capture_output": True,
-        "text": True,
-        "encoding": "utf-8",
-        "errors": "strict",
         "timeout": 7,
         "shell": False,
         "check": False,
     }
 
 
+def test_command_runner_forwards_textual_stdin_without_changing_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    received: dict[str, object] = {}
+    arguments = ["tool", "exec", "-"]
+
+    def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        received["arguments"] = args[0]
+        received.update(kwargs)
+        return subprocess.CompletedProcess(args[0], 0, b"stdout", b"stderr")
+
+    monkeypatch.setattr(shutil, "which", lambda command: r"C:\\tools\\tool.exe")
+    monkeypatch.setattr(subprocess, "run", run)
+
+    result = CommandRunner(timeout=7).run(arguments, cwd=tmp_path, input_text="texto")
+
+    assert result.succeeded
+    assert result.stdout == "stdout"
+    assert result.stderr == "stderr"
+    assert arguments == ["tool", "exec", "-"]
+    assert received["arguments"] == [r"C:\\tools\\tool.exe", "exec", "-"]
+    assert received["input"] == b"texto"
+    assert "text" not in received
+    assert "encoding" not in received
+    assert "errors" not in received
+    assert received["shell"] is False
+    assert received["timeout"] == 7
+    assert received["capture_output"] is True
+    assert received["cwd"] == tmp_path
+
+
+def test_command_runner_preserves_unicode_stdin_bytes_without_newline_translation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = ("á漢😀" * 100_000) + "\n"
+    expected_bytes = payload.encode("utf-8", errors="strict")
+    received: dict[str, object] = {}
+
+    def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        received.update(kwargs)
+        return subprocess.CompletedProcess(args[0], 0, kwargs["input"], b"")
+
+    monkeypatch.setattr(shutil, "which", lambda command: command)
+    monkeypatch.setattr(subprocess, "run", run)
+
+    result = CommandRunner().run(["tool", "exec", "-"], input_text=payload)
+
+    assert received["input"] == expected_bytes
+    assert len(received["input"]) == len(expected_bytes)
+    assert hashlib.sha256(received["input"]).digest() == hashlib.sha256(expected_bytes).digest()
+    assert received["input"].count(b"\n") == 1
+    assert b"\r\n" not in received["input"]
+    assert result.stdout == payload
+    assert len(result.stdout) == len(payload)
+    assert hashlib.sha256(result.stdout.encode("utf-8", errors="strict")).digest() == hashlib.sha256(expected_bytes).digest()
+
+
+def test_command_runner_normalizes_utf8_input_encoding_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def run(*args: object, **kwargs: object) -> None:
+        raise UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed")
+
+    monkeypatch.setattr(shutil, "which", lambda command: command)
+    monkeypatch.setattr(subprocess, "run", run)
+
+    result = CommandRunner().run(["tool"], input_text="\ud800")
+
+    assert result.returncode is None
+    assert result.error is not None
+    assert "codificar entrada textual" in result.error
+    assert "UTF-8" in result.error
+
+
 def test_command_runner_forwards_explicit_cwd(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     received: dict[str, object] = {}
     monkeypatch.setattr(shutil, "which", lambda command: command)
-    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: (received.update(kwargs), subprocess.CompletedProcess(args[0], 0, "", ""))[1])
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: (received.update(kwargs), subprocess.CompletedProcess(args[0], 0, b"", b""))[1])
     CommandRunner().run(["tool"], cwd=tmp_path)
     assert received["cwd"] == tmp_path
 
@@ -171,10 +246,10 @@ def test_command_runner_resolves_path_executable_without_changing_arguments(
 
     monkeypatch.setattr(shutil, "which", which)
 
-    def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+    def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         received["arguments"] = args[0]
         received.update(kwargs)
-        return subprocess.CompletedProcess(args[0], 0, "saída", "aviso")
+        return subprocess.CompletedProcess(args[0], 0, "saída".encode(), "aviso".encode())
 
     monkeypatch.setattr(subprocess, "run", run)
 
@@ -189,7 +264,7 @@ def test_command_runner_resolves_path_executable_without_changing_arguments(
     assert received["cwd"] == tmp_path
     assert received["timeout"] == 9
     assert received["capture_output"] is True
-    assert received["text"] is True
+    assert "text" not in received
     assert received["shell"] is False
 
 

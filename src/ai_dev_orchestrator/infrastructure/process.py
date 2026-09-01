@@ -33,7 +33,12 @@ class CommandRunner:
     def __init__(self, timeout: float = COMMAND_TIMEOUT_SECONDS) -> None:
         self.timeout = timeout
 
-    def run(self, arguments: Sequence[str], cwd: str | Path | None = None) -> CommandResult:
+    def run(
+        self,
+        arguments: Sequence[str],
+        cwd: str | Path | None = None,
+        input_text: str | None = None,
+    ) -> CommandResult:
         """Executa argumentos de processo e normaliza falhas esperadas."""
         command = list(arguments)
         command_name = command[0]
@@ -45,16 +50,27 @@ class CommandRunner:
             )
         command[0] = executable
         try:
+            input_bytes = (
+                input_text.encode("utf-8", errors="strict")
+                if input_text is not None
+                else None
+            )
+        except UnicodeEncodeError as error:
+            return CommandResult(
+                returncode=None,
+                error=f"Falha ao codificar entrada textual como UTF-8: {error}",
+            )
+        try:
             options = {
                 "capture_output": True,
-                "text": True,
-                "encoding": "utf-8",
-                "errors": "strict",
                 "timeout": self.timeout,
-                "shell": False, "check": False,
+                "shell": False,
+                "check": False,
             }
             if cwd is not None:
                 options["cwd"] = cwd
+            if input_bytes is not None:
+                options["input"] = input_bytes
             completed = subprocess.run(command, **options)
         except FileNotFoundError:
             return CommandResult(
@@ -66,16 +82,20 @@ class CommandRunner:
                 returncode=None,
                 error=f"Comando excedeu o timeout de {self.timeout:g}s",
             )
+        except OSError as error:
+            return CommandResult(returncode=None, error=str(error))
+
+        try:
+            stdout = completed.stdout.decode("utf-8", errors="strict")
+            stderr = completed.stderr.decode("utf-8", errors="strict")
         except UnicodeDecodeError as error:
             return CommandResult(
                 returncode=None,
                 error=f"Falha ao decodificar saída do comando como UTF-8: {error}",
             )
-        except OSError as error:
-            return CommandResult(returncode=None, error=str(error))
 
         return CommandResult(
             returncode=completed.returncode,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
+            stdout=stdout,
+            stderr=stderr,
         )

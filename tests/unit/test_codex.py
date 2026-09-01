@@ -19,9 +19,11 @@ from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRun
 class FakeRunner:
     result: CommandResult
     arguments: list[str] = field(default_factory=list)
+    input_text: str | None = None
 
-    def run(self, arguments: list[str]) -> CommandResult:
+    def run(self, arguments: list[str], input_text: str | None = None) -> CommandResult:
         self.arguments = arguments
+        self.input_text = input_text
         return self.result
 
 
@@ -51,9 +53,9 @@ def test_executes_headless_in_explicit_worktree_and_captures_session(tmp_path: P
     assert execution.stdout == jsonl()
     assert execution.stderr == "diagnóstico"
     assert execution.succeeded is True
-    assert runner.arguments == [
-        "codex", "exec", "-C", str(worktree.resolve()), "--json", prompt
-    ]
+    assert runner.arguments == ["codex", "exec", "-C", str(worktree.resolve()), "--json", "-"]
+    assert runner.input_text == prompt
+    assert prompt not in runner.arguments
     assert "--last" not in runner.arguments
 
 
@@ -67,10 +69,25 @@ def test_resumes_explicit_session_in_explicit_worktree(tmp_path: Path) -> None:
     assert execution.session_id == "thread-123"
     assert execution.final_message == "Correção concluída"
     assert runner.arguments == [
-        "codex", "exec", "-C", str(worktree.resolve()), "resume", "thread-123",
-        "Aplique a correção", "--json",
+        "codex", "exec", "-C", str(worktree.resolve()), "--json", "resume", "thread-123", "-",
     ]
+    assert runner.input_text == "Aplique a correção"
+    assert runner.input_text not in runner.arguments
     assert "--last" not in runner.arguments
+
+
+def test_sends_large_prompt_only_through_stdin_without_truncation(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    prompt = "instrução extensa\n" + ("x" * 100_000)
+    runner = FakeRunner(CommandResult(0, jsonl()))
+
+    CodexAdapter(runner).execute(worktree, prompt)
+
+    assert runner.input_text == prompt
+    assert len(runner.input_text) > 100_000
+    assert prompt not in runner.arguments
+    assert runner.arguments == ["codex", "exec", "-C", str(worktree.resolve()), "--json", "-"]
 
 
 def test_resume_accepts_jsonl_without_repeated_thread_event(tmp_path: Path) -> None:
