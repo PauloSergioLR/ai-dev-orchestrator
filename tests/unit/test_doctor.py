@@ -113,6 +113,13 @@ def test_command_runner_uses_safe_subprocess_options(monkeypatch: pytest.MonkeyP
     }
 
 
+def test_command_runner_forwards_explicit_cwd(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    received: dict[str, object] = {}
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: (received.update(kwargs), subprocess.CompletedProcess(args[0], 0, "", ""))[1])
+    CommandRunner().run(["tool"], cwd=tmp_path)
+    assert received["cwd"] == tmp_path
+
+
 def test_reports_incompatible_python(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "version_info", SimpleNamespace(major=3, minor=12, micro=9))
 

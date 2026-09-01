@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
+import re
 from typing import Any, Protocol, Sequence
 
 from ai_dev_orchestrator.config import GitHubConfig, OrchestratorConfig
@@ -14,11 +16,13 @@ from ai_dev_orchestrator.domain.project import (
     ProjectStatusOption,
 )
 from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner
+from ai_dev_orchestrator.services.validation import GateResult
 
 
 GITHUB_ISSUE_TIMEOUT_SECONDS = 20
 GITHUB_PROJECT_TIMEOUT_SECONDS = 20
 GITHUB_PROJECT_ITEM_LIMIT = 1000
+GITHUB_PULL_REQUEST_TIMEOUT_SECONDS = 30
 
 
 class GitHubIssueError(Exception):
@@ -128,6 +132,92 @@ class GitHubIssueAdapter:
                 )
             names.append(value[name_field])
         return tuple(names)
+
+
+class GitHubPullRequestError(Exception):
+    """Indica que um Pull Request não pôde ser criado."""
+
+
+@dataclass(frozen=True)
+class PullRequest:
+    """Dados mínimos do Pull Request publicado."""
+
+    number: int
+    url: str
+    title: str
+    base: str
+    head: str
+
+
+def build_pull_request_body(issue: Issue, branch: str, gates: tuple[GateResult, ...]) -> str:
+    """Monta o texto determinístico do Pull Request sem usar saída do Codex."""
+    gates_text = "\n".join(f"- {gate.name}: {'aprovado' if gate.succeeded else 'reprovado'}" for gate in gates)
+    return (
+        "Pull Request criado automaticamente pelo AI Dev Orchestrator.\n\n"
+        f"Issue: #{issue.number}\n"
+        f"Branch: `{branch}`\n"
+        "Implementação produzida pelo Codex.\n\n"
+        "Gates locais executados:\n"
+        f"{gates_text}\n\n"
+        f"Closes #{issue.number}"
+    )
+
+
+class GitHubPullRequestAdapter:
+    """Cria Pull Requests por GitHub CLI com argumentos seguros."""
+
+    def __init__(self, config: GitHubConfig | OrchestratorConfig, runner: ProcessRunner | None = None) -> None:
+        self.config = config.github if isinstance(config, OrchestratorConfig) else config
+        self.runner = runner or CommandRunner(timeout=GITHUB_PULL_REQUEST_TIMEOUT_SECONDS)
+
+    def create(self, issue: Issue, branch: str, gates: tuple[GateResult, ...]) -> PullRequest:
+        arguments = [
+            "gh", "pr", "create", "--repo", self.config.repository_full_name,
+            "--base", self.config.pull_request_base, "--head", branch,
+            "--title", issue.title, "--body", build_pull_request_body(issue, branch, gates),
+        ]
+        result = self.runner.run(arguments)
+        if result.error:
+            raise GitHubPullRequestError(f"Não foi possível executar o GitHub CLI ao criar o Pull Request: {result.error}")
+        if not result.succeeded:
+            detail = result.stderr.strip() or result.stdout.strip()
+            message = f"GitHub CLI retornou código {result.returncode} ao criar o Pull Request"
+            raise GitHubPullRequestError(f"{message}: {detail}" if detail else message)
+        url, number = self._parse_created_url(result.stdout)
+        view = self.runner.run(["gh", "pr", "view", url, "--repo", self.config.repository_full_name,
+                                "--json", "title,baseRefName,headRefName"])
+        if view.error or not view.succeeded:
+            detail = view.error or view.stderr.strip() or view.stdout.strip()
+            raise GitHubPullRequestError(
+                f"Pull Request #{number} já criado em {url}, mas não foi possível consultar seus dados: {detail}"
+            )
+        try:
+            payload = json.loads(view.stdout)
+            return PullRequest(number, url, self._required_string(payload, "title"),
+                               self._required_string(payload, "baseRefName"), self._required_string(payload, "headRefName"))
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+            raise GitHubPullRequestError(
+                f"Pull Request #{number} já criado em {url}, mas o GitHub CLI retornou JSON inválido"
+            ) from error
+
+    def _parse_created_url(self, stdout: str) -> tuple[str, int]:
+        lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+        if len(lines) != 1:
+            raise GitHubPullRequestError("GitHub CLI não retornou uma única URL válida para o Pull Request")
+        match = re.fullmatch(
+            rf"https://github\.com/{re.escape(self.config.owner)}/{re.escape(self.config.repository)}/pull/([1-9][0-9]*)",
+            lines[0],
+        )
+        if match is None:
+            raise GitHubPullRequestError("GitHub CLI não retornou uma URL válida para o Pull Request")
+        return lines[0], int(match.group(1))
+
+    @staticmethod
+    def _required_string(payload: Any, field: str) -> str:
+        value = payload[field]
+        if not isinstance(value, str):
+            raise ValueError(field)
+        return value
 
 
 class GitHubProjectAdapter:

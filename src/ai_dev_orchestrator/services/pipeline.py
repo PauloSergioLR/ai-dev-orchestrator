@@ -9,15 +9,19 @@ from typing import Protocol
 
 from ai_dev_orchestrator.adapters.codex import CodexAdapter, CodexExecution
 from ai_dev_orchestrator.adapters.git import GitWorktreeAdapter
+from ai_dev_orchestrator.adapters.publication import GitPublicationAdapter
 from ai_dev_orchestrator.adapters.github import (
     GitHubIssueAdapter,
     GitHubProjectAdapter,
     GitHubProjectStatusAdapter,
+    GitHubPullRequestAdapter,
+    PullRequest,
 )
 from ai_dev_orchestrator.config import OrchestratorConfig
 from ai_dev_orchestrator.domain.issue import Issue
 from ai_dev_orchestrator.domain.project import ProjectItem, is_eligible_for_execution
 from ai_dev_orchestrator.domain.worktree import GitWorktree
+from ai_dev_orchestrator.services.validation import GateResult, LocalValidationService
 
 
 class RunPipelineError(Exception):
@@ -46,6 +50,19 @@ class CodexExecutor(Protocol):
     def execute(self, worktree: str | Path, prompt: str) -> CodexExecution: ...
 
 
+class LocalValidator(Protocol):
+    def validate(self, worktree: str | Path) -> tuple[GateResult, ...]: ...
+
+
+class GitPublisher(Protocol):
+    def commit(self, worktree: str | Path, issue_number: int) -> str: ...
+    def push(self, worktree: str | Path, remote_name: str, branch: str) -> None: ...
+
+
+class PullRequestCreator(Protocol):
+    def create(self, issue: Issue, branch: str, gates: tuple[GateResult, ...]) -> PullRequest: ...
+
+
 @dataclass(frozen=True)
 class RunResult:
     """Resultado imutável da execução inicial de uma Issue."""
@@ -58,6 +75,12 @@ class RunResult:
     session_id: str
     final_message: str
     project_status: str
+    gates: tuple[GateResult, ...] = ()
+    commit_sha: str = ""
+    remote_name: str = ""
+    pull_request_number: int = 0
+    pull_request_url: str = ""
+    pull_request_base: str = ""
 
 
 def derive_worktree_path(worktrees_dir: Path, branch: str) -> Path:
@@ -102,6 +125,9 @@ class RunPipeline:
         status_writer: ProjectStatusWriter,
         worktree_creator: WorktreeCreator,
         codex_executor: CodexExecutor,
+        local_validator: LocalValidator | None = None,
+        git_publisher: GitPublisher | None = None,
+        pull_request_creator: PullRequestCreator | None = None,
     ) -> None:
         self.config = config
         self.issue_reader = issue_reader
@@ -109,11 +135,15 @@ class RunPipeline:
         self.status_writer = status_writer
         self.worktree_creator = worktree_creator
         self.codex_executor = codex_executor
+        self.local_validator = local_validator
+        self.git_publisher = git_publisher
+        self.pull_request_creator = pull_request_creator
 
     @classmethod
     def from_config(cls, config: OrchestratorConfig) -> RunPipeline:
         return cls(config, GitHubIssueAdapter(config), GitHubProjectAdapter(config),
-                   GitHubProjectStatusAdapter(config), GitWorktreeAdapter(), CodexAdapter())
+                   GitHubProjectStatusAdapter(config), GitWorktreeAdapter(), CodexAdapter(),
+                   LocalValidationService(), GitPublicationAdapter(), GitHubPullRequestAdapter(config))
 
     def run(self, issue_number: int, branch: str) -> RunResult:
         if issue_number <= 0:
@@ -152,9 +182,44 @@ class RunPipeline:
                 f"Falha ao executar o Codex; o Status está em '{self.config.github.in_progress_status}' "
                 "e o worktree foi preservado em "
                 f"{worktree.path}: {error}") from error
-        return RunResult(issue.number, item.id, worktree.branch, worktree.path, worktree.base_ref,
-                         execution.session_id, execution.final_message,
-                         self.config.github.in_progress_status)
+        if self.local_validator is None or self.git_publisher is None or self.pull_request_creator is None:
+            return RunResult(issue.number, item.id, worktree.branch, worktree.path, worktree.base_ref,
+                             execution.session_id, execution.final_message,
+                             self.config.github.in_progress_status)
+        try:
+            gates = self.local_validator.validate(worktree.path)
+        except Exception as error:
+            raise RunPipelineError(
+                f"Falha nos gates locais; o Status está em '{self.config.github.in_progress_status}' "
+                f"e o worktree foi preservado em {worktree.path}: {error}") from error
+        try:
+            commit_sha = self.git_publisher.commit(worktree.path, issue.number)
+        except Exception as error:
+            raise RunPipelineError(
+                f"Falha ao preparar ou criar o commit; worktree e staging foram preservados em "
+                f"{worktree.path}: {error}") from error
+        try:
+            self.git_publisher.push(worktree.path, self.config.workspace.remote_name, worktree.branch)
+        except Exception as error:
+            raise RunPipelineError(
+                f"Falha ao enviar a branch; o commit {commit_sha} foi preservado em {worktree.path}: {error}") from error
+        try:
+            pull_request = self.pull_request_creator.create(issue, worktree.branch, gates)
+        except Exception as error:
+            raise RunPipelineError(
+                f"Falha ao criar Pull Request; branch publicada e commit {commit_sha} foram preservados: {error}") from error
+        try:
+            self.status_writer.set_status(item.id, self.config.github.ai_review_status)
+        except Exception as error:
+            raise RunPipelineError(
+                f"Pull Request #{pull_request.number} já criado em {pull_request.url}, mas falhou ao alterar "
+                f"o Status para '{self.config.github.ai_review_status}': {error}") from error
+        return RunResult(
+            issue.number, item.id, worktree.branch, worktree.path, worktree.base_ref,
+            execution.session_id, execution.final_message, self.config.github.ai_review_status,
+            gates, commit_sha, self.config.workspace.remote_name, pull_request.number,
+            pull_request.url, pull_request.base,
+        )
 
     def _find_project_item(self, issue_number: int) -> ProjectItem:
         repository = self.config.github.repository_full_name
