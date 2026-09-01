@@ -35,7 +35,7 @@ def successful_results() -> dict[tuple[str, ...], CommandResult]:
         ("git", "--version"): CommandResult(0, "git version 2.50.0\n"),
         ("gh", "auth", "status"): CommandResult(0),
         ("codex", "--version"): CommandResult(0, "codex 1.0\n"),
-        ("gemini", "--version"): CommandResult(0, "gemini 1.0\n"),
+        ("agy", "--version"): CommandResult(0, "agy 1.0\n"),
         ("git", "rev-parse", "--is-inside-work-tree"): CommandResult(0, "true\n"),
         ("git", "remote"): CommandResult(0, "origin\n"),
     }

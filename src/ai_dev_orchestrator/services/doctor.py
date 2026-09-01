@@ -102,7 +102,7 @@ class DoctorService:
             self._check_command("Git", ["git", "--version"]),
             self._check_github_cli(),
             self._check_command("Codex CLI", ["codex", "--version"]),
-            self._check_command("Gemini CLI", ["gemini", "--version"]),
+            self._check_command("Antigravity CLI", ["agy", "--version"]),
             self._check_repository(),
             self._check_configuration(),
         ]
