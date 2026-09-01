@@ -4,7 +4,10 @@ import typer
 
 from ai_dev_orchestrator import __version__
 
-app = typer.Typer(help="Orquestrador local-first de desenvolvimento com IA.")
+app = typer.Typer(
+    help="Orquestrador local-first de desenvolvimento com IA.",
+    add_completion=False,
+)
 
 
 def _show_version(value: bool) -> None:
