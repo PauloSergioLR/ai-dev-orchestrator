@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 import subprocess
 from typing import Sequence
 
@@ -31,17 +32,16 @@ class CommandRunner:
     def __init__(self, timeout: float = COMMAND_TIMEOUT_SECONDS) -> None:
         self.timeout = timeout
 
-    def run(self, arguments: Sequence[str]) -> CommandResult:
+    def run(self, arguments: Sequence[str], cwd: str | Path | None = None) -> CommandResult:
         """Executa argumentos de processo e normaliza falhas esperadas."""
         try:
-            completed = subprocess.run(
-                list(arguments),
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-                shell=False,
-                check=False,
-            )
+            options = {
+                "capture_output": True, "text": True, "timeout": self.timeout,
+                "shell": False, "check": False,
+            }
+            if cwd is not None:
+                options["cwd"] = cwd
+            completed = subprocess.run(list(arguments), **options)
         except FileNotFoundError:
             return CommandResult(
                 returncode=None,

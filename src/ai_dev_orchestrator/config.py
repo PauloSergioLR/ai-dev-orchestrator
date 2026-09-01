@@ -27,6 +27,8 @@ class GitHubConfig(BaseModel):
     project_number: int = Field(gt=0)
     ready_status: str = Field(min_length=1)
     in_progress_status: str = Field(default="In Progress", min_length=1)
+    ai_review_status: str = Field(default="AI Review", min_length=1)
+    pull_request_base: str = Field(default="main", min_length=1)
     status_field_name: str = Field(default="Status", min_length=1)
 
     @property
@@ -53,6 +55,7 @@ class WorkspaceConfig(BaseModel):
     repository_path: Path
     worktrees_dir: Path
     base_ref: str = Field(min_length=1)
+    remote_name: str = Field(default="origin", min_length=1)
 
     @field_validator("repository_path", "worktrees_dir")
     @classmethod

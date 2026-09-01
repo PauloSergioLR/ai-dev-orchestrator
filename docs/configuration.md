@@ -20,11 +20,14 @@ project_number = 1
 ready_status = "Ready"
 in_progress_status = "In Progress"
 status_field_name = "Status"
+ai_review_status = "AI Review"
+pull_request_base = "main"
 
 [workspace]
 repository_path = "C:/caminho/para/repositorio"
 worktrees_dir = "C:/caminho/para/worktrees"
 base_ref = "main"
+remote_name = "origin"
 
 [execution]
 max_attempts = 2
@@ -59,9 +62,12 @@ ORCH_GITHUB__REPOSITORY
 ORCH_GITHUB__PROJECT_NUMBER
 ORCH_GITHUB__READY_STATUS
 ORCH_GITHUB__IN_PROGRESS_STATUS
+ORCH_GITHUB__AI_REVIEW_STATUS
+ORCH_GITHUB__PULL_REQUEST_BASE
 ORCH_WORKSPACE__REPOSITORY_PATH
 ORCH_WORKSPACE__WORKTREES_DIR
 ORCH_WORKSPACE__BASE_REF
+ORCH_WORKSPACE__REMOTE_NAME
 ORCH_EXECUTION__MAX_ATTEMPTS
 ORCH_EXECUTION__MAX_PARALLEL_RUNS
 ORCH_EXECUTION__AUTO_MERGE

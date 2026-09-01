@@ -71,6 +71,11 @@ def _show_run_result(result: RunResult) -> None:
     typer.echo(f"Status: {result.project_status}")
     typer.echo(f"Sessão Codex: {result.session_id}")
     typer.echo(f"Mensagem final: {result.final_message}")
+    typer.echo(f"Gates locais: {', '.join(gate.name for gate in result.gates)}")
+    typer.echo(f"Commit: {result.commit_sha}")
+    typer.echo(f"Remote: {result.remote_name}")
+    typer.echo(f"Pull Request: #{result.pull_request_number} {result.pull_request_url}")
+    typer.echo(f"Base do Pull Request: {result.pull_request_base}")
 
 
 def main() -> None:
