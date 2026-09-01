@@ -218,6 +218,38 @@ class GitHubPullRequestAdapter:
             raise GitHubPullRequestError("GitHub CLI não retornou uma URL válida para o Pull Request")
         return lines[0], int(match.group(1))
 
+    def get_review_data(self, pull_request_number: int) -> dict[str, Any]:
+        """Lê os dados de um único PR pelo CLI estruturado e seu patch real."""
+        view = self.runner.run([
+            "gh", "pr", "view", str(pull_request_number), "--repo", self.config.repository_full_name,
+            "--json", "number,url,baseRefName,headRefName,headRefOid,commits,files",
+        ])
+        if view.error or not view.succeeded:
+            detail = view.error or view.stderr.strip() or view.stdout.strip()
+            raise GitHubPullRequestError(f"Não foi possível ler Pull Request #{pull_request_number}: {detail}")
+        try:
+            payload = json.loads(view.stdout)
+        except json.JSONDecodeError as error:
+            raise GitHubPullRequestError("GitHub CLI retornou JSON inválido para o Pull Request") from error
+        if not isinstance(payload, dict) or payload.get("number") != pull_request_number:
+            raise GitHubPullRequestError("Resposta do Pull Request não corresponde ao número solicitado")
+        for field in ("commits", "files"):
+            if not isinstance(payload.get(field), list):
+                raise GitHubPullRequestError(f"Resposta do Pull Request inválida: campo '{field}'")
+        try:
+            payload["commits"] = [self._required_string(x, "oid") for x in payload["commits"]]
+            payload["files"] = [self._required_string(x, "path") for x in payload["files"]]
+        except (TypeError, ValueError) as error:
+            raise GitHubPullRequestError("Resposta do Pull Request contém commits ou arquivos inválidos") from error
+        diff = self.runner.run(["gh", "pr", "diff", str(pull_request_number), "--repo", self.config.repository_full_name])
+        if diff.error or not diff.succeeded:
+            detail = diff.error or diff.stderr.strip() or diff.stdout.strip()
+            raise GitHubPullRequestError(f"Não foi possível ler diff do Pull Request #{pull_request_number}: {detail}")
+        if not diff.stdout:
+            raise GitHubPullRequestError("Diff do Pull Request está vazio ou foi truncado externamente")
+        payload["diff"] = diff.stdout
+        return payload
+
     @staticmethod
     def _required_string(payload: Any, field: str) -> str:
         value = payload[field]

@@ -68,6 +68,33 @@ class CiConfig(BaseModel):
         return value
 
 
+class ReviewConfig(BaseModel):
+    """Política local do reviewer independente."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    provider: str = Field(default="antigravity", min_length=1)
+    timeout_seconds: float = Field(default=900, gt=0)
+    blocking_severities: tuple[str, ...] = ("CRITICAL", "HIGH", "MEDIUM")
+
+    @field_validator("provider")
+    @classmethod
+    def provider_must_be_supported(cls, value: str) -> str:
+        if value != "antigravity":
+            raise ValueError("provider deve ser 'antigravity'")
+        return value
+
+    @field_validator("blocking_severities")
+    @classmethod
+    def severities_must_be_valid(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        allowed = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
+        if not value or any(severity not in allowed for severity in value):
+            raise ValueError("deve conter severidades válidas e não pode ser vazio")
+        if len(set(value)) != len(value):
+            raise ValueError("não pode conter severidades duplicadas")
+        return value
+
+
 class WorkspaceConfig(BaseModel):
     """Locais e referência usados para preparar um worktree."""
 
@@ -124,6 +151,7 @@ class OrchestratorConfig(BaseSettings):
     execution: ExecutionConfig
     workspace: WorkspaceConfig
     ci: CiConfig = Field(default_factory=CiConfig)
+    review: ReviewConfig = Field(default_factory=ReviewConfig)
 
     @classmethod
     def settings_customise_sources(
