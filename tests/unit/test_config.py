@@ -19,6 +19,11 @@ repository = "orchestrator"
 project_number = 42
 ready_status = "Ready"
 
+[workspace]
+repository_path = "C:/repos/orchestrator"
+worktrees_dir = "C:/repos/worktrees"
+base_ref = "main"
+
 [execution]
 max_attempts = 2
 max_parallel_runs = 1
@@ -52,6 +57,11 @@ def test_allows_valid_direct_instantiation() -> None:
             "max_parallel_runs": 1,
             "auto_merge": False,
         },
+        workspace={
+            "repository_path": "C:/repos/orchestrator",
+            "worktrees_dir": "C:/repos/worktrees",
+            "base_ref": "main",
+        },
     )
 
     assert config.github.owner == "acme"
@@ -70,6 +80,11 @@ def test_rejects_extra_argument_in_direct_instantiation() -> None:
                 "max_attempts": 2,
                 "max_parallel_runs": 1,
                 "auto_merge": False,
+            },
+            workspace={
+                "repository_path": "C:/repos/orchestrator",
+                "worktrees_dir": "C:/repos/worktrees",
+                "base_ref": "main",
             },
             unexpected=True,
         )

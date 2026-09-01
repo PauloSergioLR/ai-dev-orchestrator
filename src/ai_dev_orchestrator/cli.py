@@ -3,7 +3,9 @@
 import typer
 
 from ai_dev_orchestrator import __version__
+from ai_dev_orchestrator.config import ConfigurationError, load_config
 from ai_dev_orchestrator.services.doctor import DoctorService, has_errors
+from ai_dev_orchestrator.services.pipeline import RunPipeline, RunPipelineError, RunResult
 
 app = typer.Typer(
     help="Orquestrador local-first de desenvolvimento com IA.",
@@ -41,6 +43,34 @@ def doctor() -> None:
 
     if has_errors(checks):
         raise typer.Exit(code=1)
+
+
+@app.command()
+def run(
+    issue: int = typer.Option(..., "--issue", min=1, help="Número positivo da Issue."),
+    branch: str = typer.Option(..., "--branch", help="Nome da nova branch."),
+) -> None:
+    """Prepara uma Issue elegível e inicia sua sessão Codex."""
+    if not branch.strip():
+        raise typer.BadParameter("--branch é obrigatória e não pode ser vazia", param_hint="--branch")
+    try:
+        result = RunPipeline.from_config(load_config()).run(issue, branch)
+    except (ConfigurationError, RunPipelineError) as error:
+        typer.echo(f"Erro: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    _show_run_result(result)
+
+
+def _show_run_result(result: RunResult) -> None:
+    """Exibe o resumo humano sem expor o JSONL do provider."""
+    typer.echo(f"Issue: #{result.issue_number}")
+    typer.echo(f"Item do Project: {result.project_item_id}")
+    typer.echo(f"Branch: {result.branch}")
+    typer.echo(f"Worktree: {result.worktree_path}")
+    typer.echo(f"Base: {result.base_ref}")
+    typer.echo(f"Status: {result.project_status}")
+    typer.echo(f"Sessão Codex: {result.session_id}")
+    typer.echo(f"Mensagem final: {result.final_message}")
 
 
 def main() -> None:

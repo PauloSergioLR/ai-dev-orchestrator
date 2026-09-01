@@ -3,7 +3,13 @@ owner = "seu-usuario"
 repository = "seu-repositorio"
 project_number = 1
 ready_status = "Ready"
+in_progress_status = "In Progress"
 status_field_name = "Status"
+
+[workspace]
+repository_path = "C:/caminho/para/repositorio"
+worktrees_dir = "C:/caminho/para/worktrees"
+base_ref = "main"
 
 [execution]
 max_attempts = 2
