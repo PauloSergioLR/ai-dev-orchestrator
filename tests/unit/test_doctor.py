@@ -82,6 +82,39 @@ def test_command_runner_handles_failed_process(monkeypatch: pytest.MonkeyPatch) 
     assert result.stderr == "falhou"
 
 
+def test_command_runner_handles_utf8_output_independently_of_system_locale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completed = subprocess.CompletedProcess(["tool"], 0, "emoji: 😀", "漢字")
+    monkeypatch.setattr(shutil, "which", lambda command: command)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: completed)
+
+    result = CommandRunner().run(["tool"])
+
+    assert result.succeeded
+    assert result.stdout == "emoji: 😀"
+    assert result.stderr == "漢字"
+
+
+def test_command_runner_normalizes_utf8_decoding_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def run(*args: object, **kwargs: object) -> None:
+        raise UnicodeDecodeError("utf-8", b"\x80", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(shutil, "which", lambda command: command)
+    monkeypatch.setattr(subprocess, "run", run)
+
+    result = CommandRunner().run(["tool"])
+
+    assert result.returncode is None
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert result.error is not None
+    assert "decodificar" in result.error
+    assert "UTF-8" in result.error
+
+
 def test_command_runner_handles_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     def timeout(*args: object, **kwargs: object) -> None:
         raise subprocess.TimeoutExpired(["tool"], 5)
@@ -108,6 +141,8 @@ def test_command_runner_uses_safe_subprocess_options(monkeypatch: pytest.MonkeyP
     assert received == {
         "capture_output": True,
         "text": True,
+        "encoding": "utf-8",
+        "errors": "strict",
         "timeout": 7,
         "shell": False,
         "check": False,

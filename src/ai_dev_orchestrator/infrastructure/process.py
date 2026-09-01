@@ -46,7 +46,11 @@ class CommandRunner:
         command[0] = executable
         try:
             options = {
-                "capture_output": True, "text": True, "timeout": self.timeout,
+                "capture_output": True,
+                "text": True,
+                "encoding": "utf-8",
+                "errors": "strict",
+                "timeout": self.timeout,
                 "shell": False, "check": False,
             }
             if cwd is not None:
@@ -61,6 +65,11 @@ class CommandRunner:
             return CommandResult(
                 returncode=None,
                 error=f"Comando excedeu o timeout de {self.timeout:g}s",
+            )
+        except UnicodeDecodeError as error:
+            return CommandResult(
+                returncode=None,
+                error=f"Falha ao decodificar saída do comando como UTF-8: {error}",
             )
         except OSError as error:
             return CommandResult(returncode=None, error=str(error))
