@@ -2,6 +2,17 @@
 
 Orquestrador local-first de desenvolvimento com IA para GitHub, Codex CLI e Gemini CLI.
 
+## Diagnóstico do ambiente
+
+Execute o diagnóstico dos pré-requisitos locais com:
+
+```powershell
+orch doctor
+```
+
+O comando apenas informa o estado de Python, CLIs, repositório Git e configuração.
+Ele não corrige problemas, instala ferramentas, altera autenticação ou envia prompts para IAs.
+
 ## Configuração
 
 Crie sua configuração local a partir do exemplo:
