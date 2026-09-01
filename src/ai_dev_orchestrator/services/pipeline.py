@@ -25,7 +25,7 @@ from ai_dev_orchestrator.domain.project import ProjectItem, is_eligible_for_exec
 from ai_dev_orchestrator.domain.worktree import GitWorktree
 from ai_dev_orchestrator.services.validation import GateResult, LocalValidationService
 from ai_dev_orchestrator.services.ci_gate import CiGate, PullRequestCiReader
-from ai_dev_orchestrator.services.review import ContextBuilder, PullRequestReviewReader, build_checklists, build_prompt, parse_review_plan, parse_structured_review
+from ai_dev_orchestrator.services.review import ContextBuilder, PullRequestReviewReader, REVIEW_PLAN_SCHEMA, STRUCTURED_REVIEW_SCHEMA, build_checklists, build_prompt, parse_review_plan, parse_structured_review
 from ai_dev_orchestrator.domain.review import StructuredReview
 from ai_dev_orchestrator.adapters.antigravity import AntigravityAdapter
 
@@ -91,6 +91,7 @@ class RunResult:
     ci_checks: tuple[StatusCheck, ...] = ()
     ci_status: CiStatus | None = None
     review: StructuredReview | None = None
+    blocking_severities: tuple[str, ...] = ()
 
 
 def derive_worktree_path(worktrees_dir: Path, branch: str) -> Path:
@@ -264,17 +265,17 @@ class RunPipeline:
                 issue, pull_request.number, ci_result.expected_head_sha, gates, ci_result)
             policy_path = Path(__file__).parents[3] / "prompts" / "gemini" / "review_policy.md"
             policy = policy_path.read_text(encoding="utf-8")
-            plan = parse_review_plan(self.reviewer.invoke(build_prompt(policy, dossier)))
+            plan = parse_review_plan(self.reviewer.invoke(build_prompt(policy, dossier), worktree.path, REVIEW_PLAN_SCHEMA))
             context_builder.ensure_head_is_current(pull_request.number, ci_result.expected_head_sha)
             review = parse_structured_review(
-                self.reviewer.invoke(build_prompt(policy, dossier, plan, build_checklists(dossier.changed_files))),
+                self.reviewer.invoke(build_prompt(policy, dossier, plan, build_checklists(dossier.changed_files)), worktree.path, STRUCTURED_REVIEW_SCHEMA),
                 ci_result.expected_head_sha, self.config.review.blocking_severities)
         except Exception as error:
             raise RunPipelineError(
                 f"Falha na revisão Gemini da Issue #{issue.number}, Pull Request #{pull_request.number} em {pull_request.url}; "
                 f"Status permanece em '{self.config.github.ai_review_status}', branch {worktree.branch}, commit {commit_sha} e worktree {worktree.path} foram preservados: {error}"
             ) from error
-        return RunResult(**{**base_result.__dict__, "review": review})
+        return RunResult(**{**base_result.__dict__, "review": review, "blocking_severities": self.config.review.blocking_severities})
 
     def _find_project_item(self, issue_number: int) -> ProjectItem:
         repository = self.config.github.repository_full_name

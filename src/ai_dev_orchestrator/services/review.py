@@ -17,6 +17,11 @@ class ReviewError(Exception):
     """A revisão não contém evidência estruturalmente segura."""
 
 
+_PLAN_FIELDS = ("risks", "invariants", "acceptance_evidence", "side_effects", "regressions", "tests", "security_risks", "architecture_points")
+REVIEW_PLAN_SCHEMA = {"type": "object", "additionalProperties": False, "required": list(_PLAN_FIELDS), "properties": {name: {"type": "array", "items": {"type": "string"}} for name in _PLAN_FIELDS}}
+STRUCTURED_REVIEW_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["verdict", "findings", "reviewed_head_sha", "summary"], "properties": {"verdict": {"enum": ["APPROVED", "REJECTED"]}, "findings": {"type": "array"}, "reviewed_head_sha": {"type": "string"}, "summary": {"type": "string"}}}
+
+
 class PullRequestReviewReader(Protocol):
     def get_review_data(self, pull_request_number: int) -> dict[str, Any]: ...
 
@@ -93,7 +98,7 @@ def _strings(value: Any, field: str) -> tuple[str, ...]:
 
 def parse_review_plan(output: str) -> ReviewPlan:
     data = _json_object(output, "planner")
-    fields = ("risks", "invariants", "acceptance_evidence", "side_effects", "regressions", "tests", "security_risks", "architecture_points")
+    fields = _PLAN_FIELDS
     if set(data) != set(fields):
         raise ReviewError("JSON do planner tem campos inesperados ou ausentes")
     return ReviewPlan(*(_strings(data[field], field) for field in fields))
@@ -109,7 +114,7 @@ def parse_structured_review(output: str, expected_sha: str, blocking: tuple[str,
         raise ReviewError("Verdict do reviewer é desconhecido") from error
     if data["reviewed_head_sha"] != expected_sha or not re.fullmatch(r"[0-9a-fA-F]{40,64}", expected_sha):
         raise ReviewError("SHA revisado diverge do HEAD esperado")
-    if not isinstance(data["summary"], str) or not isinstance(data["findings"], list):
+    if not isinstance(data["summary"], str) or not data["summary"].strip() or not isinstance(data["findings"], list):
         raise ReviewError("Resumo ou findings do reviewer são inválidos")
     findings: list[ReviewFinding] = []
     for item in data["findings"]:
@@ -119,7 +124,9 @@ def parse_structured_review(output: str, expected_sha: str, blocking: tuple[str,
             severity = FindingSeverity(item["severity"])
         except (TypeError, ValueError) as error:
             raise ReviewError("Severidade desconhecida") from error
-        if not all(isinstance(item[k], str) and item[k] for k in ("title", "description")) or (item.get("line") is not None and (isinstance(item["line"], bool) or not isinstance(item["line"], int) or item["line"] <= 0)):
+        if (not all(isinstance(item[k], str) and item[k] for k in ("title", "description"))
+                or any(item.get(k) is not None and (not isinstance(item[k], str) or not item[k]) for k in ("path", "criterion"))
+                or (item.get("line") is not None and (isinstance(item["line"], bool) or not isinstance(item["line"], int) or item["line"] <= 0))):
             raise ReviewError("Finding do reviewer é inválido")
         findings.append(ReviewFinding(severity, item["title"], item["description"], item.get("path"), item.get("line"), item.get("criterion")))
     if verdict is ReviewVerdict.APPROVED and any(f.severity.value in blocking for f in findings):

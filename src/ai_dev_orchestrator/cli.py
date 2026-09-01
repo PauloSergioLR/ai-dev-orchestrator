@@ -88,7 +88,7 @@ def _show_run_result(result: RunResult) -> None:
         )
     if result.review is not None:
         typer.echo(f"Review Gemini: {result.review.verdict}")
-        blocking = [finding for finding in result.review.findings if finding.severity.value in {"CRITICAL", "HIGH", "MEDIUM"}]
+        blocking = [finding for finding in result.review.findings if finding.severity.value in result.blocking_severities]
         typer.echo(f"Findings bloqueantes: {len(blocking)}")
         for finding in blocking:
             typer.echo(f"- {finding.severity}: {finding.title}")

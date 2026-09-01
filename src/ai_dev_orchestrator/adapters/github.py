@@ -247,6 +247,14 @@ class GitHubPullRequestAdapter:
             raise GitHubPullRequestError(f"Não foi possível ler diff do Pull Request #{pull_request_number}: {detail}")
         if not diff.stdout:
             raise GitHubPullRequestError("Diff do Pull Request está vazio ou foi truncado externamente")
+        expected_headers = {f"diff --git a/{path} b/{path}" for path in payload["files"]}
+        observed_headers = {
+            line for line in diff.stdout.splitlines() if line.startswith("diff --git a/")
+        }
+        if not expected_headers <= observed_headers:
+            raise GitHubPullRequestError(
+                "Diff do Pull Request não contém todos os arquivos declarados; revisão recusada"
+            )
         payload["diff"] = diff.stdout
         return payload
 
