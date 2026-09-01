@@ -15,13 +15,16 @@ from ai_dev_orchestrator.adapters.github import (
     GitHubProjectAdapter,
     GitHubProjectStatusAdapter,
     GitHubPullRequestAdapter,
+    GitHubCiAdapter,
     PullRequest,
 )
 from ai_dev_orchestrator.config import OrchestratorConfig
+from ai_dev_orchestrator.domain.ci import CiStatus, StatusCheck
 from ai_dev_orchestrator.domain.issue import Issue
 from ai_dev_orchestrator.domain.project import ProjectItem, is_eligible_for_execution
 from ai_dev_orchestrator.domain.worktree import GitWorktree
 from ai_dev_orchestrator.services.validation import GateResult, LocalValidationService
+from ai_dev_orchestrator.services.ci_gate import CiGate, PullRequestCiReader
 
 
 class RunPipelineError(Exception):
@@ -81,6 +84,9 @@ class RunResult:
     pull_request_number: int = 0
     pull_request_url: str = ""
     pull_request_base: str = ""
+    pull_request_head_sha: str = ""
+    ci_checks: tuple[StatusCheck, ...] = ()
+    ci_status: CiStatus | None = None
 
 
 def derive_worktree_path(worktrees_dir: Path, branch: str) -> Path:
@@ -128,6 +134,7 @@ class RunPipeline:
         local_validator: LocalValidator | None = None,
         git_publisher: GitPublisher | None = None,
         pull_request_creator: PullRequestCreator | None = None,
+        ci_reader: PullRequestCiReader | None = None,
     ) -> None:
         self.config = config
         self.issue_reader = issue_reader
@@ -138,12 +145,14 @@ class RunPipeline:
         self.local_validator = local_validator
         self.git_publisher = git_publisher
         self.pull_request_creator = pull_request_creator
+        self.ci_reader = ci_reader
 
     @classmethod
     def from_config(cls, config: OrchestratorConfig) -> RunPipeline:
         return cls(config, GitHubIssueAdapter(config), GitHubProjectAdapter(config),
                    GitHubProjectStatusAdapter(config), GitWorktreeAdapter(), CodexAdapter(),
-                   LocalValidationService(), GitPublicationAdapter(), GitHubPullRequestAdapter(config))
+                   LocalValidationService(), GitPublicationAdapter(), GitHubPullRequestAdapter(config),
+                   GitHubCiAdapter(config))
 
     def run(self, issue_number: int, branch: str) -> RunResult:
         if issue_number <= 0:
@@ -214,11 +223,29 @@ class RunPipeline:
             raise RunPipelineError(
                 f"Pull Request #{pull_request.number} já criado em {pull_request.url}, mas falhou ao alterar "
                 f"o Status para '{self.config.github.ai_review_status}': {error}") from error
+        if self.ci_reader is None:
+            return RunResult(
+                issue.number, item.id, worktree.branch, worktree.path, worktree.base_ref,
+                execution.session_id, execution.final_message, self.config.github.ai_review_status,
+                gates, commit_sha, self.config.workspace.remote_name, pull_request.number,
+                pull_request.url, pull_request.base,
+            )
+        try:
+            ci_result = CiGate(self.ci_reader, self.config.ci).wait(
+                pull_request.number, commit_sha
+            )
+        except Exception as error:
+            raise RunPipelineError(
+                f"Falha no gate de CI da Issue #{issue.number}, Pull Request #{pull_request.number} "
+                f"em {pull_request.url}; Status permanece em '{self.config.github.ai_review_status}', "
+                f"branch {worktree.branch}, commit {commit_sha} e worktree {worktree.path} foram preservados: {error}"
+            ) from error
         return RunResult(
             issue.number, item.id, worktree.branch, worktree.path, worktree.base_ref,
             execution.session_id, execution.final_message, self.config.github.ai_review_status,
             gates, commit_sha, self.config.workspace.remote_name, pull_request.number,
             pull_request.url, pull_request.base,
+            ci_result.expected_head_sha, ci_result.checks, ci_result.status,
         )
 
     def _find_project_item(self, issue_number: int) -> ProjectItem:

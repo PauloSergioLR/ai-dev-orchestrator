@@ -8,6 +8,7 @@ import pytest
 from ai_dev_orchestrator.adapters.codex import CodexExecution
 from ai_dev_orchestrator.adapters.github import PullRequest
 from ai_dev_orchestrator.config import OrchestratorConfig
+from ai_dev_orchestrator.domain.ci import PullRequestCiSnapshot, StatusCheck
 from ai_dev_orchestrator.domain.issue import Issue
 from ai_dev_orchestrator.domain.project import ProjectItem
 from ai_dev_orchestrator.domain.worktree import GitWorktree
@@ -48,7 +49,7 @@ class Fakes:
         self.events.append("commit")
         if self.failure == "commit":
             raise RuntimeError("commit falhou")
-        return "sha-19"
+        return "a" * 40
 
     def push(self, worktree: Path, remote: str, branch: str) -> None:
         self.events.append(f"push:{remote}:{branch}")
@@ -62,16 +63,16 @@ class Fakes:
         return PullRequest(20, "https://github.com/acme/repo/pull/20", issue.title, "release", branch)
 
 
-def service(tmp_path: Path, fakes: Fakes) -> RunPipeline:
+def service(tmp_path: Path, fakes: Fakes, ci_reader: object | None = None) -> RunPipeline:
     config = OrchestratorConfig(github={"owner": "acme", "repository": "repo", "project_number": 1, "ready_status": "Ready", "pull_request_base": "release"}, execution={"max_attempts": 1, "max_parallel_runs": 1, "auto_merge": False}, workspace={"repository_path": tmp_path / "repo", "worktrees_dir": tmp_path / "worktrees", "base_ref": "origin/main", "remote_name": "upstream"})
-    return RunPipeline(config, fakes, fakes, fakes, fakes, fakes, fakes, fakes, fakes)
+    return RunPipeline(config, fakes, fakes, fakes, fakes, fakes, fakes, fakes, fakes, ci_reader)
 
 
 def test_full_flow_orders_effects_and_returns_publication_result(tmp_path: Path) -> None:
     fakes = Fakes()
     result = service(tmp_path, fakes).run(19, "feat/publicar")
     assert fakes.events == ["status:item-correto:In Progress", "codex", "gates", "commit", "push:upstream:feat/publicar", "pr", "status:item-correto:AI Review"]
-    assert (result.gates, result.commit_sha, result.remote_name, result.pull_request_number, result.pull_request_url, result.pull_request_base, result.project_status) == ((GateResult("ruff", ("uv",), True, 0, ""),), "sha-19", "upstream", 20, "https://github.com/acme/repo/pull/20", "release", "AI Review")
+    assert (result.gates, result.commit_sha, result.remote_name, result.pull_request_number, result.pull_request_url, result.pull_request_base, result.project_status) == ((GateResult("ruff", ("uv",), True, 0, ""),), "a" * 40, "upstream", 20, "https://github.com/acme/repo/pull/20", "release", "AI Review")
 
 
 @pytest.mark.parametrize("failure, forbidden", [("gates", ("commit", "push", "pr", "AI Review")), ("commit", ("push", "pr", "AI Review")), ("push", ("pr", "AI Review")), ("pr", ("AI Review",))])
@@ -87,3 +88,38 @@ def test_ai_review_failure_reports_existing_pr_without_rollback(tmp_path: Path) 
     with pytest.raises(RunPipelineError, match=r"#20.*pull/20"):
         service(tmp_path, fakes).run(19, "feat/publicar")
     assert fakes.events[-1] == "status:item-correto:AI Review"
+
+
+@dataclass
+class CiReader:
+    events: list[str]
+    failure: bool = False
+    head_sha: str = "a" * 40
+
+    def get_ci_snapshot(self, number: int) -> PullRequestCiSnapshot:
+        self.events.append(f"ci:{number}")
+        conclusion = "FAILURE" if self.failure else "SUCCESS"
+        return PullRequestCiSnapshot(self.head_sha, (StatusCheck("test", "COMPLETED", conclusion),))
+
+
+def test_ci_starts_only_after_ai_review_and_success_is_returned(tmp_path: Path) -> None:
+    fakes = Fakes()
+    result = service(tmp_path, fakes, CiReader(fakes.events)).run(19, "feat/publicar")
+    assert fakes.events[-2:] == ["status:item-correto:AI Review", "ci:20"]
+    assert result.pull_request_head_sha == "a" * 40
+    assert str(result.ci_status) == "SUCCESS"
+
+
+def test_ci_failure_preserves_publication_context_and_does_not_run_future_step(tmp_path: Path) -> None:
+    fakes = Fakes()
+    with pytest.raises(RunPipelineError, match=r"Issue #19.*#20.*pull/20.*AI Review.*a{40}"):
+        service(tmp_path, fakes, CiReader(fakes.events, failure=True)).run(19, "feat/publicar")
+    assert fakes.events[-2:] == ["status:item-correto:AI Review", "ci:20"]
+
+
+def test_ci_rejects_a_head_that_already_diverged_from_the_published_commit(tmp_path: Path) -> None:
+    fakes = Fakes()
+    reader = CiReader(fakes.events, head_sha="b" * 40)
+    with pytest.raises(RunPipelineError, match=r"AI Review.*a{40}.*b{40}"):
+        service(tmp_path, fakes, reader).run(19, "feat/publicar")
+    assert fakes.events[-2:] == ["status:item-correto:AI Review", "ci:20"]

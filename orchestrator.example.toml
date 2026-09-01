@@ -18,3 +18,8 @@ remote_name = "origin"
 max_attempts = 2
 max_parallel_runs = 1
 auto_merge = false
+
+[ci]
+required_checks = ["test"]
+poll_interval_seconds = 5
+timeout_seconds = 900
