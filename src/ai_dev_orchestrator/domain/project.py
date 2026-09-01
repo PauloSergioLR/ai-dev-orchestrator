@@ -1,4 +1,4 @@
-"""Modelo interno e regra de elegibilidade de itens do GitHub Project."""
+"""Modelos internos e regras relacionadas a itens do GitHub Project."""
 
 from __future__ import annotations
 
@@ -25,6 +25,30 @@ class ProjectItem:
     def is_issue(self) -> bool:
         """Indica se o item representa uma Issue do GitHub."""
         return self.content_type == "Issue"
+
+
+@dataclass(frozen=True)
+class ProjectMetadata:
+    """Identificação imutável de um GitHub Project configurado."""
+
+    id: str
+
+
+@dataclass(frozen=True)
+class ProjectStatusOption:
+    """Opção disponível no campo de seleção única de status."""
+
+    id: str
+    name: str
+
+
+@dataclass(frozen=True)
+class ProjectStatusField:
+    """Campo Status e as opções que podem ser gravadas nele."""
+
+    id: str
+    name: str
+    options: tuple[ProjectStatusOption, ...]
 
 
 def is_eligible_for_execution(

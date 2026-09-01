@@ -26,6 +26,7 @@ class GitHubConfig(BaseModel):
     repository: str = Field(min_length=1)
     project_number: int = Field(gt=0)
     ready_status: str = Field(min_length=1)
+    status_field_name: str = Field(default="Status", min_length=1)
 
 
 class ExecutionConfig(BaseModel):

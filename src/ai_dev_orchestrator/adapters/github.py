@@ -1,4 +1,4 @@
-"""Adapter somente de leitura para issues do GitHub via GitHub CLI."""
+"""Adapters para issues e GitHub Projects via GitHub CLI."""
 
 from __future__ import annotations
 
@@ -7,7 +7,12 @@ from typing import Any, Protocol, Sequence
 
 from ai_dev_orchestrator.config import GitHubConfig, OrchestratorConfig
 from ai_dev_orchestrator.domain.issue import Issue
-from ai_dev_orchestrator.domain.project import ProjectItem
+from ai_dev_orchestrator.domain.project import (
+    ProjectItem,
+    ProjectMetadata,
+    ProjectStatusField,
+    ProjectStatusOption,
+)
 from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner
 
 
@@ -21,6 +26,10 @@ class GitHubIssueError(Exception):
 
 class GitHubProjectError(Exception):
     """Indica que os itens de um GitHub Project não puderam ser carregados."""
+
+
+class GitHubProjectStatusError(Exception):
+    """Indica que o Status de um item do GitHub Project não pôde ser atualizado."""
 
 
 class ProcessRunner(Protocol):
@@ -232,5 +241,181 @@ class GitHubProjectAdapter:
         if not isinstance(value, str):
             raise GitHubProjectError(
                 f"Resposta do Project inválida: campo '{field}' deve ser texto ou nulo"
+            )
+        return value
+
+
+class GitHubProjectStatusAdapter:
+    """Atualiza exclusivamente o campo Status de um item explicitamente informado."""
+
+    def __init__(
+        self,
+        config: GitHubConfig | OrchestratorConfig,
+        runner: ProcessRunner | None = None,
+    ) -> None:
+        self.config = config.github if isinstance(config, OrchestratorConfig) else config
+        self.runner = (
+            runner
+            if runner is not None
+            else CommandRunner(timeout=GITHUB_PROJECT_TIMEOUT_SECONDS)
+        )
+
+    def set_status(self, project_item_id: str, status_name: str) -> None:
+        """Resolve IDs atuais e grava apenas o Status do item informado."""
+        if not isinstance(project_item_id, str) or not project_item_id:
+            raise GitHubProjectStatusError("ID do item do Project deve ser texto não vazio")
+        if not isinstance(status_name, str) or not status_name:
+            raise GitHubProjectStatusError("Status solicitado deve ser texto não vazio")
+
+        project = self.discover_project_metadata()
+        status_field = self.resolve_status_field()
+        status_option = self.resolve_status_option(status_field, status_name)
+        self.execute_status_mutation(project_item_id, project, status_field, status_option)
+
+    def discover_project_metadata(self) -> ProjectMetadata:
+        """Descobre o ID global do Project configurado sem fazer mutações."""
+        payload = self._run_json(
+            [
+                "gh", "project", "view", str(self.config.project_number), "--owner",
+                self.config.owner, "--format", "json",
+            ],
+            "descobrir os metadados do Project",
+        )
+        return self._parse_project_metadata(payload)
+
+    def resolve_status_field(self) -> ProjectStatusField:
+        """Localiza o campo Status configurado entre os campos reais do Project."""
+        payload = self._run_json(
+            [
+                "gh", "project", "field-list", str(self.config.project_number), "--owner",
+                self.config.owner, "--format", "json",
+            ],
+            "descobrir os campos do Project",
+        )
+        field = self._parse_status_field(payload, self.config.status_field_name)
+        if field is not None:
+            return field
+        raise GitHubProjectStatusError(
+            f"Campo Status '{self.config.status_field_name}' não encontrado no Project"
+        )
+
+    @staticmethod
+    def resolve_status_option(
+        status_field: ProjectStatusField, status_name: str
+    ) -> ProjectStatusOption:
+        """Resolve por igualdade exata a opção que será escrita."""
+        for option in status_field.options:
+            if option.name == status_name:
+                return option
+        raise GitHubProjectStatusError(
+            f"Status '{status_name}' não encontrado no campo '{status_field.name}'"
+        )
+
+    def execute_status_mutation(
+        self,
+        project_item_id: str,
+        project: ProjectMetadata,
+        status_field: ProjectStatusField,
+        status_option: ProjectStatusOption,
+    ) -> None:
+        """Executa a única mutação permitida: uma opção do campo Status."""
+        arguments = [
+            "gh", "project", "item-edit", "--id", project_item_id,
+            "--project-id", project.id, "--field-id", status_field.id,
+            "--single-select-option-id", status_option.id,
+        ]
+        self._run(arguments, "atualizar o Status do item do Project")
+
+    def _run_json(self, arguments: list[str], operation: str) -> Any:
+        result = self._run(arguments, operation)
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raise GitHubProjectStatusError(
+                f"GitHub CLI retornou JSON inválido ao {operation}"
+            ) from error
+
+    def _run(self, arguments: list[str], operation: str) -> CommandResult:
+        result = self.runner.run(arguments)
+        if result.error:
+            raise GitHubProjectStatusError(
+                f"Não foi possível executar o GitHub CLI ao {operation}: {result.error}"
+            )
+        if not result.succeeded:
+            detail = result.stderr.strip() or result.stdout.strip()
+            message = f"GitHub CLI retornou código {result.returncode} ao {operation}"
+            if detail:
+                message = f"{message}: {detail}"
+            raise GitHubProjectStatusError(message)
+        return result
+
+    @staticmethod
+    def _parse_project_metadata(payload: Any) -> ProjectMetadata:
+        if not isinstance(payload, dict):
+            raise GitHubProjectStatusError(
+                "Metadados do Project inválidos: objeto JSON esperado"
+            )
+        return ProjectMetadata(
+            id=GitHubProjectStatusAdapter._required_string(payload, "id", "metadados do Project")
+        )
+
+    @classmethod
+    def _parse_status_field(
+        cls, payload: Any, status_field_name: str
+    ) -> ProjectStatusField | None:
+        if not isinstance(payload, dict):
+            raise GitHubProjectStatusError(
+                "Campos do Project inválidos: objeto JSON esperado"
+            )
+        raw_fields = payload.get("fields")
+        if not isinstance(raw_fields, list):
+            raise GitHubProjectStatusError(
+                "Campos do Project inválidos: campo 'fields' deve ser uma lista"
+            )
+        for raw_field in raw_fields:
+            if not isinstance(raw_field, dict):
+                raise GitHubProjectStatusError(
+                    "Campos do Project inválidos: cada campo deve ser um objeto"
+                )
+            name = cls._required_string(raw_field, "name", "campos do Project")
+            if name == status_field_name:
+                return cls._parse_project_field(raw_field)
+        return None
+
+    @classmethod
+    def _parse_project_field(cls, payload: Any) -> ProjectStatusField:
+        if not isinstance(payload, dict):
+            raise GitHubProjectStatusError(
+                "Campos do Project inválidos: cada campo deve ser um objeto"
+            )
+        raw_options = payload.get("options")
+        if not isinstance(raw_options, list):
+            raise GitHubProjectStatusError(
+                "Campos do Project inválidos: campo 'options' deve ser uma lista"
+            )
+        options = tuple(cls._parse_status_option(option) for option in raw_options)
+        return ProjectStatusField(
+            id=cls._required_string(payload, "id", "campos do Project"),
+            name=cls._required_string(payload, "name", "campos do Project"),
+            options=options,
+        )
+
+    @classmethod
+    def _parse_status_option(cls, payload: Any) -> ProjectStatusOption:
+        if not isinstance(payload, dict):
+            raise GitHubProjectStatusError(
+                "Opções de Status inválidas: cada opção deve ser um objeto"
+            )
+        return ProjectStatusOption(
+            id=cls._required_string(payload, "id", "opções de Status"),
+            name=cls._required_string(payload, "name", "opções de Status"),
+        )
+
+    @staticmethod
+    def _required_string(payload: dict[str, Any], field: str, context: str) -> str:
+        value = payload.get(field)
+        if not isinstance(value, str) or not value:
+            raise GitHubProjectStatusError(
+                f"Resposta de {context} inválida: campo '{field}' deve ser texto não vazio"
             )
         return value

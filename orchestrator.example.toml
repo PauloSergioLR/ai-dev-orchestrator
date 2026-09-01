@@ -3,6 +3,7 @@ owner = "seu-usuario"
 repository = "seu-repositorio"
 project_number = 1
 ready_status = "Ready"
+status_field_name = "Status"
 
 [execution]
 max_attempts = 2
