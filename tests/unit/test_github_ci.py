@@ -7,6 +7,8 @@ import pytest
 from ai_dev_orchestrator.adapters.github import GitHubCiAdapter, GitHubCiError
 from ai_dev_orchestrator.config import GitHubConfig
 from ai_dev_orchestrator.infrastructure.process import CommandResult
+from ai_dev_orchestrator.domain.ci import CiStatus
+from ai_dev_orchestrator.services.ci_gate import classify_required_checks
 
 
 @dataclass
@@ -31,6 +33,7 @@ def test_reads_head_and_rollup_from_configured_pr_and_repository() -> None:
 @pytest.mark.parametrize(
     ("state", "status", "conclusion"),
     [
+        ("EXPECTED", "PENDING", None),
         ("PENDING", "PENDING", None),
         ("SUCCESS", "COMPLETED", "SUCCESS"),
         ("FAILURE", "COMPLETED", "FAILURE"),
@@ -44,6 +47,14 @@ def test_normalizes_status_context(state: str, status: str, conclusion: str | No
     snapshot = adapter.get_ci_snapshot(42)
     assert snapshot.checks[0].name == "legacy"
     assert (snapshot.checks[0].status, snapshot.checks[0].conclusion, snapshot.checks[0].details_url) == (status, conclusion, "https://legacy")
+
+
+def test_required_status_context_expected_remains_pending() -> None:
+    payload = '{"headRefOid":"' + "a" * 40 + '","statusCheckRollup":[{"context":"test","state":"EXPECTED","targetUrl":"https://legacy"}]}'
+    runner = Runner([CommandResult(0, payload)])
+    adapter = GitHubCiAdapter(GitHubConfig(owner="acme", repository="repo", project_number=1, ready_status="Ready"), runner)
+    snapshot = adapter.get_ci_snapshot(42)
+    assert classify_required_checks(snapshot.checks, ("test",))[0] is CiStatus.PENDING
 
 
 def test_accepts_optional_status_context_with_required_check_run() -> None:

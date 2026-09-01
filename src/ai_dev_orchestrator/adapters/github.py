@@ -302,7 +302,7 @@ class GitHubCiAdapter:
         if details_url is not None and not isinstance(details_url, str):
             raise GitHubCiError("Resposta da CI inválida: targetUrl do StatusContext deve ser texto ou nula")
         normalized_state = state.upper()
-        if normalized_state == "PENDING":
+        if normalized_state in {"EXPECTED", "PENDING"}:
             return StatusCheck(name, "PENDING", None, details_url)
         if normalized_state == "SUCCESS":
             return StatusCheck(name, "COMPLETED", "SUCCESS", details_url)
