@@ -4,7 +4,7 @@ As execuções futuras serão isoladas em Git worktrees próprios. A remoção d
 
 O AI Dev Orchestrator começa com uma arquitetura pequena e local-first. A interface de linha de comando é a interface principal, mantendo o trabalho próximo ao repositório e às ferramentas da pessoa desenvolvedora.
 
-As integrações com providers são representadas por fronteiras de adapters para que os providers de implementação permaneçam intercambiáveis. Codex é o provider headless de implementação, Gemini é o provider de revisão pretendido e GitHub é o provider de repositório e acompanhamento de trabalho. A leitura de issues e de itens do GitHub Project usa o GitHub CLI autenticado e é estritamente somente leitura.
+As integrações com providers são representadas por fronteiras de adapters para que os providers de implementação permaneçam intercambiáveis. Codex é o provider headless de implementação, Gemini é o provider de revisão pretendido e GitHub é o provider de repositório e acompanhamento de trabalho. A leitura de issues e de itens do GitHub Project usa o GitHub CLI autenticado. A escrita de Project é limitada a uma operação explícita que atualiza exclusivamente o campo configurado `github.status_field_name` (por padrão, `Status`) de um item informado pelo chamador.
 
 Cada issue ativa usa exatamente uma sessão Codex. A execução inicial cria a sessão no worktree explícito da issue e as correções posteriores retomam a mesma sessão pelo seu identificador, nunca pela noção implícita de última sessão. O adapter usa a saída JSONL da CLI para expor o identificador e a mensagem final de modo estruturado.
 
