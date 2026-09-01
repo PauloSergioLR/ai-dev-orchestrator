@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import shutil
 import subprocess
 from typing import Sequence
 
@@ -34,6 +35,15 @@ class CommandRunner:
 
     def run(self, arguments: Sequence[str], cwd: str | Path | None = None) -> CommandResult:
         """Executa argumentos de processo e normaliza falhas esperadas."""
+        command = list(arguments)
+        command_name = command[0]
+        executable = shutil.which(command_name)
+        if executable is None:
+            return CommandResult(
+                returncode=None,
+                error=f"Executável não encontrado: {command_name}",
+            )
+        command[0] = executable
         try:
             options = {
                 "capture_output": True, "text": True, "timeout": self.timeout,
@@ -41,11 +51,11 @@ class CommandRunner:
             }
             if cwd is not None:
                 options["cwd"] = cwd
-            completed = subprocess.run(list(arguments), **options)
+            completed = subprocess.run(command, **options)
         except FileNotFoundError:
             return CommandResult(
                 returncode=None,
-                error=f"Executável não encontrado: {arguments[0]}",
+                error=f"Executável não encontrado: {command_name}",
             )
         except subprocess.TimeoutExpired:
             return CommandResult(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -63,10 +64,7 @@ def test_all_checks_are_ok(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
 
 
 def test_command_runner_handles_missing_executable(monkeypatch: pytest.MonkeyPatch) -> None:
-    def missing(*args: object, **kwargs: object) -> None:
-        raise FileNotFoundError
-
-    monkeypatch.setattr(subprocess, "run", missing)
+    monkeypatch.setattr(shutil, "which", lambda command: None)
     result = CommandRunner().run(["missing", "--version"])
 
     assert result.returncode is None
@@ -75,6 +73,7 @@ def test_command_runner_handles_missing_executable(monkeypatch: pytest.MonkeyPat
 
 def test_command_runner_handles_failed_process(monkeypatch: pytest.MonkeyPatch) -> None:
     completed = subprocess.CompletedProcess(["tool"], 2, "", "falhou")
+    monkeypatch.setattr(shutil, "which", lambda command: command)
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: completed)
 
     result = CommandRunner().run(["tool"])
@@ -87,6 +86,7 @@ def test_command_runner_handles_timeout(monkeypatch: pytest.MonkeyPatch) -> None
     def timeout(*args: object, **kwargs: object) -> None:
         raise subprocess.TimeoutExpired(["tool"], 5)
 
+    monkeypatch.setattr(shutil, "which", lambda command: command)
     monkeypatch.setattr(subprocess, "run", timeout)
     result = CommandRunner().run(["tool"])
 
@@ -101,6 +101,7 @@ def test_command_runner_uses_safe_subprocess_options(monkeypatch: pytest.MonkeyP
         received.update(kwargs)
         return subprocess.CompletedProcess(args[0], 0, "", "")
 
+    monkeypatch.setattr(shutil, "which", lambda command: command)
     monkeypatch.setattr(subprocess, "run", run)
     CommandRunner(timeout=7).run(["tool", "--version"])
 
@@ -115,9 +116,46 @@ def test_command_runner_uses_safe_subprocess_options(monkeypatch: pytest.MonkeyP
 
 def test_command_runner_forwards_explicit_cwd(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     received: dict[str, object] = {}
+    monkeypatch.setattr(shutil, "which", lambda command: command)
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: (received.update(kwargs), subprocess.CompletedProcess(args[0], 0, "", ""))[1])
     CommandRunner().run(["tool"], cwd=tmp_path)
     assert received["cwd"] == tmp_path
+
+
+def test_command_runner_resolves_path_executable_without_changing_arguments(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    received: dict[str, object] = {}
+    resolved_commands: list[str] = []
+    shim_path = r"C:\tools\bin\tool.CMD"
+    arguments = ["tool", "exec", "--message", "texto com espaços"]
+
+    def which(command: str) -> str:
+        resolved_commands.append(command)
+        return shim_path
+
+    monkeypatch.setattr(shutil, "which", which)
+
+    def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        received["arguments"] = args[0]
+        received.update(kwargs)
+        return subprocess.CompletedProcess(args[0], 0, "saída", "aviso")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    result = CommandRunner(timeout=9).run(arguments, cwd=tmp_path)
+
+    assert result.succeeded
+    assert result.stdout == "saída"
+    assert result.stderr == "aviso"
+    assert resolved_commands == ["tool"]
+    assert received["arguments"] == [shim_path, *arguments[1:]]
+    assert arguments == ["tool", "exec", "--message", "texto com espaços"]
+    assert received["cwd"] == tmp_path
+    assert received["timeout"] == 9
+    assert received["capture_output"] is True
+    assert received["text"] is True
+    assert received["shell"] is False
 
 
 def test_reports_incompatible_python(monkeypatch: pytest.MonkeyPatch) -> None:
