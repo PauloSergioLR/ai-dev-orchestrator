@@ -40,6 +40,7 @@ def test_loads_a_valid_toml(tmp_path: Path) -> None:
     assert config.github.owner == "acme"
     assert config.github.project_number == 42
     assert config.execution.auto_merge is False
+    assert (config.workspace.remote_name, config.github.pull_request_base, config.github.ai_review_status) == ("origin", "main", "AI Review")
 
 
 def test_accepts_absolute_workspace_paths(tmp_path: Path) -> None:
@@ -152,6 +153,14 @@ def test_environment_variables_override_toml(tmp_path: Path, monkeypatch: pytest
     assert config.github.owner == "environment-owner"
     assert config.execution.max_attempts == 3
     assert config.execution.auto_merge is True
+
+
+def test_environment_overrides_publication_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ORCH_WORKSPACE__REMOTE_NAME", "upstream")
+    monkeypatch.setenv("ORCH_GITHUB__PULL_REQUEST_BASE", "release")
+    monkeypatch.setenv("ORCH_GITHUB__AI_REVIEW_STATUS", "Revisão IA")
+    config = load_config(write_config(tmp_path / "config.toml", valid_toml(tmp_path)))
+    assert (config.workspace.remote_name, config.github.pull_request_base, config.github.ai_review_status) == ("upstream", "release", "Revisão IA")
 
 
 def test_environment_variables_have_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

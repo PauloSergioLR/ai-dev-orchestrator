@@ -10,6 +10,7 @@ from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRun
 
 
 LOCAL_GATE_TIMEOUT_SECONDS = 120
+MAX_GATE_DIAGNOSTIC_CHARACTERS = 500
 
 
 class LocalValidationError(Exception):
@@ -45,10 +46,16 @@ class LocalValidationService:
         results: list[GateResult] = []
         for name, command in self.gates:
             result = self.runner.run(command, cwd=worktree)
-            diagnostic = result.error or result.stderr.strip() or result.stdout.strip()
+            diagnostic = self._summarize(result.error or result.stderr.strip() or result.stdout.strip())
             gate = GateResult(name, command, result.succeeded, result.returncode, diagnostic)
             results.append(gate)
             if not gate.succeeded:
                 detail = f": {diagnostic}" if diagnostic else ""
                 raise LocalValidationError(f"Gate local '{name}' falhou{detail}")
         return tuple(results)
+
+    @staticmethod
+    def _summarize(diagnostic: str) -> str:
+        if len(diagnostic) <= MAX_GATE_DIAGNOSTIC_CHARACTERS:
+            return diagnostic
+        return f"{diagnostic[:MAX_GATE_DIAGNOSTIC_CHARACTERS]}… [saída truncada]"

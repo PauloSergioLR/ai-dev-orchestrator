@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+import re
 from typing import Any, Protocol, Sequence
 
 from ai_dev_orchestrator.config import GitHubConfig, OrchestratorConfig
@@ -174,7 +175,6 @@ class GitHubPullRequestAdapter:
             "gh", "pr", "create", "--repo", self.config.repository_full_name,
             "--base", self.config.pull_request_base, "--head", branch,
             "--title", issue.title, "--body", build_pull_request_body(issue, branch, gates),
-            "--json", "number,url,title,baseRefName,headRefName",
         ]
         result = self.runner.run(arguments)
         if result.error:
@@ -183,14 +183,46 @@ class GitHubPullRequestAdapter:
             detail = result.stderr.strip() or result.stdout.strip()
             message = f"GitHub CLI retornou código {result.returncode} ao criar o Pull Request"
             raise GitHubPullRequestError(f"{message}: {detail}" if detail else message)
+        url, number = self._parse_created_url(result.stdout)
+        view = self.runner.run(["gh", "pr", "view", url, "--repo", self.config.repository_full_name,
+                                "--json", "title,baseRefName,headRefName"])
+        if view.error or not view.succeeded:
+            detail = view.error or view.stderr.strip() or view.stdout.strip()
+            raise GitHubPullRequestError(
+                f"Pull Request #{number} já criado em {url}, mas não foi possível consultar seus dados: {detail}"
+            )
+        try:
+            payload = json.loads(view.stdout)
+            return PullRequest(number, url, self._required_string(payload, "title"),
+                               self._required_string(payload, "baseRefName"), self._required_string(payload, "headRefName"))
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+            raise GitHubPullRequestError(
+                f"Pull Request #{number} já criado em {url}, mas o GitHub CLI retornou JSON inválido"
+            ) from error
+
+    def _parse_created_url(self, stdout: str) -> tuple[str, int]:
+        lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+        if len(lines) != 1:
+            raise GitHubPullRequestError("GitHub CLI não retornou uma única URL válida para o Pull Request")
+        match = re.fullmatch(
+            rf"https://github\.com/{re.escape(self.config.owner)}/{re.escape(self.config.repository)}/pull/([1-9][0-9]*)",
+            lines[0],
+        )
+        if match is None:
+            raise GitHubPullRequestError("GitHub CLI não retornou uma URL válida para o Pull Request")
+        return lines[0], int(match.group(1))
+
+    @classmethod
+    def _unused_previous_parser(cls) -> None:
+        result = CommandResult(0, "{}")
         try:
             payload = json.loads(result.stdout)
             return PullRequest(
-                number=self._required_int(payload, "number"),
-                url=self._required_string(payload, "url"),
-                title=self._required_string(payload, "title"),
-                base=self._required_string(payload, "baseRefName"),
-                head=self._required_string(payload, "headRefName"),
+                number=cls._required_int(payload, "number"),
+                url=cls._required_string(payload, "url"),
+                title=cls._required_string(payload, "title"),
+                base=cls._required_string(payload, "baseRefName"),
+                head=cls._required_string(payload, "headRefName"),
             )
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
             raise GitHubPullRequestError("GitHub CLI retornou JSON inválido para o Pull Request") from error

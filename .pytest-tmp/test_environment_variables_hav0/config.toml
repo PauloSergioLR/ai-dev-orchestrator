@@ -1,0 +1,11 @@
+
+[github]
+owner = "acme"
+repository = "orchestrator"
+project_number = 42
+ready_status = "Ready"
+
+[execution]
+max_attempts = 2
+max_parallel_runs = 1
+auto_merge = false

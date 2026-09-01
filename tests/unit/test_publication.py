@@ -42,6 +42,13 @@ def test_failed_gate_is_fail_fast_and_keeps_diagnostic() -> None:
     assert len(runner.calls) == 1
 
 
+def test_truncates_large_gate_diagnostic() -> None:
+    runner = FakeRunner([CommandResult(1, stderr="x" * 1000)])
+
+    with pytest.raises(LocalValidationError, match="saída truncada"):
+        LocalValidationService(runner).validate(Path("C:/worktree"))
+
+
 def test_publication_stages_validates_commits_and_pushes_without_force() -> None:
     runner = FakeRunner([CommandResult(0, " M arquivo.py\n"), CommandResult(0), CommandResult(0), CommandResult(0), CommandResult(0, "abc123\n"), CommandResult(0)])
     adapter = GitPublicationAdapter(runner)
@@ -63,3 +70,11 @@ def test_no_changes_stops_before_stage_or_commit() -> None:
     with pytest.raises(GitPublicationError, match="Não há alterações"):
         GitPublicationAdapter(runner).commit("C:/worktree", 19)
     assert len(runner.calls) == 1
+
+
+def test_commit_failure_does_not_attempt_push() -> None:
+    runner = FakeRunner([CommandResult(0, " M arquivo.py\n"), CommandResult(0), CommandResult(0), CommandResult(1, stderr="identidade ausente")])
+    adapter = GitPublicationAdapter(runner)
+    with pytest.raises(GitPublicationError, match="identidade"):
+        adapter.commit("C:/worktree", 19)
+    assert all(command[0:2] != ("git", "push") for command, _ in runner.calls)
