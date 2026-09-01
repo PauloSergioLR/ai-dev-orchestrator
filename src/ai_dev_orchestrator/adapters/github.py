@@ -269,11 +269,13 @@ class GitHubCiAdapter:
             raise GitHubCiError("Resposta da CI inválida: campo 'statusCheckRollup' deve ser uma lista")
         return PullRequestCiSnapshot(head_sha, tuple(cls._parse_check(check) for check in raw_checks))
 
-    @staticmethod
-    def _parse_check(payload: Any) -> StatusCheck:
+    @classmethod
+    def _parse_check(cls, payload: Any) -> StatusCheck:
         if not isinstance(payload, dict):
             raise GitHubCiError("Resposta da CI inválida: cada check deve ser um objeto")
-        name = payload.get("name", payload.get("context"))
+        if "context" in payload:
+            return cls._parse_status_context(payload)
+        name = payload.get("name")
         status = payload.get("status")
         conclusion = payload.get("conclusion")
         details_url = payload.get("detailsUrl")
@@ -286,6 +288,27 @@ class GitHubCiAdapter:
         if details_url is not None and not isinstance(details_url, str):
             raise GitHubCiError("Resposta da CI inválida: URL de detalhes do check deve ser texto ou nula")
         return StatusCheck(name, status, conclusion, details_url)
+
+    @staticmethod
+    def _parse_status_context(payload: dict[str, Any]) -> StatusCheck:
+        """Normaliza o membro ``StatusContext`` da union statusCheckRollup."""
+        name = payload.get("context")
+        state = payload.get("state")
+        details_url = payload.get("targetUrl")
+        if not isinstance(name, str) or not name:
+            raise GitHubCiError("Resposta da CI inválida: StatusContext sem context")
+        if not isinstance(state, str) or not state:
+            raise GitHubCiError("Resposta da CI inválida: StatusContext sem state")
+        if details_url is not None and not isinstance(details_url, str):
+            raise GitHubCiError("Resposta da CI inválida: targetUrl do StatusContext deve ser texto ou nula")
+        normalized_state = state.upper()
+        if normalized_state == "PENDING":
+            return StatusCheck(name, "PENDING", None, details_url)
+        if normalized_state == "SUCCESS":
+            return StatusCheck(name, "COMPLETED", "SUCCESS", details_url)
+        if normalized_state in {"FAILURE", "ERROR"}:
+            return StatusCheck(name, "COMPLETED", normalized_state, details_url)
+        return StatusCheck(name, "COMPLETED", "UNKNOWN", details_url)
 
 
 class GitHubProjectAdapter:

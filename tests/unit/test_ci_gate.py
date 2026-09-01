@@ -73,7 +73,7 @@ def gate(reader: Reader, clock: FakeTime, timeout: float = 20) -> CiGate:
 def test_polls_after_immediate_query_and_returns_success_without_extra_sleep() -> None:
     reader = Reader([PullRequestCiSnapshot(SHA, (check(status="PENDING", conclusion=None),)), PullRequestCiSnapshot(SHA, (check(),))])
     clock = FakeTime()
-    result = gate(reader, clock).wait(42)
+    result = gate(reader, clock).wait(42, SHA)
     assert result.status is CiStatus.SUCCESS
     assert result.expected_head_sha == SHA
     assert reader.calls == [42, 42]
@@ -84,7 +84,7 @@ def test_failure_stops_immediately_and_includes_check_details() -> None:
     reader = Reader([PullRequestCiSnapshot(SHA, (check(conclusion="FAILURE"),))])
     clock = FakeTime()
     with pytest.raises(CiGateError, match=r"test.*FAILURE.*ci.example"):
-        gate(reader, clock).wait(42)
+        gate(reader, clock).wait(42, SHA)
     assert reader.calls == [42]
     assert clock.sleeps == []
 
@@ -93,8 +93,9 @@ def test_timeout_uses_injected_clock_and_never_sleeps_past_deadline() -> None:
     reader = Reader([PullRequestCiSnapshot(SHA, ()) for _ in range(3)])
     clock = FakeTime()
     with pytest.raises(CiGateError, match="permaneceu pendente"):
-        gate(reader, clock, timeout=10).wait(42)
+        gate(reader, clock, timeout=10).wait(42, SHA)
     assert clock.sleeps == [5, 5]
+    assert reader.calls == [42, 42]
 
 
 def test_changed_head_is_rejected_before_old_check_can_approve() -> None:
@@ -104,5 +105,14 @@ def test_changed_head_is_rejected_before_old_check_can_approve() -> None:
     ])
     clock = FakeTime()
     with pytest.raises(CiGateError, match=r"mudou.*a{40}.*b{40}"):
-        gate(reader, clock).wait(42)
+        gate(reader, clock).wait(42, SHA)
     assert reader.calls == [42, 42]
+
+
+def test_first_snapshot_must_match_the_published_commit() -> None:
+    reader = Reader([PullRequestCiSnapshot("b" * 40, (check(),))])
+    clock = FakeTime()
+    with pytest.raises(CiGateError, match=r"mudou.*a{40}.*b{40}"):
+        gate(reader, clock).wait(42, SHA)
+    assert reader.calls == [42]
+    assert clock.sleeps == []

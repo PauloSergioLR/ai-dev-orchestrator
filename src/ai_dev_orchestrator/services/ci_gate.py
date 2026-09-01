@@ -66,20 +66,22 @@ class CiGate:
         self.monotonic = monotonic
         self.sleep = sleep
 
-    def wait(self, pull_request_number: int) -> CiResult:
+    def wait(self, pull_request_number: int, expected_head_sha: str) -> CiResult:
         started_at = self.monotonic()
-        expected_head_sha: str | None = None
+        deadline = started_at + self.config.timeout_seconds
+        first_query = True
         while True:
+            if not first_query and self.monotonic() >= deadline:
+                raise self._timeout_error(started_at, expected_head_sha)
             try:
                 snapshot = self.reader.get_ci_snapshot(pull_request_number)
             except Exception as error:
-                known_head = f" para o HEAD esperado {expected_head_sha}" if expected_head_sha else ""
                 raise CiGateError(
-                    f"Falha ao consultar a CI do Pull Request #{pull_request_number}{known_head}: {error}"
+                    f"Falha ao consultar a CI do Pull Request #{pull_request_number} "
+                    f"para o HEAD esperado {expected_head_sha}: {error}"
                 ) from error
-            if expected_head_sha is None:
-                expected_head_sha = snapshot.head_sha
-            elif snapshot.head_sha != expected_head_sha:
+            first_query = False
+            if snapshot.head_sha != expected_head_sha:
                 raise CiGateError(
                     f"O HEAD do Pull Request mudou de {expected_head_sha} para {snapshot.head_sha}"
                 )
@@ -100,10 +102,14 @@ class CiGate:
                     f"'{failed_check.status}' e conclusão '{failed_check.conclusion}' "
                     f"para o HEAD esperado {expected_head_sha}{details}"
                 )
-            elapsed = self.monotonic() - started_at
-            if elapsed >= self.config.timeout_seconds:
-                raise CiGateError(
-                    f"A CI permaneceu pendente por {elapsed:.1f}s (limite de "
-                    f"{self.config.timeout_seconds:g}s) para o HEAD {expected_head_sha}"
-                )
-            self.sleep(min(self.config.poll_interval_seconds, self.config.timeout_seconds - elapsed))
+            remaining = deadline - self.monotonic()
+            if remaining <= 0:
+                raise self._timeout_error(started_at, expected_head_sha)
+            self.sleep(min(self.config.poll_interval_seconds, remaining))
+
+    def _timeout_error(self, started_at: float, expected_head_sha: str) -> CiGateError:
+        elapsed = self.monotonic() - started_at
+        return CiGateError(
+            f"A CI permaneceu pendente por {elapsed:.1f}s (limite de "
+            f"{self.config.timeout_seconds:g}s) para o HEAD {expected_head_sha}"
+        )

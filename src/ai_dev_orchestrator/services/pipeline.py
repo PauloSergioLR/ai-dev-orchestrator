@@ -231,7 +231,9 @@ class RunPipeline:
                 pull_request.url, pull_request.base,
             )
         try:
-            ci_result = CiGate(self.ci_reader, self.config.ci).wait(pull_request.number)
+            ci_result = CiGate(self.ci_reader, self.config.ci).wait(
+                pull_request.number, commit_sha
+            )
         except Exception as error:
             raise RunPipelineError(
                 f"Falha no gate de CI da Issue #{issue.number}, Pull Request #{pull_request.number} "
