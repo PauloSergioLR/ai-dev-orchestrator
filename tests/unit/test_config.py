@@ -3,8 +3,13 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
-from ai_dev_orchestrator.config import ConfigurationError, load_config
+from ai_dev_orchestrator.config import (
+    ConfigurationError,
+    OrchestratorConfig,
+    load_config,
+)
 
 
 VALID_TOML = """
@@ -32,6 +37,42 @@ def test_loads_a_valid_toml(tmp_path: Path) -> None:
     assert config.github.owner == "acme"
     assert config.github.project_number == 42
     assert config.execution.auto_merge is False
+
+
+def test_allows_valid_direct_instantiation() -> None:
+    config = OrchestratorConfig(
+        github={
+            "owner": "acme",
+            "repository": "orchestrator",
+            "project_number": 42,
+            "ready_status": "Ready",
+        },
+        execution={
+            "max_attempts": 2,
+            "max_parallel_runs": 1,
+            "auto_merge": False,
+        },
+    )
+
+    assert config.github.owner == "acme"
+
+
+def test_rejects_extra_argument_in_direct_instantiation() -> None:
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        OrchestratorConfig(
+            github={
+                "owner": "acme",
+                "repository": "orchestrator",
+                "project_number": 42,
+                "ready_status": "Ready",
+            },
+            execution={
+                "max_attempts": 2,
+                "max_parallel_runs": 1,
+                "auto_merge": False,
+            },
+            unexpected=True,
+        )
 
 
 def test_uses_orchestrator_toml_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -70,6 +111,17 @@ def test_rejects_missing_or_invalid_values(tmp_path: Path, content: str) -> None
         load_config(write_config(tmp_path / "config.toml", content))
 
     assert error.value.__cause__ is not None
+
+
+def test_validation_error_identifies_invalid_field(tmp_path: Path) -> None:
+    content = VALID_TOML.replace("project_number = 42", "project_number = 0")
+
+    with pytest.raises(
+        ConfigurationError, match="github.project_number"
+    ) as error:
+        load_config(write_config(tmp_path / "config.toml", content))
+
+    assert isinstance(error.value.__cause__, ValidationError)
 
 
 def test_rejects_unknown_fields(tmp_path: Path) -> None:

@@ -38,22 +38,6 @@ class ExecutionConfig(BaseModel):
     auto_merge: StrictBool
 
 
-class _TomlSettingsSource(PydanticBaseSettingsSource):
-    """Disponibiliza os dados de um TOML como fonte do Pydantic Settings."""
-
-    def __init__(self, settings_cls: type[BaseSettings], data: dict[str, Any]) -> None:
-        super().__init__(settings_cls)
-        self.data = data
-
-    def get_field_value(
-        self, field: Any, field_name: str
-    ) -> tuple[Any, str, bool]:
-        return None, field_name, False
-
-    def __call__(self) -> dict[str, Any]:
-        return self.data
-
-
 class _EnvironmentSettingsSource(PydanticBaseSettingsSource):
     """Converte o booleano textual de ambiente sem relaxar o TOML."""
 
@@ -100,10 +84,9 @@ class OrchestratorConfig(BaseSettings):
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         """Define ambiente como fonte prioritária e exclui suporte a .env."""
-        toml_data = init_settings.init_kwargs.get("_toml_data", {})
         return (
             _EnvironmentSettingsSource(settings_cls, env_settings),
-            _TomlSettingsSource(settings_cls, toml_data),
+            init_settings,
         )
 
 
@@ -131,6 +114,11 @@ def load_config(path: Path | str | None = None) -> OrchestratorConfig:
         ) from error
 
     try:
-        return OrchestratorConfig(_toml_data=toml_data)
+        return OrchestratorConfig(**toml_data)
     except ValidationError as error:
-        raise ConfigurationError("Configuração inválida.") from error
+        first_error = error.errors()[0]
+        field = ".".join(str(part) for part in first_error["loc"])
+        detail = first_error["msg"]
+        raise ConfigurationError(
+            f"Configuração inválida no campo '{field}': {detail}"
+        ) from error
