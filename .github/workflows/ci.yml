@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Obter o código do repositório
+        uses: actions/checkout@v4
+      - name: Instalar o uv
+        uses: astral-sh/setup-uv@v7
+      - name: Configurar o Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Instalar dependências pelo lockfile
+        run: uv sync --frozen
+      - name: Executar o Ruff
+        run: uv run ruff check .
+      - name: Executar os testes
+        run: uv run pytest
