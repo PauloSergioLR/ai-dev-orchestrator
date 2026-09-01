@@ -212,28 +212,6 @@ class GitHubPullRequestAdapter:
             raise GitHubPullRequestError("GitHub CLI não retornou uma URL válida para o Pull Request")
         return lines[0], int(match.group(1))
 
-    @classmethod
-    def _unused_previous_parser(cls) -> None:
-        result = CommandResult(0, "{}")
-        try:
-            payload = json.loads(result.stdout)
-            return PullRequest(
-                number=cls._required_int(payload, "number"),
-                url=cls._required_string(payload, "url"),
-                title=cls._required_string(payload, "title"),
-                base=cls._required_string(payload, "baseRefName"),
-                head=cls._required_string(payload, "headRefName"),
-            )
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
-            raise GitHubPullRequestError("GitHub CLI retornou JSON inválido para o Pull Request") from error
-
-    @staticmethod
-    def _required_int(payload: Any, field: str) -> int:
-        value = payload[field]
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise ValueError(field)
-        return value
-
     @staticmethod
     def _required_string(payload: Any, field: str) -> str:
         value = payload[field]
