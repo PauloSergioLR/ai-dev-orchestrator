@@ -20,6 +20,9 @@ max_parallel_runs = 1
 auto_merge = false
 merge_timeout_seconds = 30
 
+[state]
+database_path = "C:/caminho/para/ai-dev-orchestrator/state/orchestrator.db"
+
 [ci]
 required_checks = ["test"]
 poll_interval_seconds = 5

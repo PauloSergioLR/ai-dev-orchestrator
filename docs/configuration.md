@@ -35,6 +35,9 @@ max_parallel_runs = 1
 auto_merge = false
 merge_timeout_seconds = 30
 
+[state]
+database_path = "C:/caminho/para/ai-dev-orchestrator/state/orchestrator.db"
+
 [ci]
 required_checks = ["test"]
 poll_interval_seconds = 5
@@ -72,6 +75,12 @@ Em `[review]`, `max_correction_attempts` define quantas correções após um
 `REJECTED` podem ocorrer na mesma sessão Codex. O padrão é `3` e o valor deve
 ser um inteiro positivo.
 
+Em `[state]`, `database_path` é o caminho absoluto do banco SQLite local. O
+diretório pai é criado quando necessário. Se omitido, o caminho determinístico
+é `~/.ai-dev-orchestrator/orchestrator.db`, fora do repositório e dos worktrees.
+O banco contém apenas checkpoints resumidos; prompts, diffs e credenciais não
+são persistidos.
+
 ## Variáveis de ambiente
 
 Variáveis com prefixo `ORCH_` podem sobrescrever o arquivo. Para campos
@@ -97,6 +106,7 @@ ORCH_CI__REQUIRED_CHECKS
 ORCH_CI__POLL_INTERVAL_SECONDS
 ORCH_CI__TIMEOUT_SECONDS
 ORCH_REVIEW__MAX_CORRECTION_ATTEMPTS
+ORCH_STATE__DATABASE_PATH
 ```
 
 Por exemplo, `ORCH_EXECUTION__MAX_ATTEMPTS=3` substitui apenas esse valor. A

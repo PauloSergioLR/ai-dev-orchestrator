@@ -5,7 +5,15 @@ import typer
 from ai_dev_orchestrator import __version__
 from ai_dev_orchestrator.config import ConfigurationError, load_config
 from ai_dev_orchestrator.services.doctor import DoctorService, has_errors
-from ai_dev_orchestrator.services.pipeline import RunPipeline, RunPipelineError, RunResult
+from ai_dev_orchestrator.services.pipeline import (
+    RunPipeline,
+    RunPipelineError,
+    RunResult,
+)
+from ai_dev_orchestrator.infrastructure.database import (
+    ExecutionStoreError,
+    SqliteExecutionStore,
+)
 
 app = typer.Typer(
     help="Orquestrador local-first de desenvolvimento com IA.",
@@ -52,13 +60,40 @@ def run(
 ) -> None:
     """Prepara uma Issue elegível e inicia sua sessão Codex."""
     if not branch.strip():
-        raise typer.BadParameter("--branch é obrigatória e não pode ser vazia", param_hint="--branch")
+        raise typer.BadParameter(
+            "--branch é obrigatória e não pode ser vazia", param_hint="--branch"
+        )
     try:
         result = RunPipeline.from_config(load_config()).run(issue, branch)
     except (ConfigurationError, RunPipelineError) as error:
         typer.echo(f"Erro: {error}", err=True)
         raise typer.Exit(code=1) from error
     _show_run_result(result)
+
+
+@app.command()
+def state(
+    issue: int = typer.Option(..., "--issue", min=1, help="Número positivo da Issue."),
+) -> None:
+    """Exibe, sem modificar, o último estado ativo persistido de uma Issue."""
+    try:
+        record = SqliteExecutionStore(
+            load_config().state.database_path
+        ).get_latest_for_issue(issue)
+    except (ConfigurationError, ExecutionStoreError) as error:
+        typer.echo(f"Erro: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    if record is None:
+        typer.echo(f"Nenhuma execução encontrada para a Issue #{issue}.")
+        raise typer.Exit(code=1)
+    typer.echo(f"Issue: #{record.issue_number}")
+    typer.echo(f"Phase: {record.phase}")
+    typer.echo(f"Branch: {record.branch or '-'}")
+    typer.echo(f"Sessão Codex: {record.codex_session_id or '-'}")
+    typer.echo(f"PR: #{record.pull_request_number or '-'}")
+    typer.echo(f"HEAD: {record.current_head_sha or '-'}")
+    typer.echo(f"Correções: {record.correction_attempts}")
+    typer.echo(f"Atualizado em: {record.updated_at.isoformat()}")
 
 
 def _show_run_result(result: RunResult) -> None:
@@ -88,10 +123,16 @@ def _show_run_result(result: RunResult) -> None:
         )
     if result.review is not None:
         typer.echo(f"Review Gemini: {result.review.verdict}")
-        typer.echo(f"Tentativas de review/correção: {result.review_attempts}/{result.correction_attempts}")
+        typer.echo(
+            f"Tentativas de review/correção: {result.review_attempts}/{result.correction_attempts}"
+        )
         typer.echo(f"HEAD final revisado: {result.final_reviewed_head_sha}")
         typer.echo(f"Findings anteriores preservados: {result.prior_findings_count}")
-        blocking = [finding for finding in result.review.findings if finding.severity.value in result.blocking_severities]
+        blocking = [
+            finding
+            for finding in result.review.findings
+            if finding.severity.value in result.blocking_severities
+        ]
         typer.echo(f"Findings bloqueantes: {len(blocking)}")
         for finding in blocking:
             typer.echo(f"- {finding.severity}: {finding.title}")

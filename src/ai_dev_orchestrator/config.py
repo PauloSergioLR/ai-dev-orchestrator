@@ -6,8 +6,19 @@ from pathlib import Path
 import tomllib
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, field_validator
-from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    ValidationError,
+    field_validator,
+)
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 
 DEFAULT_CONFIG_PATH = Path("orchestrator.toml")
@@ -48,6 +59,23 @@ class ExecutionConfig(BaseModel):
     merge_timeout_seconds: float = Field(default=30, gt=0)
 
 
+class StateConfig(BaseModel):
+    """Local durável fora do worktree usado para auditar execuções."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    database_path: Path = Field(
+        default_factory=lambda: Path.home() / ".ai-dev-orchestrator" / "orchestrator.db"
+    )
+
+    @field_validator("database_path")
+    @classmethod
+    def database_path_must_be_absolute(cls, value: Path) -> Path:
+        if not value.is_absolute():
+            raise ValueError("deve ser um caminho absoluto")
+        return value
+
+
 class CiConfig(BaseModel):
     """Política local para aguardar os checks obrigatórios do Pull Request."""
 
@@ -59,7 +87,9 @@ class CiConfig(BaseModel):
 
     @field_validator("required_checks")
     @classmethod
-    def required_checks_must_be_unambiguous(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+    def required_checks_must_be_unambiguous(
+        cls, value: tuple[str, ...]
+    ) -> tuple[str, ...]:
         if not value:
             raise ValueError("deve conter ao menos um check obrigatório")
         if any(not name for name in value):
@@ -125,9 +155,7 @@ class _EnvironmentSettingsSource(PydanticBaseSettingsSource):
         super().__init__(settings_cls)
         self.source = source
 
-    def get_field_value(
-        self, field: Any, field_name: str
-    ) -> tuple[Any, str, bool]:
+    def get_field_value(self, field: Any, field_name: str) -> tuple[Any, str, bool]:
         return None, field_name, False
 
     def __call__(self) -> dict[str, Any]:
@@ -152,6 +180,7 @@ class OrchestratorConfig(BaseSettings):
     github: GitHubConfig
     execution: ExecutionConfig
     workspace: WorkspaceConfig
+    state: StateConfig = Field(default_factory=StateConfig)
     ci: CiConfig = Field(default_factory=CiConfig)
     review: ReviewConfig = Field(default_factory=ReviewConfig)
 
@@ -186,9 +215,7 @@ def load_config(path: Path | str | None = None) -> OrchestratorConfig:
             f"Arquivo de configuração não encontrado: {config_path}"
         ) from error
     except tomllib.TOMLDecodeError as error:
-        raise ConfigurationError(
-            f"Arquivo TOML inválido: {config_path}"
-        ) from error
+        raise ConfigurationError(f"Arquivo TOML inválido: {config_path}") from error
     except OSError as error:
         raise ConfigurationError(
             f"Não foi possível ler o arquivo de configuração: {config_path}"
