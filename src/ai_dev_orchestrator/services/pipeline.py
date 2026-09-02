@@ -25,6 +25,9 @@ from ai_dev_orchestrator.domain.project import ProjectItem, is_eligible_for_exec
 from ai_dev_orchestrator.domain.worktree import GitWorktree
 from ai_dev_orchestrator.services.validation import GateResult, LocalValidationService
 from ai_dev_orchestrator.services.ci_gate import CiGate, PullRequestCiReader
+from ai_dev_orchestrator.services.review import ContextBuilder, PullRequestReviewReader, REVIEW_PLAN_SCHEMA, STRUCTURED_REVIEW_SCHEMA, build_checklists, build_prompt, parse_review_plan, parse_structured_review
+from ai_dev_orchestrator.domain.review import StructuredReview
+from ai_dev_orchestrator.adapters.antigravity import AntigravityAdapter
 
 
 class RunPipelineError(Exception):
@@ -87,6 +90,8 @@ class RunResult:
     pull_request_head_sha: str = ""
     ci_checks: tuple[StatusCheck, ...] = ()
     ci_status: CiStatus | None = None
+    review: StructuredReview | None = None
+    blocking_severities: tuple[str, ...] = ()
 
 
 def derive_worktree_path(worktrees_dir: Path, branch: str) -> Path:
@@ -135,6 +140,8 @@ class RunPipeline:
         git_publisher: GitPublisher | None = None,
         pull_request_creator: PullRequestCreator | None = None,
         ci_reader: PullRequestCiReader | None = None,
+        review_reader: PullRequestReviewReader | None = None,
+        reviewer: AntigravityAdapter | None = None,
     ) -> None:
         self.config = config
         self.issue_reader = issue_reader
@@ -146,13 +153,16 @@ class RunPipeline:
         self.git_publisher = git_publisher
         self.pull_request_creator = pull_request_creator
         self.ci_reader = ci_reader
+        self.review_reader = review_reader
+        self.reviewer = reviewer
 
     @classmethod
     def from_config(cls, config: OrchestratorConfig) -> RunPipeline:
         return cls(config, GitHubIssueAdapter(config), GitHubProjectAdapter(config),
                    GitHubProjectStatusAdapter(config), GitWorktreeAdapter(), CodexAdapter(),
                    LocalValidationService(), GitPublicationAdapter(), GitHubPullRequestAdapter(config),
-                   GitHubCiAdapter(config))
+                   GitHubCiAdapter(config), GitHubPullRequestAdapter(config),
+                   AntigravityAdapter(config.review.timeout_seconds))
 
     def run(self, issue_number: int, branch: str) -> RunResult:
         if issue_number <= 0:
@@ -240,13 +250,33 @@ class RunPipeline:
                 f"em {pull_request.url}; Status permanece em '{self.config.github.ai_review_status}', "
                 f"branch {worktree.branch}, commit {commit_sha} e worktree {worktree.path} foram preservados: {error}"
             ) from error
-        return RunResult(
+        base_result = RunResult(
             issue.number, item.id, worktree.branch, worktree.path, worktree.base_ref,
             execution.session_id, execution.final_message, self.config.github.ai_review_status,
             gates, commit_sha, self.config.workspace.remote_name, pull_request.number,
             pull_request.url, pull_request.base,
             ci_result.expected_head_sha, ci_result.checks, ci_result.status,
         )
+        if self.review_reader is None or self.reviewer is None:
+            return base_result
+        try:
+            context_builder = ContextBuilder(self.review_reader, worktree.path)
+            dossier = context_builder.build(
+                issue, pull_request.number, ci_result.expected_head_sha, gates, ci_result)
+            policy_path = Path(__file__).parents[3] / "prompts" / "gemini" / "review_policy.md"
+            policy = policy_path.read_text(encoding="utf-8")
+            plan = parse_review_plan(self.reviewer.invoke(build_prompt(policy, dossier), worktree.path, REVIEW_PLAN_SCHEMA))
+            context_builder.ensure_head_is_current(pull_request.number, ci_result.expected_head_sha)
+            review = parse_structured_review(
+                self.reviewer.invoke(build_prompt(policy, dossier, plan, build_checklists(dossier.changed_files)), worktree.path, STRUCTURED_REVIEW_SCHEMA),
+                ci_result.expected_head_sha, self.config.review.blocking_severities)
+            context_builder.ensure_head_is_current(pull_request.number, ci_result.expected_head_sha)
+        except Exception as error:
+            raise RunPipelineError(
+                f"Falha na revisão Gemini da Issue #{issue.number}, Pull Request #{pull_request.number} em {pull_request.url}; "
+                f"Status permanece em '{self.config.github.ai_review_status}', branch {worktree.branch}, commit {commit_sha} e worktree {worktree.path} foram preservados: {error}"
+            ) from error
+        return RunResult(**{**base_result.__dict__, "review": review, "blocking_severities": self.config.review.blocking_severities})
 
     def _find_project_item(self, issue_number: int) -> ProjectItem:
         repository = self.config.github.repository_full_name
