@@ -33,6 +33,7 @@ remote_name = "origin"
 max_attempts = 2
 max_parallel_runs = 1
 auto_merge = false
+merge_timeout_seconds = 30
 
 [ci]
 required_checks = ["test"]
@@ -47,8 +48,11 @@ Em `[github]`, `owner`, `repository` e `ready_status` devem ser textos não
 vazios. `project_number` deve ser um inteiro maior que zero.
 
 Em `[execution]`, `max_attempts` e `max_parallel_runs` devem ser inteiros
-maiores que zero. `auto_merge` deve ser estritamente `true` ou `false`. A
-configuração atual apenas registra esse valor; ela não executa merge automático.
+maiores que zero. `auto_merge` deve ser estritamente `true` ou `false` e
+permanece `false` no exemplo. Quando habilitado, o merge commit só é executado
+depois de review aprovado, CI verde e revalidação final do PR e do HEAD local.
+`merge_timeout_seconds` define o limite positivo, em segundos, da chamada de
+merge ao GitHub.
 
 Campos fora desses três grupos ou com nomes incorretos são rejeitados, para que
 erros de digitação não passem despercebidos.
@@ -88,6 +92,7 @@ ORCH_WORKSPACE__REMOTE_NAME
 ORCH_EXECUTION__MAX_ATTEMPTS
 ORCH_EXECUTION__MAX_PARALLEL_RUNS
 ORCH_EXECUTION__AUTO_MERGE
+ORCH_EXECUTION__MERGE_TIMEOUT_SECONDS
 ORCH_CI__REQUIRED_CHECKS
 ORCH_CI__POLL_INTERVAL_SECONDS
 ORCH_CI__TIMEOUT_SECONDS

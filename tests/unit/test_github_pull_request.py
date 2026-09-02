@@ -6,9 +6,10 @@ import json
 import pytest
 
 from ai_dev_orchestrator.adapters.github import GitHubPullRequestAdapter, GitHubPullRequestError
-from ai_dev_orchestrator.config import GitHubConfig
+from ai_dev_orchestrator.config import GitHubConfig, OrchestratorConfig
 from ai_dev_orchestrator.domain.issue import Issue
 from ai_dev_orchestrator.infrastructure.process import CommandResult
+from ai_dev_orchestrator.infrastructure.process import CommandRunner
 from ai_dev_orchestrator.services.validation import GateResult
 
 
@@ -79,3 +80,46 @@ def test_review_data_rejects_missing_or_invalid_rest_commit_sha(commit: dict) ->
     with pytest.raises(GitHubPullRequestError, match="REST paginada"):
         value.get_review_data(42)
     assert "--paginate" in runner.calls[1] and "--slurp" in runner.calls[1]
+
+
+def test_merge_uses_explicit_repository_method_and_approved_sha() -> None:
+    sha = "a" * 40
+    value, runner = adapter([CommandResult(0, json.dumps({"merged": True, "sha": "b" * 40}))])
+
+    result = value.merge(42, sha)
+
+    assert result.merge_commit_sha == "b" * 40
+    assert runner.calls == [[
+        "gh", "api", "--method", "PUT", "repos/acme/repo/pulls/42/merge",
+        "-f", "merge_method=merge", "-f", f"sha={sha}",
+    ]]
+
+
+@pytest.mark.parametrize("payload", [{"merged": False, "sha": "a" * 40}, {"merged": True}, []])
+def test_merge_rejects_ambiguous_response(payload: object) -> None:
+    value, _ = adapter([CommandResult(0, json.dumps(payload))])
+
+    with pytest.raises(GitHubPullRequestError, match="confirmou|inválida"):
+        value.merge(42, "a" * 40)
+
+
+def test_verifies_that_merge_commit_has_approved_head_as_parent() -> None:
+    head, merge = "a" * 40, "b" * 40
+    value, runner = adapter([CommandResult(0, json.dumps({"parents": [{"sha": "c" * 40}, {"sha": head}]}))])
+
+    value.verify_merge_commit(merge, head)
+
+    assert runner.calls == [["gh", "api", "repos/acme/repo/git/commits/" + merge]]
+
+
+def test_merge_timeout_does_not_change_normal_pull_request_timeout(tmp_path) -> None:
+    config = OrchestratorConfig(
+        github={"owner": "acme", "repository": "repo", "project_number": 1, "ready_status": "Ready"},
+        workspace={"repository_path": tmp_path / "repo", "worktrees_dir": tmp_path / "worktrees", "base_ref": "main"},
+        execution={"max_attempts": 1, "max_parallel_runs": 1, "auto_merge": False, "merge_timeout_seconds": 7},
+    )
+
+    value = GitHubPullRequestAdapter(config)
+
+    assert isinstance(value.runner, CommandRunner) and value.runner.timeout == 30
+    assert isinstance(value.merge_runner, CommandRunner) and value.merge_runner.timeout == 7

@@ -45,6 +45,7 @@ class ExecutionConfig(BaseModel):
     max_attempts: int = Field(gt=0)
     max_parallel_runs: int = Field(gt=0)
     auto_merge: StrictBool
+    merge_timeout_seconds: float = Field(default=30, gt=0)
 
 
 class CiConfig(BaseModel):
