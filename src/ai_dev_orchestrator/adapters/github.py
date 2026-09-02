@@ -174,13 +174,17 @@ def build_pull_request_body(issue: Issue, branch: str, gates: tuple[GateResult, 
 class GitHubPullRequestAdapter:
     """Cria Pull Requests por GitHub CLI com argumentos seguros."""
 
-    def __init__(self, config: GitHubConfig | OrchestratorConfig, runner: ProcessRunner | None = None) -> None:
+    def __init__(
+        self, config: GitHubConfig | OrchestratorConfig, runner: ProcessRunner | None = None,
+        merge_runner: ProcessRunner | None = None,
+    ) -> None:
         merge_timeout = (
             config.execution.merge_timeout_seconds
             if isinstance(config, OrchestratorConfig) else GITHUB_MERGE_TIMEOUT_SECONDS
         )
         self.config = config.github if isinstance(config, OrchestratorConfig) else config
-        self.runner = runner or CommandRunner(timeout=merge_timeout)
+        self.runner = runner or CommandRunner(timeout=GITHUB_PULL_REQUEST_TIMEOUT_SECONDS)
+        self.merge_runner = merge_runner or runner or CommandRunner(timeout=merge_timeout)
 
     def create(self, issue: Issue, branch: str, gates: tuple[GateResult, ...]) -> PullRequest:
         arguments = [
@@ -315,7 +319,7 @@ class GitHubPullRequestAdapter:
         """Executa exclusivamente merge commit, preso ao SHA explicitamente aprovado."""
         if not _is_sha(expected_head_sha):
             raise GitHubPullRequestError("SHA esperado para merge é inválido")
-        result = self.runner.run([
+        result = self.merge_runner.run([
             "gh", "api", "--method", "PUT", f"repos/{self.config.repository_full_name}/pulls/{pull_request_number}/merge",
             "-f", "merge_method=merge", "-f", f"sha={expected_head_sha}",
         ])
@@ -349,7 +353,8 @@ class GitHubPullRequestAdapter:
             parent_shas = [parent["sha"] for parent in parents]
         except (json.JSONDecodeError, KeyError, TypeError) as error:
             raise GitHubPullRequestError("Verificação do commit de merge retornou payload inválido") from error
-        if (not isinstance(parents, list) or not all(isinstance(sha, str) and _is_sha(sha) for sha in parent_shas)
+        if (not isinstance(parents, list) or len(parents) != 2
+                or not all(isinstance(sha, str) and _is_sha(sha) for sha in parent_shas)
                 or merged_head_sha not in parent_shas):
             raise GitHubPullRequestError("Commit de merge não contém o HEAD aprovado como pai")
 

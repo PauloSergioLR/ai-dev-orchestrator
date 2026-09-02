@@ -6,9 +6,10 @@ import json
 import pytest
 
 from ai_dev_orchestrator.adapters.github import GitHubPullRequestAdapter, GitHubPullRequestError
-from ai_dev_orchestrator.config import GitHubConfig
+from ai_dev_orchestrator.config import GitHubConfig, OrchestratorConfig
 from ai_dev_orchestrator.domain.issue import Issue
 from ai_dev_orchestrator.infrastructure.process import CommandResult
+from ai_dev_orchestrator.infrastructure.process import CommandRunner
 from ai_dev_orchestrator.services.validation import GateResult
 
 
@@ -109,3 +110,16 @@ def test_verifies_that_merge_commit_has_approved_head_as_parent() -> None:
     value.verify_merge_commit(merge, head)
 
     assert runner.calls == [["gh", "api", "repos/acme/repo/git/commits/" + merge]]
+
+
+def test_merge_timeout_does_not_change_normal_pull_request_timeout(tmp_path) -> None:
+    config = OrchestratorConfig(
+        github={"owner": "acme", "repository": "repo", "project_number": 1, "ready_status": "Ready"},
+        workspace={"repository_path": tmp_path / "repo", "worktrees_dir": tmp_path / "worktrees", "base_ref": "main"},
+        execution={"max_attempts": 1, "max_parallel_runs": 1, "auto_merge": False, "merge_timeout_seconds": 7},
+    )
+
+    value = GitHubPullRequestAdapter(config)
+
+    assert isinstance(value.runner, CommandRunner) and value.runner.timeout == 30
+    assert isinstance(value.merge_runner, CommandRunner) and value.merge_runner.timeout == 7

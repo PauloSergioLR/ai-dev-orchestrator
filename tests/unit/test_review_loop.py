@@ -16,12 +16,14 @@ from ai_dev_orchestrator.domain.issue import Issue
 from ai_dev_orchestrator.domain.project import ProjectItem
 from ai_dev_orchestrator.domain.worktree import GitWorktree
 from ai_dev_orchestrator.services.pipeline import RunPipeline, RunPipelineError
+from ai_dev_orchestrator.services.merge import MergePullRequestSnapshot, MergeResult
 from ai_dev_orchestrator.services.review import REVIEW_PLAN_SCHEMA
 from ai_dev_orchestrator.services.validation import GateResult
 
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
+SHA_C = "c" * 40
 
 
 @dataclass
@@ -33,6 +35,14 @@ class LoopFakes:
     pre_push_validation_fails: bool = False
     local_head: str = SHA_A
     resumed: bool = False
+    merged: bool = False
+    merge_error: Exception | None = None
+    done_error: Exception | None = None
+    merge_snapshot_changes: dict[str, object] = field(default_factory=dict)
+    merge_calls: list[tuple[int, str]] = field(default_factory=list)
+    ci_head: str | None = None
+    merge_local_head: str | None = None
+    correction_commits: int = 0
     events: list[str] = field(default_factory=list)
     resume_prompts: list[str] = field(default_factory=list)
 
@@ -44,6 +54,8 @@ class LoopFakes:
 
     def set_status(self, item: str, status: str) -> None:
         self.events.append(f"status:{status}")
+        if status == "Done" and self.done_error is not None:
+            raise self.done_error
 
     def create_worktree(self, repository: Path, branch: str, path: Path, base: str) -> GitWorktree:
         return GitWorktree(repository, path, branch, base)
@@ -69,25 +81,31 @@ class LoopFakes:
 
     def commit_correction(self, worktree: Path) -> str:
         self.events.append("commit-correcao")
-        self.local_head = SHA_B
-        return SHA_B
+        self.local_head = SHA_B if self.correction_commits == 0 else SHA_C
+        self.correction_commits += 1
+        return self.local_head
 
     def current_head(self, worktree: Path) -> str:
         self.events.append(f"local-head:{self.local_head}")
         return self.local_head
 
+    def merge_state(self, worktree: Path) -> tuple[str, str]:
+        self.events.append("merge-state")
+        return "feat/review-loop", self.merge_local_head or self.local_head
+
     def push(self, worktree: Path, remote: str, branch: str) -> None:
         self.events.append(f"push:{branch}")
-        if self.local_head == SHA_B:
-            self.head = SHA_B
+        if self.correction_commits:
+            self.head = self.local_head
 
     def create(self, issue: Issue, branch: str, gates: tuple[GateResult, ...]) -> PullRequest:
         self.events.append("criar-pr")
         return PullRequest(32, "https://github.com/acme/repo/pull/32", issue.title, "main", branch)
 
     def get_ci_snapshot(self, number: int) -> PullRequestCiSnapshot:
-        self.events.append(f"ci:{self.head}")
-        return PullRequestCiSnapshot(self.head, (StatusCheck("test", "COMPLETED", "SUCCESS"),))
+        head = self.ci_head or self.head
+        self.events.append(f"ci:{head}")
+        return PullRequestCiSnapshot(head, (StatusCheck("test", "COMPLETED", "SUCCESS"),))
 
     def get_review_data(self, number: int) -> dict:
         self.events.append(f"dossier:{self.head}")
@@ -100,6 +118,29 @@ class LoopFakes:
                 "baseRefName": "main", "headRefName": "feat/review-loop", "headRefOid": remote_head,
                 "commits": [remote_head], "files": ["src/example.py"], "diff": "diff --git a/x b/x\n+x"}
 
+    def get_merge_snapshot(self, number: int) -> MergePullRequestSnapshot:
+        values: dict[str, object] = {
+            "number": 32, "url": "https://github.com/acme/repo/pull/32",
+            "state": "MERGED" if self.merged else "OPEN", "is_draft": False,
+            "base": "main", "head_branch": "feat/review-loop", "head_sha": self.head,
+            "mergeable": "MERGEABLE", "merged": self.merged,
+            "merge_commit_sha": "d" * 40 if self.merged else "",
+        }
+        values.update(self.merge_snapshot_changes)
+        self.events.append(f"merge-snapshot:{values['state']}")
+        return MergePullRequestSnapshot(**values)  # type: ignore[arg-type]
+
+    def merge(self, number: int, expected_head_sha: str) -> MergeResult:
+        self.events.append("merge")
+        self.merge_calls.append((number, expected_head_sha))
+        if self.merge_error is not None:
+            raise self.merge_error
+        self.merged = True
+        return MergeResult(expected_head_sha, "d" * 40)
+
+    def verify_merge_commit(self, merge_commit_sha: str, merged_head_sha: str) -> None:
+        self.events.append("verify-merge")
+
     def invoke(self, prompt: str, cwd: Path, schema: dict) -> str:
         if schema == REVIEW_PLAN_SCHEMA:
             return json.dumps({key: ["x"] for key in schema["required"]})
@@ -111,14 +152,14 @@ class LoopFakes:
         return json.dumps({"verdict": verdict, "findings": findings, "reviewed_head_sha": self.head, "summary": "ok"})
 
 
-def pipeline(tmp_path: Path, fakes: LoopFakes, maximum: int = 3) -> RunPipeline:
+def pipeline(tmp_path: Path, fakes: LoopFakes, maximum: int = 3, auto_merge: bool = False) -> RunPipeline:
     config = OrchestratorConfig(
         github={"owner": "acme", "repository": "repo", "project_number": 1, "ready_status": "Ready"},
         workspace={"repository_path": tmp_path / "repo", "worktrees_dir": tmp_path / "worktrees", "base_ref": "main"},
-        execution={"max_attempts": 1, "max_parallel_runs": 1, "auto_merge": False},
+        execution={"max_attempts": 1, "max_parallel_runs": 1, "auto_merge": auto_merge},
         review={"max_correction_attempts": maximum},
     )
-    return RunPipeline(config, fakes, fakes, fakes, fakes, fakes, fakes, fakes, fakes, fakes, fakes, fakes)
+    return RunPipeline(config, fakes, fakes, fakes, fakes, fakes, fakes, fakes, fakes, fakes, fakes, fakes, fakes)
 
 
 def test_rejected_review_resumes_same_session_then_approves(tmp_path: Path) -> None:
@@ -184,3 +225,88 @@ def test_pre_push_validation_blocks_remote_publication(tmp_path: Path) -> None:
 
     assert "commit-correcao" in fakes.events
     assert fakes.events.count("push:feat/review-loop") == 1
+
+
+def test_auto_merge_disabled_never_calls_merger_or_writes_done(tmp_path: Path) -> None:
+    fakes = LoopFakes(rejected_reviews=0)
+
+    result = pipeline(tmp_path, fakes).run(31, "feat/review-loop")
+
+    assert result.merged is False
+    assert fakes.merge_calls == []
+    assert "status:Done" not in fakes.events
+
+
+def test_approved_review_merges_exact_reviewed_head_then_writes_done(tmp_path: Path) -> None:
+    fakes = LoopFakes(rejected_reviews=0)
+
+    result = pipeline(tmp_path, fakes, auto_merge=True).run(31, "feat/review-loop")
+
+    assert fakes.merge_calls == [(32, SHA_A)]
+    assert result.merged and result.merge_commit_sha == "d" * 40
+    assert fakes.events.index("merge") < fakes.events.index("status:Done")
+
+
+def test_merge_failure_never_writes_done(tmp_path: Path) -> None:
+    fakes = LoopFakes(rejected_reviews=0, merge_error=RuntimeError("GitHub falhou"))
+
+    with pytest.raises(RunPipelineError, match="nenhum Status Done"):
+        pipeline(tmp_path, fakes, auto_merge=True).run(31, "feat/review-loop")
+
+    assert "status:Done" not in fakes.events
+
+
+def test_done_failure_reports_that_pr_is_already_merged(tmp_path: Path) -> None:
+    fakes = LoopFakes(rejected_reviews=0, done_error=RuntimeError("Project indisponível"))
+
+    with pytest.raises(RunPipelineError, match="já foi merged"):
+        pipeline(tmp_path, fakes, auto_merge=True).run(31, "feat/review-loop")
+
+    assert fakes.merge_calls == [(32, SHA_A)]
+    assert fakes.events[-1] == "status:Done"
+
+
+@pytest.mark.parametrize(("rejections", "expected_head"), [(1, SHA_B), (2, SHA_C)])
+def test_review_corrections_merge_only_final_head(
+    tmp_path: Path, rejections: int, expected_head: str,
+) -> None:
+    fakes = LoopFakes(rejected_reviews=rejections)
+
+    pipeline(tmp_path, fakes, auto_merge=True).run(31, "feat/review-loop")
+
+    assert fakes.merge_calls == [(32, expected_head)]
+    assert fakes.events.index("merge") > max(
+        index for index, event in enumerate(fakes.events) if event == "commit-correcao"
+    )
+
+
+@pytest.mark.parametrize("changes", [
+    {"head_sha": "c" * 40}, {"base": "release"}, {"head_branch": "other"},
+    {"state": "CLOSED"}, {"is_draft": True}, {"mergeable": "CONFLICTING"},
+])
+def test_final_pr_divergence_refuses_merge(tmp_path: Path, changes: dict[str, object]) -> None:
+    fakes = LoopFakes(rejected_reviews=0, merge_snapshot_changes=changes)
+
+    with pytest.raises(RunPipelineError, match="Auto-merge recusado"):
+        pipeline(tmp_path, fakes, auto_merge=True).run(31, "feat/review-loop")
+
+    assert fakes.merge_calls == []
+    assert "status:Done" not in fakes.events
+
+
+def test_divergent_ci_head_prevents_any_merge(tmp_path: Path) -> None:
+    fakes = LoopFakes(rejected_reviews=0, ci_head=SHA_B)
+
+    with pytest.raises(RunPipelineError, match="Falha no gate de CI"):
+        pipeline(tmp_path, fakes, auto_merge=True).run(31, "feat/review-loop")
+
+    assert fakes.merge_calls == []
+
+
+def test_divergent_local_head_prevents_any_merge(tmp_path: Path) -> None:
+    fakes = LoopFakes(rejected_reviews=0, merge_local_head=SHA_B)
+
+    with pytest.raises(RunPipelineError, match="Auto-merge recusado"):
+        pipeline(tmp_path, fakes, auto_merge=True).run(31, "feat/review-loop")
+
+    assert fakes.merge_calls == []
