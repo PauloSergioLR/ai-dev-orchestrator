@@ -258,10 +258,12 @@ class GitHubPullRequestAdapter:
             if not isinstance(payload.get(field), list):
                 raise GitHubPullRequestError(f"Resposta do Pull Request inválida: campo '{field}'")
         try:
-            payload["commits"] = [self._required_string(x, "oid") for x in payload["commits"]]
+            payload["commits"] = [self._required_sha(x) for x in payload["commits"]]
             payload["files"] = [self._required_string(x, "path") for x in payload["files"]]
         except (TypeError, ValueError) as error:
-            raise GitHubPullRequestError("Resposta do Pull Request contém commits ou arquivos inválidos") from error
+            raise GitHubPullRequestError(
+                "Resposta REST paginada contém commits ou arquivos inválidos"
+            ) from error
         diff = self.runner.run(["gh", "pr", "diff", str(pull_request_number), "--repo", self.config.repository_full_name])
         if diff.error or not diff.succeeded:
             detail = diff.error or diff.stderr.strip() or diff.stdout.strip()
@@ -282,6 +284,16 @@ class GitHubPullRequestAdapter:
         if not isinstance(value, str):
             raise ValueError(field)
         return value
+
+    @staticmethod
+    def _required_sha(payload: Any) -> str:
+        """Valida o contrato REST de ``GET /pulls/{number}/commits``."""
+        if not isinstance(payload, dict):
+            raise ValueError("commit")
+        sha = payload.get("sha")
+        if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", sha):
+            raise ValueError("sha")
+        return sha
 
 
 class GitHubCiAdapter:

@@ -1,6 +1,7 @@
 """Testes do contrato suportado de criação e leitura de Pull Request."""
 
 from dataclasses import dataclass, field
+import json
 
 import pytest
 
@@ -57,10 +58,10 @@ def test_view_failure_reports_created_pr_url_and_number() -> None:
 
 def test_review_data_uses_pagination_and_accepts_renamed_diff() -> None:
     metadata = '{"number":42,"url":"u","baseRefName":"main","headRefName":"f","headRefOid":"' + "a" * 40 + '","changedFiles":1,"files":[{"path":"new.py"}]}'
-    commits = '[[{"oid":"' + "a" * 40 + '"}]]'
+    commits = '[[{"sha":"' + "a" * 40 + '"}],[{"sha":"' + "b" * 64 + '"}]]'
     value, runner = adapter([CommandResult(0, metadata), CommandResult(0, commits), CommandResult(0, "diff --git a/old.py b/new.py\nsimilarity index 90%")])
     result = value.get_review_data(42)
-    assert result["commits"] == ["a" * 40]
+    assert result["commits"] == ["a" * 40, "b" * 64]
     assert "--paginate" in runner.calls[1] and "--slurp" in runner.calls[1]
 
 
@@ -69,3 +70,12 @@ def test_review_data_rejects_truncated_file_list() -> None:
     value, _ = adapter([CommandResult(0, metadata)])
     with pytest.raises(GitHubPullRequestError, match="truncada"):
         value.get_review_data(42)
+
+
+@pytest.mark.parametrize("commit", [{}, {"sha": ""}, {"sha": 7}, {"sha": "not-a-sha"}])
+def test_review_data_rejects_missing_or_invalid_rest_commit_sha(commit: dict) -> None:
+    metadata = '{"number":42,"url":"u","baseRefName":"main","headRefName":"f","headRefOid":"' + "a" * 40 + '","changedFiles":1,"files":[{"path":"new.py"}]}'
+    value, runner = adapter([CommandResult(0, metadata), CommandResult(0, json.dumps([[commit]]))])
+    with pytest.raises(GitHubPullRequestError, match="REST paginada"):
+        value.get_review_data(42)
+    assert "--paginate" in runner.calls[1] and "--slurp" in runner.calls[1]
