@@ -1,0 +1,113 @@
+"""Modelo durável e validado de uma execução do orquestrador."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+from typing import Protocol
+
+
+class ExecutionPhase(StrEnum):
+    PREPARING = "PREPARING"
+    CODEX_RUNNING = "CODEX_RUNNING"
+    TESTING = "TESTING"
+    PUBLISHING = "PUBLISHING"
+    WAITING_CI = "WAITING_CI"
+    GEMINI_REVIEWING = "GEMINI_REVIEWING"
+    NEEDS_CHANGES = "NEEDS_CHANGES"
+    MERGING = "MERGING"
+    APPROVED_AWAITING_ACTION = "APPROVED_AWAITING_ACTION"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+TERMINAL_PHASES = frozenset(
+    {
+        ExecutionPhase.COMPLETED,
+        ExecutionPhase.FAILED,
+        ExecutionPhase.APPROVED_AWAITING_ACTION,
+    }
+)
+_ALLOWED = {
+    ExecutionPhase.PREPARING: {ExecutionPhase.CODEX_RUNNING, ExecutionPhase.FAILED},
+    ExecutionPhase.CODEX_RUNNING: {ExecutionPhase.TESTING, ExecutionPhase.FAILED},
+    ExecutionPhase.TESTING: {ExecutionPhase.PUBLISHING, ExecutionPhase.FAILED},
+    ExecutionPhase.PUBLISHING: {ExecutionPhase.WAITING_CI, ExecutionPhase.FAILED},
+    ExecutionPhase.WAITING_CI: {ExecutionPhase.GEMINI_REVIEWING, ExecutionPhase.FAILED},
+    ExecutionPhase.GEMINI_REVIEWING: {
+        ExecutionPhase.NEEDS_CHANGES,
+        ExecutionPhase.MERGING,
+        ExecutionPhase.APPROVED_AWAITING_ACTION,
+        ExecutionPhase.FAILED,
+    },
+    ExecutionPhase.NEEDS_CHANGES: {ExecutionPhase.CODEX_RUNNING, ExecutionPhase.FAILED},
+    ExecutionPhase.MERGING: {ExecutionPhase.COMPLETED, ExecutionPhase.FAILED},
+}
+
+
+def validate_transition(old: ExecutionPhase, new: ExecutionPhase) -> None:
+    """Recusa saltos e reaberturas que ocultariam o histórico da execução."""
+    if new not in _ALLOWED.get(old, set()):
+        raise ValueError(f"Transição de execução inválida: {old} -> {new}")
+
+
+@dataclass(frozen=True)
+class RunRecord:
+    id: str
+    issue_number: int
+    phase: ExecutionPhase
+    created_at: datetime
+    updated_at: datetime
+    project_item_id: str | None = None
+    branch: str | None = None
+    worktree_path: str | None = None
+    base_ref: str | None = None
+    codex_session_id: str | None = None
+    pull_request_number: int | None = None
+    pull_request_url: str | None = None
+    current_head_sha: str | None = None
+    ci_head_sha: str | None = None
+    reviewed_head_sha: str | None = None
+    review_verdict: str | None = None
+    correction_attempts: int = 0
+    merge_commit_sha: str | None = None
+    merged_head_sha: str | None = None
+    project_status: str | None = None
+    last_error: str | None = None
+
+
+@dataclass(frozen=True)
+class ExecutionEvent:
+    execution_id: str
+    sequence: int
+    previous_phase: ExecutionPhase | None
+    phase: ExecutionPhase
+    created_at: datetime
+    summary: str
+    head_sha: str | None = None
+
+
+class ExecutionStore(Protocol):
+    """Porta de persistência usada pelo pipeline, independente do SQLite."""
+
+    def create(self, issue_number: int, **details: object) -> RunRecord: ...
+
+    def transition(
+        self,
+        execution_id: str,
+        phase: ExecutionPhase,
+        *,
+        summary: str,
+        head_sha: str | None = None,
+        **updates: object,
+    ) -> RunRecord: ...
+
+    def checkpoint(
+        self,
+        execution_id: str,
+        *,
+        summary: str,
+        head_sha: str | None = None,
+        **updates: object,
+    ) -> RunRecord: ...
