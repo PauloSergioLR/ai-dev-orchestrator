@@ -65,6 +65,7 @@ class GitPublisher(Protocol):
     def commit(self, worktree: str | Path, issue_number: int) -> str: ...
     def push(self, worktree: str | Path, remote_name: str, branch: str) -> None: ...
     def commit_correction(self, worktree: str | Path) -> str: ...
+    def current_head(self, worktree: str | Path) -> str: ...
 
 
 class PullRequestCreator(Protocol):
@@ -322,7 +323,10 @@ class RunPipeline:
             final_message = execution.final_message
             assert self.local_validator is not None and self.git_publisher is not None and self.ci_reader is not None
             gates = self.local_validator.validate(worktree.path)
+            self._ensure_existing_pull_request(pull_request, worktree.branch, ci_result.expected_head_sha)
+            self._ensure_local_head_is_current(worktree.path, ci_result.expected_head_sha)
             new_head = self.git_publisher.commit_correction(worktree.path)
+            self._ensure_existing_pull_request(pull_request, worktree.branch, ci_result.expected_head_sha)
             self.git_publisher.push(worktree.path, self.config.workspace.remote_name, worktree.branch)
             self._ensure_existing_pull_request(pull_request, worktree.branch, new_head)
             ci_result = CiGate(self.ci_reader, self.config.ci).wait(pull_request.number, new_head)
@@ -337,6 +341,15 @@ class RunPipeline:
                 or data.get("headRefName") != branch or data.get("headRefOid") != expected_head_sha
                 or data.get("url") != pull_request.url or data.get("state") != "OPEN"):
             raise RunPipelineError("O Pull Request existente divergiu, foi fechado ou não aponta para o novo HEAD")
+
+    def _ensure_local_head_is_current(self, worktree: Path, expected_head_sha: str) -> None:
+        """Impede publicar um commit que o Codex tenha criado fora do control plane."""
+        assert self.git_publisher is not None
+        observed_head = self.git_publisher.current_head(worktree)
+        if observed_head != expected_head_sha:
+            raise RunPipelineError(
+                "O HEAD local divergiu do HEAD revisado; a publicação da correção foi recusada"
+            )
 
     def _find_project_item(self, issue_number: int) -> ProjectItem:
         repository = self.config.github.repository_full_name

@@ -32,6 +32,13 @@ class GitPublicationAdapter:
         """Cria o commit determinístico de uma correção apontada pelo reviewer."""
         return self._commit(worktree, "fix: corrige findings do reviewer")
 
+    def current_head(self, worktree: str | Path) -> str:
+        """Obtém o HEAD local sem modificar o worktree."""
+        sha = self._run(["git", "rev-parse", "HEAD"], worktree, "obter HEAD local").stdout.strip()
+        if not sha:
+            raise GitPublicationError("Git não retornou o HEAD local")
+        return sha
+
     def _commit(self, worktree: str | Path, message: str) -> str:
         status = self._run(["git", "status", "--porcelain", "--untracked-files=all"], worktree, "verificar alterações")
         if not status.stdout.strip():

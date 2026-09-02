@@ -75,6 +75,13 @@ def test_correction_commit_uses_fixed_message_without_rewriting_history() -> Non
     assert all("--force" not in command and "reset" not in command and "rebase" not in command for command in commands)
 
 
+def test_reads_current_head_without_mutating_worktree() -> None:
+    runner = FakeRunner([CommandResult(0, "abc123\n")])
+
+    assert GitPublicationAdapter(runner).current_head("C:/worktree") == "abc123"
+    assert runner.calls == [(("git", "rev-parse", "HEAD"), "C:/worktree")]
+
+
 def test_no_changes_stops_before_stage_or_commit() -> None:
     runner = FakeRunner([CommandResult(0)])
     with pytest.raises(GitPublicationError, match="Não há alterações"):

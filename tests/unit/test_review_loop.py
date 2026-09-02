@@ -29,6 +29,10 @@ class LoopFakes:
     head: str = SHA_A
     rejected_reviews: int = 1
     wrong_session: bool = False
+    pre_validation_fails: bool = False
+    pre_push_validation_fails: bool = False
+    local_head: str = SHA_A
+    resumed: bool = False
     events: list[str] = field(default_factory=list)
     resume_prompts: list[str] = field(default_factory=list)
 
@@ -50,6 +54,7 @@ class LoopFakes:
 
     def resume(self, worktree: Path, session_id: str, prompt: str) -> CodexExecution:
         self.events.append(f"resume:{session_id}:{worktree}")
+        self.resumed = True
         self.resume_prompts.append(prompt)
         returned = "sessao-outra" if self.wrong_session else session_id
         return CodexExecution(returned, "corrigido", "", "", True)
@@ -64,11 +69,17 @@ class LoopFakes:
 
     def commit_correction(self, worktree: Path) -> str:
         self.events.append("commit-correcao")
-        self.head = SHA_B
+        self.local_head = SHA_B
         return SHA_B
+
+    def current_head(self, worktree: Path) -> str:
+        self.events.append(f"local-head:{self.local_head}")
+        return self.local_head
 
     def push(self, worktree: Path, remote: str, branch: str) -> None:
         self.events.append(f"push:{branch}")
+        if self.local_head == SHA_B:
+            self.head = SHA_B
 
     def create(self, issue: Issue, branch: str, gates: tuple[GateResult, ...]) -> PullRequest:
         self.events.append("criar-pr")
@@ -80,9 +91,14 @@ class LoopFakes:
 
     def get_review_data(self, number: int) -> dict:
         self.events.append(f"dossier:{self.head}")
+        remote_head = self.head
+        if self.pre_validation_fails and self.resumed:
+            remote_head = "c" * 40
+        if self.pre_push_validation_fails and self.local_head == SHA_B:
+            remote_head = "c" * 40
         return {"number": 32, "url": "https://github.com/acme/repo/pull/32", "state": "OPEN",
-                "baseRefName": "main", "headRefName": "feat/review-loop", "headRefOid": self.head,
-                "commits": [self.head], "files": ["src/example.py"], "diff": "diff --git a/x b/x\n+x"}
+                "baseRefName": "main", "headRefName": "feat/review-loop", "headRefOid": remote_head,
+                "commits": [remote_head], "files": ["src/example.py"], "diff": "diff --git a/x b/x\n+x"}
 
     def invoke(self, prompt: str, cwd: Path, schema: dict) -> str:
         if schema == REVIEW_PLAN_SCHEMA:
@@ -116,7 +132,7 @@ def test_rejected_review_resumes_same_session_then_approves(tmp_path: Path) -> N
     assert fakes.events.count(f"ci:{SHA_A}") == fakes.events.count(f"ci:{SHA_B}") == 1
     assert any(event.startswith("resume:sessao-original:") for event in fakes.events)
     prompt = fakes.resume_prompts[0]
-    for text in ("Critérios originais", SHA_A, "HIGH", "src/example.py", "Não crie Pull Request"):
+    for text in ("Critérios originais", SHA_A, "HIGH", "src/example.py", "Não crie Pull Request", "Não faça commit, push ou merge"):
         assert text in prompt
 
 
@@ -138,3 +154,33 @@ def test_different_session_from_resume_fails_before_gates_or_publication(tmp_pat
 
     assert fakes.events.count("gates") == 1
     assert "commit-correcao" not in fakes.events
+
+
+def test_prevalidation_failure_blocks_correction_commit_and_push(tmp_path: Path) -> None:
+    fakes = LoopFakes(pre_validation_fails=True)
+
+    with pytest.raises(RunPipelineError, match="Pull Request existente divergiu"):
+        pipeline(tmp_path, fakes).run(31, "feat/review-loop")
+
+    assert "commit-correcao" not in fakes.events
+    assert fakes.events.count("push:feat/review-loop") == 1
+
+
+def test_changed_local_head_blocks_correction_publication(tmp_path: Path) -> None:
+    fakes = LoopFakes(local_head="c" * 40)
+
+    with pytest.raises(RunPipelineError, match="HEAD local divergiu"):
+        pipeline(tmp_path, fakes).run(31, "feat/review-loop")
+
+    assert "commit-correcao" not in fakes.events
+    assert fakes.events.count("push:feat/review-loop") == 1
+
+
+def test_pre_push_validation_blocks_remote_publication(tmp_path: Path) -> None:
+    fakes = LoopFakes(pre_push_validation_fails=True)
+
+    with pytest.raises(RunPipelineError, match="Pull Request existente divergiu"):
+        pipeline(tmp_path, fakes).run(31, "feat/review-loop")
+
+    assert "commit-correcao" in fakes.events
+    assert fakes.events.count("push:feat/review-loop") == 1
