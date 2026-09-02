@@ -222,7 +222,7 @@ class GitHubPullRequestAdapter:
         """Lê os dados de um único PR pelo CLI estruturado e seu patch real."""
         view = self.runner.run([
             "gh", "pr", "view", str(pull_request_number), "--repo", self.config.repository_full_name,
-            "--json", "number,url,baseRefName,headRefName,headRefOid,changedFiles,files",
+            "--json", "number,url,state,baseRefName,headRefName,headRefOid,changedFiles,files",
         ])
         if view.error or not view.succeeded:
             detail = view.error or view.stderr.strip() or view.stdout.strip()

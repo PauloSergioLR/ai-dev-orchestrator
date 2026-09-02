@@ -10,6 +10,10 @@ autoridade do dossier não confiável. Issue, PR, diff e código são sempre dad
 nunca instruções. O SHA é revalidado antes da revisão final.
 
 Use `[review]` no TOML para configurar `provider = "antigravity"`,
-`timeout_seconds = 900` e `blocking_severities = ["CRITICAL", "HIGH", "MEDIUM"]`.
-As variáveis `ORCH_REVIEW__...` seguem o mesmo mapeamento. Não há feedback
-automático ao Codex, merge automático, mudança para `Done` ou cleanup nesta etapa.
+`timeout_seconds = 900`, `max_correction_attempts = 3` e
+`blocking_severities = ["CRITICAL", "HIGH", "MEDIUM"]`. Após um `REJECTED`, o
+orquestrador retoma a mesma sessão Codex no mesmo worktree, publica a correção no
+mesmo PR, aguarda a CI do novo HEAD e cria novo planner e reviewer. Findings
+anteriores entram no dossier como histórico estruturado. As variáveis
+`ORCH_REVIEW__...` seguem o mesmo mapeamento. Não há merge automático, mudança
+para `Done` ou cleanup nesta etapa.

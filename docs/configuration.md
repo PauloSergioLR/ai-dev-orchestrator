@@ -38,6 +38,9 @@ auto_merge = false
 required_checks = ["test"]
 poll_interval_seconds = 5
 timeout_seconds = 900
+
+[review]
+max_correction_attempts = 3
 ```
 
 Em `[github]`, `owner`, `repository` e `ready_status` devem ser textos não
@@ -60,6 +63,10 @@ Em `[ci]`, `required_checks` define os checks que devem existir e terminar com
 `SUCCESS` para liberar o fluxo. O padrão é `["test"]`; a lista não pode ser
 vazia. `poll_interval_seconds` (padrão `5`) e `timeout_seconds` (padrão `900`)
 devem ser positivos. Checks fora da lista não bloqueiam o gate.
+
+Em `[review]`, `max_correction_attempts` define quantas correções após um
+`REJECTED` podem ocorrer na mesma sessão Codex. O padrão é `3` e o valor deve
+ser um inteiro positivo.
 
 ## Variáveis de ambiente
 
@@ -84,6 +91,7 @@ ORCH_EXECUTION__AUTO_MERGE
 ORCH_CI__REQUIRED_CHECKS
 ORCH_CI__POLL_INTERVAL_SECONDS
 ORCH_CI__TIMEOUT_SECONDS
+ORCH_REVIEW__MAX_CORRECTION_ATTEMPTS
 ```
 
 Por exemplo, `ORCH_EXECUTION__MAX_ATTEMPTS=3` substitui apenas esse valor. A
