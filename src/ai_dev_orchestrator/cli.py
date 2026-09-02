@@ -88,6 +88,9 @@ def _show_run_result(result: RunResult) -> None:
         )
     if result.review is not None:
         typer.echo(f"Review Gemini: {result.review.verdict}")
+        typer.echo(f"Tentativas de review/correção: {result.review_attempts}/{result.correction_attempts}")
+        typer.echo(f"HEAD final revisado: {result.final_reviewed_head_sha}")
+        typer.echo(f"Findings anteriores preservados: {result.prior_findings_count}")
         blocking = [finding for finding in result.review.findings if finding.severity.value in result.blocking_severities]
         typer.echo(f"Findings bloqueantes: {len(blocking)}")
         for finding in blocking:

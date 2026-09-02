@@ -27,4 +27,5 @@ timeout_seconds = 900
 [review]
 provider = "antigravity"
 timeout_seconds = 900
+max_correction_attempts = 3
 blocking_severities = ["CRITICAL", "HIGH", "MEDIUM"]

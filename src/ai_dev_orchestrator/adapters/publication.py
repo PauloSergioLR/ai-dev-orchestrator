@@ -26,12 +26,26 @@ class GitPublicationAdapter:
         self.runner = runner or CommandRunner(timeout=GIT_PUBLICATION_TIMEOUT_SECONDS)
 
     def commit(self, worktree: str | Path, issue_number: int) -> str:
+        return self._commit(worktree, f"feat: implementa issue #{issue_number}")
+
+    def commit_correction(self, worktree: str | Path) -> str:
+        """Cria o commit determinístico de uma correção apontada pelo reviewer."""
+        return self._commit(worktree, "fix: corrige findings do reviewer")
+
+    def current_head(self, worktree: str | Path) -> str:
+        """Obtém o HEAD local sem modificar o worktree."""
+        sha = self._run(["git", "rev-parse", "HEAD"], worktree, "obter HEAD local").stdout.strip()
+        if not sha:
+            raise GitPublicationError("Git não retornou o HEAD local")
+        return sha
+
+    def _commit(self, worktree: str | Path, message: str) -> str:
         status = self._run(["git", "status", "--porcelain", "--untracked-files=all"], worktree, "verificar alterações")
         if not status.stdout.strip():
             raise GitPublicationError("Não há alterações versionáveis para commitar")
         self._run(["git", "add", "-A"], worktree, "stagear alterações")
         self._run(["git", "diff", "--cached", "--check"], worktree, "validar diff staged")
-        self._run(["git", "commit", "-m", f"feat: implementa issue #{issue_number}"], worktree, "criar commit")
+        self._run(["git", "commit", "-m", message], worktree, "criar commit")
         sha = self._run(["git", "rev-parse", "HEAD"], worktree, "obter SHA do commit").stdout.strip()
         if not sha:
             raise GitPublicationError("Git não retornou o SHA do commit criado")

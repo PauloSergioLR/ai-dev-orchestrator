@@ -76,15 +76,16 @@ class CodexAdapter:
             "retomar a sessão",
         )
         returned_session_id, final_message = self._parse_jsonl(
-            result.stdout, require_session=False
+            result.stdout, require_session=True
         )
-        if returned_session_id is not None and returned_session_id != session_id:
+        assert returned_session_id is not None
+        if returned_session_id != session_id:
             raise CodexError(
                 "Codex retornou uma sessão diferente da solicitada ao retomar: "
                 f"{returned_session_id}"
             )
         return CodexExecution(
-            session_id=session_id,
+            session_id=returned_session_id,
             final_message=final_message,
             stdout=result.stdout,
             stderr=result.stderr,

@@ -1,4 +1,4 @@
-"""Coordena a primeira execução de uma Issue sem ocultar mutações."""
+"""Coordena a execução de uma Issue sem ocultar mutações."""
 
 from __future__ import annotations
 
@@ -25,8 +25,8 @@ from ai_dev_orchestrator.domain.project import ProjectItem, is_eligible_for_exec
 from ai_dev_orchestrator.domain.worktree import GitWorktree
 from ai_dev_orchestrator.services.validation import GateResult, LocalValidationService
 from ai_dev_orchestrator.services.ci_gate import CiGate, PullRequestCiReader
-from ai_dev_orchestrator.services.review import ContextBuilder, PullRequestReviewReader, REVIEW_PLAN_SCHEMA, STRUCTURED_REVIEW_SCHEMA, build_checklists, build_prompt, parse_review_plan, parse_structured_review
-from ai_dev_orchestrator.domain.review import StructuredReview
+from ai_dev_orchestrator.services.review import CorrectionContextBuilder, ContextBuilder, PullRequestReviewReader, REVIEW_PLAN_SCHEMA, STRUCTURED_REVIEW_SCHEMA, build_checklists, build_prompt, parse_review_plan, parse_structured_review
+from ai_dev_orchestrator.domain.review import ReviewFinding, ReviewVerdict, StructuredReview
 from ai_dev_orchestrator.adapters.antigravity import AntigravityAdapter
 
 
@@ -54,6 +54,7 @@ class WorktreeCreator(Protocol):
 
 class CodexExecutor(Protocol):
     def execute(self, worktree: str | Path, prompt: str) -> CodexExecution: ...
+    def resume(self, worktree: str | Path, session_id: str, prompt: str) -> CodexExecution: ...
 
 
 class LocalValidator(Protocol):
@@ -63,6 +64,8 @@ class LocalValidator(Protocol):
 class GitPublisher(Protocol):
     def commit(self, worktree: str | Path, issue_number: int) -> str: ...
     def push(self, worktree: str | Path, remote_name: str, branch: str) -> None: ...
+    def commit_correction(self, worktree: str | Path) -> str: ...
+    def current_head(self, worktree: str | Path) -> str: ...
 
 
 class PullRequestCreator(Protocol):
@@ -71,7 +74,7 @@ class PullRequestCreator(Protocol):
 
 @dataclass(frozen=True)
 class RunResult:
-    """Resultado imutável da execução inicial de uma Issue."""
+    """Resultado imutável da execução e das revisões de uma Issue."""
 
     issue_number: int
     project_item_id: str
@@ -92,6 +95,10 @@ class RunResult:
     ci_status: CiStatus | None = None
     review: StructuredReview | None = None
     blocking_severities: tuple[str, ...] = ()
+    review_attempts: int = 0
+    correction_attempts: int = 0
+    final_reviewed_head_sha: str = ""
+    prior_findings_count: int = 0
 
 
 def derive_worktree_path(worktrees_dir: Path, branch: str) -> Path:
@@ -260,23 +267,89 @@ class RunPipeline:
         if self.review_reader is None or self.reviewer is None:
             return base_result
         try:
-            context_builder = ContextBuilder(self.review_reader, worktree.path)
-            dossier = context_builder.build(
-                issue, pull_request.number, ci_result.expected_head_sha, gates, ci_result)
-            policy_path = Path(__file__).parents[3] / "prompts" / "gemini" / "review_policy.md"
-            policy = policy_path.read_text(encoding="utf-8")
-            plan = parse_review_plan(self.reviewer.invoke(build_prompt(policy, dossier), worktree.path, REVIEW_PLAN_SCHEMA))
-            context_builder.ensure_head_is_current(pull_request.number, ci_result.expected_head_sha)
-            review = parse_structured_review(
-                self.reviewer.invoke(build_prompt(policy, dossier, plan, build_checklists(dossier.changed_files)), worktree.path, STRUCTURED_REVIEW_SCHEMA),
-                ci_result.expected_head_sha, self.config.review.blocking_severities)
-            context_builder.ensure_head_is_current(pull_request.number, ci_result.expected_head_sha)
+            review, ci_result, gates, final_message, corrections, prior_findings = self._run_review_loop(
+                issue, worktree, pull_request, execution.session_id, ci_result, gates, execution.final_message
+            )
         except Exception as error:
             raise RunPipelineError(
                 f"Falha na revisão Gemini da Issue #{issue.number}, Pull Request #{pull_request.number} em {pull_request.url}; "
-                f"Status permanece em '{self.config.github.ai_review_status}', branch {worktree.branch}, commit {commit_sha} e worktree {worktree.path} foram preservados: {error}"
+                f"Status permanece em '{self.config.github.ai_review_status}', branch {worktree.branch}, worktree {worktree.path} "
+                f"e sessão Codex {execution.session_id} foram preservados; nenhum merge foi executado: {error}"
             ) from error
-        return RunResult(**{**base_result.__dict__, "review": review, "blocking_severities": self.config.review.blocking_severities})
+        return RunResult(**{**base_result.__dict__, "gates": gates, "final_message": final_message,
+                            "commit_sha": ci_result.expected_head_sha, "pull_request_head_sha": ci_result.expected_head_sha,
+                            "ci_checks": ci_result.checks, "ci_status": ci_result.status, "review": review,
+                            "blocking_severities": self.config.review.blocking_severities,
+                            "review_attempts": corrections + 1, "correction_attempts": corrections,
+                            "final_reviewed_head_sha": review.reviewed_head_sha,
+                            "prior_findings_count": len(prior_findings)})
+
+    def _review_head(self, issue: Issue, worktree: GitWorktree, pull_request: PullRequest,
+                     head_sha: str, gates: tuple[GateResult, ...], ci_result,
+                     prior_findings: tuple[ReviewFinding, ...]) -> StructuredReview:
+        assert self.review_reader is not None and self.reviewer is not None
+        context_builder = ContextBuilder(self.review_reader, worktree.path)
+        dossier = context_builder.build(issue, pull_request.number, head_sha, gates, ci_result, prior_findings)
+        policy_path = Path(__file__).parents[3] / "prompts" / "gemini" / "review_policy.md"
+        policy = policy_path.read_text(encoding="utf-8")
+        plan = parse_review_plan(self.reviewer.invoke(build_prompt(policy, dossier), worktree.path, REVIEW_PLAN_SCHEMA))
+        context_builder.ensure_head_is_current(pull_request.number, head_sha)
+        review = parse_structured_review(
+            self.reviewer.invoke(build_prompt(policy, dossier, plan, build_checklists(dossier.changed_files)), worktree.path, STRUCTURED_REVIEW_SCHEMA),
+            head_sha, self.config.review.blocking_severities)
+        context_builder.ensure_head_is_current(pull_request.number, head_sha)
+        return review
+
+    def _run_review_loop(self, issue: Issue, worktree: GitWorktree, pull_request: PullRequest,
+                         session_id: str, ci_result, gates: tuple[GateResult, ...], final_message: str):
+        """Executa revisões frescas e retoma exclusivamente a sessão inicial do Codex."""
+        review = self._review_head(issue, worktree, pull_request, ci_result.expected_head_sha, gates, ci_result, ())
+        prior_findings: tuple[ReviewFinding, ...] = ()
+        corrections = 0
+        while review.verdict is ReviewVerdict.REJECTED:
+            previous_findings = prior_findings
+            prior_findings += review.findings
+            if corrections >= self.config.review.max_correction_attempts:
+                raise RunPipelineError(
+                    f"Limite de correções atingido para Issue #{issue.number}, Pull Request #{pull_request.number}, "
+                    f"HEAD {ci_result.expected_head_sha}, tentativa {corrections}, sessão {session_id} preservada; nenhum merge foi executado"
+                )
+            corrections += 1
+            prompt = CorrectionContextBuilder().build(issue, pull_request.number, pull_request.url,
+                                                       ci_result.expected_head_sha, review, previous_findings)
+            execution = self.codex_executor.resume(worktree.path, session_id, prompt)
+            if execution.session_id != session_id:
+                raise RunPipelineError("Codex retomou uma sessão diferente da sessão original")
+            final_message = execution.final_message
+            assert self.local_validator is not None and self.git_publisher is not None and self.ci_reader is not None
+            gates = self.local_validator.validate(worktree.path)
+            self._ensure_existing_pull_request(pull_request, worktree.branch, ci_result.expected_head_sha)
+            self._ensure_local_head_is_current(worktree.path, ci_result.expected_head_sha)
+            new_head = self.git_publisher.commit_correction(worktree.path)
+            self._ensure_existing_pull_request(pull_request, worktree.branch, ci_result.expected_head_sha)
+            self.git_publisher.push(worktree.path, self.config.workspace.remote_name, worktree.branch)
+            self._ensure_existing_pull_request(pull_request, worktree.branch, new_head)
+            ci_result = CiGate(self.ci_reader, self.config.ci).wait(pull_request.number, new_head)
+            review = self._review_head(issue, worktree, pull_request, new_head, gates, ci_result, prior_findings)
+        return review, ci_result, gates, final_message, corrections, prior_findings
+
+    def _ensure_existing_pull_request(self, pull_request: PullRequest, branch: str, expected_head_sha: str) -> None:
+        """Recusa publicar correções em PR trocado, fechado ou com HEAD divergente."""
+        assert self.review_reader is not None
+        data = self.review_reader.get_review_data(pull_request.number)
+        if (not isinstance(data, dict) or data.get("number") != pull_request.number
+                or data.get("headRefName") != branch or data.get("headRefOid") != expected_head_sha
+                or data.get("url") != pull_request.url or data.get("state") != "OPEN"):
+            raise RunPipelineError("O Pull Request existente divergiu, foi fechado ou não aponta para o novo HEAD")
+
+    def _ensure_local_head_is_current(self, worktree: Path, expected_head_sha: str) -> None:
+        """Impede publicar um commit que o Codex tenha criado fora do control plane."""
+        assert self.git_publisher is not None
+        observed_head = self.git_publisher.current_head(worktree)
+        if observed_head != expected_head_sha:
+            raise RunPipelineError(
+                "O HEAD local divergiu do HEAD revisado; a publicação da correção foi recusada"
+            )
 
     def _find_project_item(self, issue_number: int) -> ProjectItem:
         repository = self.config.github.repository_full_name

@@ -90,7 +90,7 @@ def test_sends_large_prompt_only_through_stdin_without_truncation(tmp_path: Path
     assert runner.arguments == ["codex", "exec", "-C", str(worktree.resolve()), "--json", "-"]
 
 
-def test_resume_accepts_jsonl_without_repeated_thread_event(tmp_path: Path) -> None:
+def test_resume_rejects_jsonl_without_returned_thread_event(tmp_path: Path) -> None:
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     runner = FakeRunner(
@@ -105,7 +105,8 @@ def test_resume_accepts_jsonl_without_repeated_thread_event(tmp_path: Path) -> N
         )
     )
 
-    assert CodexAdapter(runner).resume(worktree, "thread-123", "Continue").session_id == "thread-123"
+    with pytest.raises(CodexError, match="sem retornar o identificador"):
+        CodexAdapter(runner).resume(worktree, "thread-123", "Continue")
 
 
 def test_rejects_empty_session_id_before_running_codex(tmp_path: Path) -> None:
