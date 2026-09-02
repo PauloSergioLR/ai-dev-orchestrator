@@ -18,6 +18,7 @@ remote_name = "origin"
 max_attempts = 2
 max_parallel_runs = 1
 auto_merge = false
+merge_timeout_seconds = 30
 
 [ci]
 required_checks = ["test"]

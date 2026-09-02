@@ -39,6 +39,16 @@ class GitPublicationAdapter:
             raise GitPublicationError("Git não retornou o HEAD local")
         return sha
 
+    def merge_state(self, worktree: str | Path) -> tuple[str, str]:
+        """Confirma branch e ausência de alterações locais antes do merge remoto."""
+        branch = self._run(["git", "branch", "--show-current"], worktree, "obter branch local").stdout.strip()
+        if not branch:
+            raise GitPublicationError("Worktree está em HEAD destacado")
+        dirty = self._run(["git", "status", "--porcelain", "--untracked-files=all"], worktree, "verificar estado local").stdout
+        if dirty.strip():
+            raise GitPublicationError("Worktree possui alterações não commitadas")
+        return branch, self.current_head(worktree)
+
     def _commit(self, worktree: str | Path, message: str) -> str:
         status = self._run(["git", "status", "--porcelain", "--untracked-files=all"], worktree, "verificar alterações")
         if not status.stdout.strip():

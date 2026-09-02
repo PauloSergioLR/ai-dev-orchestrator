@@ -18,6 +18,7 @@ from ai_dev_orchestrator.domain.project import (
 )
 from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner
 from ai_dev_orchestrator.services.validation import GateResult
+from ai_dev_orchestrator.services.merge import MergePullRequestSnapshot, MergeResult, _is_sha
 
 
 GITHUB_ISSUE_TIMEOUT_SECONDS = 20
@@ -25,6 +26,7 @@ GITHUB_PROJECT_TIMEOUT_SECONDS = 20
 GITHUB_PROJECT_ITEM_LIMIT = 1000
 GITHUB_PULL_REQUEST_TIMEOUT_SECONDS = 30
 GITHUB_CI_TIMEOUT_SECONDS = 30
+GITHUB_MERGE_TIMEOUT_SECONDS = 30
 
 
 class GitHubIssueError(Exception):
@@ -173,8 +175,12 @@ class GitHubPullRequestAdapter:
     """Cria Pull Requests por GitHub CLI com argumentos seguros."""
 
     def __init__(self, config: GitHubConfig | OrchestratorConfig, runner: ProcessRunner | None = None) -> None:
+        merge_timeout = (
+            config.execution.merge_timeout_seconds
+            if isinstance(config, OrchestratorConfig) else GITHUB_MERGE_TIMEOUT_SECONDS
+        )
         self.config = config.github if isinstance(config, OrchestratorConfig) else config
-        self.runner = runner or CommandRunner(timeout=GITHUB_PULL_REQUEST_TIMEOUT_SECONDS)
+        self.runner = runner or CommandRunner(timeout=merge_timeout)
 
     def create(self, issue: Issue, branch: str, gates: tuple[GateResult, ...]) -> PullRequest:
         arguments = [
@@ -277,6 +283,75 @@ class GitHubPullRequestAdapter:
             )
         payload["diff"] = diff.stdout
         return payload
+
+    def get_merge_snapshot(self, pull_request_number: int) -> MergePullRequestSnapshot:
+        """Lê novamente o PR imediatamente antes/depois do merge."""
+        result = self.runner.run([
+            "gh", "pr", "view", str(pull_request_number), "--repo", self.config.repository_full_name,
+            "--json", "number,url,state,isDraft,baseRefName,headRefName,headRefOid,mergeable,mergedAt,mergeCommit",
+        ])
+        if result.error or not result.succeeded:
+            detail = result.error or result.stderr.strip() or result.stdout.strip()
+            raise GitHubPullRequestError(f"Não foi possível ler estado final do Pull Request #{pull_request_number}: {detail}")
+        try:
+            payload = json.loads(result.stdout)
+            commit = payload.get("mergeCommit")
+            commit_sha = commit.get("oid", "") if isinstance(commit, dict) else ""
+            snapshot = MergePullRequestSnapshot(
+                payload["number"], payload["url"], payload["state"], payload["isDraft"],
+                payload["baseRefName"], payload["headRefName"], payload["headRefOid"],
+                payload["mergeable"], payload.get("mergedAt") is not None, commit_sha,
+            )
+        except (json.JSONDecodeError, KeyError, TypeError) as error:
+            raise GitHubPullRequestError("Resposta final do Pull Request é inválida") from error
+        if (not isinstance(snapshot.number, int) or isinstance(snapshot.number, bool)
+                or not all(isinstance(value, str) for value in (
+                    snapshot.url, snapshot.state, snapshot.base, snapshot.head_branch,
+                    snapshot.head_sha, snapshot.mergeable)) or not _is_sha(snapshot.head_sha)):
+            raise GitHubPullRequestError("Resposta final do Pull Request contém campos inválidos")
+        return snapshot
+
+    def merge(self, pull_request_number: int, expected_head_sha: str) -> MergeResult:
+        """Executa exclusivamente merge commit, preso ao SHA explicitamente aprovado."""
+        if not _is_sha(expected_head_sha):
+            raise GitHubPullRequestError("SHA esperado para merge é inválido")
+        result = self.runner.run([
+            "gh", "api", "--method", "PUT", f"repos/{self.config.repository_full_name}/pulls/{pull_request_number}/merge",
+            "-f", "merge_method=merge", "-f", f"sha={expected_head_sha}",
+        ])
+        if result.error or not result.succeeded:
+            detail = result.error or result.stderr.strip() or result.stdout.strip()
+            raise GitHubPullRequestError(f"Falha ao executar merge do Pull Request #{pull_request_number}: {detail}")
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raise GitHubPullRequestError("Resposta de merge do GitHub é inválida") from error
+        if not isinstance(payload, dict):
+            raise GitHubPullRequestError("Resposta de merge do GitHub é inválida")
+        sha = payload.get("sha")
+        if payload.get("merged") is not True or not isinstance(sha, str) or not _is_sha(sha):
+            raise GitHubPullRequestError("GitHub não confirmou um merge com SHA válido")
+        return MergeResult(expected_head_sha, sha)
+
+    def verify_merge_commit(self, merge_commit_sha: str, merged_head_sha: str) -> None:
+        """Confirma via REST que o commit de merge conserva o HEAD aprovado como pai."""
+        if not _is_sha(merge_commit_sha) or not _is_sha(merged_head_sha):
+            raise GitHubPullRequestError("SHA inválido na verificação pós-merge")
+        result = self.runner.run([
+            "gh", "api", f"repos/{self.config.repository_full_name}/git/commits/{merge_commit_sha}",
+        ])
+        if result.error or not result.succeeded:
+            detail = result.error or result.stderr.strip() or result.stdout.strip()
+            raise GitHubPullRequestError(f"Não foi possível verificar commit de merge: {detail}")
+        try:
+            payload = json.loads(result.stdout)
+            parents = payload["parents"]
+            parent_shas = [parent["sha"] for parent in parents]
+        except (json.JSONDecodeError, KeyError, TypeError) as error:
+            raise GitHubPullRequestError("Verificação do commit de merge retornou payload inválido") from error
+        if (not isinstance(parents, list) or not all(isinstance(sha, str) and _is_sha(sha) for sha in parent_shas)
+                or merged_head_sha not in parent_shas):
+            raise GitHubPullRequestError("Commit de merge não contém o HEAD aprovado como pai")
 
     @staticmethod
     def _required_string(payload: Any, field: str) -> str:

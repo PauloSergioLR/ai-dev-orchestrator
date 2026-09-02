@@ -95,6 +95,10 @@ def _show_run_result(result: RunResult) -> None:
         typer.echo(f"Findings bloqueantes: {len(blocking)}")
         for finding in blocking:
             typer.echo(f"- {finding.severity}: {finding.title}")
+    if result.auto_merge_enabled:
+        typer.echo(f"Auto-merge: {result.merge_status}")
+        if result.merged:
+            typer.echo(f"Merge commit: {result.merge_commit_sha}")
 
 
 def main() -> None:

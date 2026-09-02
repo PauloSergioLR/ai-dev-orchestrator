@@ -28,6 +28,7 @@ from ai_dev_orchestrator.services.ci_gate import CiGate, PullRequestCiReader
 from ai_dev_orchestrator.services.review import CorrectionContextBuilder, ContextBuilder, PullRequestReviewReader, REVIEW_PLAN_SCHEMA, STRUCTURED_REVIEW_SCHEMA, build_checklists, build_prompt, parse_review_plan, parse_structured_review
 from ai_dev_orchestrator.domain.review import ReviewFinding, ReviewVerdict, StructuredReview
 from ai_dev_orchestrator.adapters.antigravity import AntigravityAdapter
+from ai_dev_orchestrator.services.merge import MergeGate, MergeGateError, MergePullRequestSnapshot, MergeResult
 
 
 class RunPipelineError(Exception):
@@ -72,6 +73,12 @@ class PullRequestCreator(Protocol):
     def create(self, issue: Issue, branch: str, gates: tuple[GateResult, ...]) -> PullRequest: ...
 
 
+class PullRequestMerger(Protocol):
+    def get_merge_snapshot(self, pull_request_number: int) -> MergePullRequestSnapshot: ...
+    def merge(self, pull_request_number: int, expected_head_sha: str) -> MergeResult: ...
+    def verify_merge_commit(self, merge_commit_sha: str, merged_head_sha: str) -> None: ...
+
+
 @dataclass(frozen=True)
 class RunResult:
     """Resultado imutável da execução e das revisões de uma Issue."""
@@ -99,6 +106,12 @@ class RunResult:
     correction_attempts: int = 0
     final_reviewed_head_sha: str = ""
     prior_findings_count: int = 0
+    auto_merge_enabled: bool = False
+    merge_status: str = "NOT_REQUESTED"
+    merged: bool = False
+    merge_commit_sha: str = ""
+    merged_head_sha: str = ""
+    reviewed_head_sha: str = ""
 
 
 def derive_worktree_path(worktrees_dir: Path, branch: str) -> Path:
@@ -149,6 +162,7 @@ class RunPipeline:
         ci_reader: PullRequestCiReader | None = None,
         review_reader: PullRequestReviewReader | None = None,
         reviewer: AntigravityAdapter | None = None,
+        pull_request_merger: PullRequestMerger | None = None,
     ) -> None:
         self.config = config
         self.issue_reader = issue_reader
@@ -162,14 +176,16 @@ class RunPipeline:
         self.ci_reader = ci_reader
         self.review_reader = review_reader
         self.reviewer = reviewer
+        self.pull_request_merger = pull_request_merger
 
     @classmethod
     def from_config(cls, config: OrchestratorConfig) -> RunPipeline:
+        pull_requests = GitHubPullRequestAdapter(config)
         return cls(config, GitHubIssueAdapter(config), GitHubProjectAdapter(config),
                    GitHubProjectStatusAdapter(config), GitWorktreeAdapter(), CodexAdapter(),
-                   LocalValidationService(), GitPublicationAdapter(), GitHubPullRequestAdapter(config),
-                   GitHubCiAdapter(config), GitHubPullRequestAdapter(config),
-                   AntigravityAdapter(config.review.timeout_seconds))
+                   LocalValidationService(), GitPublicationAdapter(), pull_requests,
+                   GitHubCiAdapter(config), pull_requests,
+                   AntigravityAdapter(config.review.timeout_seconds), pull_requests)
 
     def run(self, issue_number: int, branch: str) -> RunResult:
         if issue_number <= 0:
@@ -276,13 +292,57 @@ class RunPipeline:
                 f"Status permanece em '{self.config.github.ai_review_status}', branch {worktree.branch}, worktree {worktree.path} "
                 f"e sessão Codex {execution.session_id} foram preservados; nenhum merge foi executado: {error}"
             ) from error
-        return RunResult(**{**base_result.__dict__, "gates": gates, "final_message": final_message,
+        result = RunResult(**{**base_result.__dict__, "gates": gates, "final_message": final_message,
                             "commit_sha": ci_result.expected_head_sha, "pull_request_head_sha": ci_result.expected_head_sha,
                             "ci_checks": ci_result.checks, "ci_status": ci_result.status, "review": review,
                             "blocking_severities": self.config.review.blocking_severities,
                             "review_attempts": corrections + 1, "correction_attempts": corrections,
                             "final_reviewed_head_sha": review.reviewed_head_sha,
-                            "prior_findings_count": len(prior_findings)})
+                            "prior_findings_count": len(prior_findings),
+                            "auto_merge_enabled": self.config.execution.auto_merge,
+                            "reviewed_head_sha": review.reviewed_head_sha})
+        if not self.config.execution.auto_merge:
+            return result
+        return self._merge_approved_pull_request(result, worktree, pull_request, ci_result, review)
+
+    def _merge_approved_pull_request(
+        self, result: RunResult, worktree: GitWorktree, pull_request: PullRequest, ci_result,
+        review: StructuredReview,
+    ) -> RunResult:
+        """Revalida tudo uma última vez e só então executa a única mutação de merge."""
+        if self.pull_request_merger is None or self.git_publisher is None:
+            raise RunPipelineError("Auto-merge foi habilitado, mas a infraestrutura de merge não está disponível")
+        try:
+            branch, local_head = self.git_publisher.merge_state(worktree.path)
+            snapshot = self.pull_request_merger.get_merge_snapshot(pull_request.number)
+            MergeGate().validate(
+                snapshot, pull_request_number=pull_request.number, pull_request_url=pull_request.url,
+                base=self.config.github.pull_request_base, branch=worktree.branch, local_head=local_head,
+                review=review, ci_result=ci_result,
+                blocking_severities=self.config.review.blocking_severities,
+            )
+            if branch != worktree.branch:
+                raise MergeGateError("Branch local divergiu da branch da Issue")
+            merge = self.pull_request_merger.merge(pull_request.number, review.reviewed_head_sha)
+            confirmed = self.pull_request_merger.get_merge_snapshot(pull_request.number)
+            if (confirmed.state != "MERGED" or not confirmed.merged
+                    or confirmed.merge_commit_sha != merge.merge_commit_sha
+                    or confirmed.head_sha != review.reviewed_head_sha):
+                raise MergeGateError("GitHub não confirmou o merge do HEAD aprovado")
+            self.pull_request_merger.verify_merge_commit(merge.merge_commit_sha, merge.merged_head_sha)
+        except Exception as error:
+            raise RunPipelineError(
+                f"Auto-merge recusado ou não confirmado para Pull Request #{pull_request.number}; nenhum Status Done foi escrito: {error}"
+            ) from error
+        try:
+            self.status_writer.set_status(result.project_item_id, "Done")
+        except Exception as error:
+            raise RunPipelineError(
+                f"Pull Request #{pull_request.number} já foi merged ({merge.merge_commit_sha}), mas falhou ao atualizar o Status para 'Done': {error}"
+            ) from error
+        return RunResult(**{**result.__dict__, "project_status": "Done", "merge_status": "SUCCESS",
+                            "merged": True, "merge_commit_sha": merge.merge_commit_sha,
+                            "merged_head_sha": merge.merged_head_sha})
 
     def _review_head(self, issue: Issue, worktree: GitWorktree, pull_request: PullRequest,
                      head_sha: str, gates: tuple[GateResult, ...], ci_result,
