@@ -22,8 +22,8 @@ class AntigravityAdapter:
 
     def invoke(self, prompt: str, cwd: str | Path, schema: dict[str, Any]) -> str:
         arguments = [
-            "agy", "-p", "-", "--dangerously-skip-permissions", "--print-timeout",
-            str(int(self.timeout_seconds)), "--output-format", "json", "--json-schema",
+            "agy", "--input-format", "text", "--dangerously-skip-permissions", "--print-timeout",
+            f"{int(self.timeout_seconds)}s", "--output-format", "json", "--json-schema",
             json.dumps(schema, separators=(",", ":")),
         ]
         result = self.runner.run(arguments, cwd=cwd, input_text=prompt)

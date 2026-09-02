@@ -222,7 +222,7 @@ class GitHubPullRequestAdapter:
         """Lê os dados de um único PR pelo CLI estruturado e seu patch real."""
         view = self.runner.run([
             "gh", "pr", "view", str(pull_request_number), "--repo", self.config.repository_full_name,
-            "--json", "number,url,baseRefName,headRefName,headRefOid,commits,files",
+            "--json", "number,url,baseRefName,headRefName,headRefOid,changedFiles,files",
         ])
         if view.error or not view.succeeded:
             detail = view.error or view.stderr.strip() or view.stdout.strip()
@@ -233,6 +233,27 @@ class GitHubPullRequestAdapter:
             raise GitHubPullRequestError("GitHub CLI retornou JSON inválido para o Pull Request") from error
         if not isinstance(payload, dict) or payload.get("number") != pull_request_number:
             raise GitHubPullRequestError("Resposta do Pull Request não corresponde ao número solicitado")
+        if not isinstance(payload.get("changedFiles"), int) or isinstance(payload["changedFiles"], bool) or payload["changedFiles"] < 0:
+            raise GitHubPullRequestError("Resposta do Pull Request inválida: campo 'changedFiles'")
+        if not isinstance(payload.get("files"), list):
+            raise GitHubPullRequestError("Resposta do Pull Request inválida: campo 'files'")
+        if len(payload["files"]) != payload["changedFiles"]:
+            raise GitHubPullRequestError("Lista de arquivos do Pull Request está truncada ou incompleta")
+        commits_result = self.runner.run([
+            "gh", "api", "--paginate", "--slurp", f"repos/{self.config.repository_full_name}/pulls/{pull_request_number}/commits",
+        ])
+        if commits_result.error or not commits_result.succeeded:
+            detail = commits_result.error or commits_result.stderr.strip() or commits_result.stdout.strip()
+            raise GitHubPullRequestError(f"Não foi possível ler todos os commits do Pull Request #{pull_request_number}: {detail}")
+        try:
+            raw_pages = json.loads(commits_result.stdout)
+        except json.JSONDecodeError as error:
+            raise GitHubPullRequestError("GitHub CLI retornou JSON inválido para commits paginados") from error
+        if not isinstance(raw_pages, list) or not all(isinstance(page, list) for page in raw_pages):
+            raise GitHubPullRequestError("Resposta paginada de commits inválida")
+        payload["commits"] = [commit for page in raw_pages for commit in page]
+        if not payload["commits"]:
+            raise GitHubPullRequestError("Resposta paginada de commits está vazia")
         for field in ("commits", "files"):
             if not isinstance(payload.get(field), list):
                 raise GitHubPullRequestError(f"Resposta do Pull Request inválida: campo '{field}'")
@@ -247,13 +268,10 @@ class GitHubPullRequestAdapter:
             raise GitHubPullRequestError(f"Não foi possível ler diff do Pull Request #{pull_request_number}: {detail}")
         if not diff.stdout:
             raise GitHubPullRequestError("Diff do Pull Request está vazio ou foi truncado externamente")
-        expected_headers = {f"diff --git a/{path} b/{path}" for path in payload["files"]}
-        observed_headers = {
-            line for line in diff.stdout.splitlines() if line.startswith("diff --git a/")
-        }
-        if not expected_headers <= observed_headers:
+        observed_headers = [line for line in diff.stdout.splitlines() if line.startswith("diff --git a/")]
+        if len(observed_headers) != payload["changedFiles"]:
             raise GitHubPullRequestError(
-                "Diff do Pull Request não contém todos os arquivos declarados; revisão recusada"
+                "Diff do Pull Request não contém a quantidade completa de arquivos; revisão recusada"
             )
         payload["diff"] = diff.stdout
         return payload

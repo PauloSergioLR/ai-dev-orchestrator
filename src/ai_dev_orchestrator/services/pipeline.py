@@ -270,6 +270,7 @@ class RunPipeline:
             review = parse_structured_review(
                 self.reviewer.invoke(build_prompt(policy, dossier, plan, build_checklists(dossier.changed_files)), worktree.path, STRUCTURED_REVIEW_SCHEMA),
                 ci_result.expected_head_sha, self.config.review.blocking_severities)
+            context_builder.ensure_head_is_current(pull_request.number, ci_result.expected_head_sha)
         except Exception as error:
             raise RunPipelineError(
                 f"Falha na revisão Gemini da Issue #{issue.number}, Pull Request #{pull_request.number} em {pull_request.url}; "

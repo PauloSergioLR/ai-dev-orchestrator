@@ -53,3 +53,19 @@ def test_view_failure_reports_created_pr_url_and_number() -> None:
     value, _ = adapter([CommandResult(0, "https://github.com/acme/repo/pull/42\n"), CommandResult(1, stderr="sem permissão")])
     with pytest.raises(GitHubPullRequestError, match=r"#42.*pull/42"):
         create(value)
+
+
+def test_review_data_uses_pagination_and_accepts_renamed_diff() -> None:
+    metadata = '{"number":42,"url":"u","baseRefName":"main","headRefName":"f","headRefOid":"' + "a" * 40 + '","changedFiles":1,"files":[{"path":"new.py"}]}'
+    commits = '[[{"oid":"' + "a" * 40 + '"}]]'
+    value, runner = adapter([CommandResult(0, metadata), CommandResult(0, commits), CommandResult(0, "diff --git a/old.py b/new.py\nsimilarity index 90%")])
+    result = value.get_review_data(42)
+    assert result["commits"] == ["a" * 40]
+    assert "--paginate" in runner.calls[1] and "--slurp" in runner.calls[1]
+
+
+def test_review_data_rejects_truncated_file_list() -> None:
+    metadata = '{"number":42,"url":"u","baseRefName":"main","headRefName":"f","headRefOid":"' + "a" * 40 + '","changedFiles":101,"files":[]}'
+    value, _ = adapter([CommandResult(0, metadata)])
+    with pytest.raises(GitHubPullRequestError, match="truncada"):
+        value.get_review_data(42)

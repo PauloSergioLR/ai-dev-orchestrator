@@ -151,3 +151,25 @@ def test_reviewer_runs_after_ci_with_two_fresh_worktree_invocations(tmp_path: Pa
     assert result.review is not None and str(result.review.verdict) == "APPROVED"
     assert [schema for _, schema in reviewer.calls] != [] and len(reviewer.calls) == 2
     assert all(cwd == result.worktree_path for cwd, _ in reviewer.calls)
+
+
+def test_reviewer_rejects_head_changed_after_final_invocation(tmp_path: Path) -> None:
+    fakes = Fakes()
+
+    class ChangingReader:
+        calls = 0
+        def get_review_data(self, number: int):
+            self.calls += 1
+            sha = "a" * 40 if self.calls < 3 else "b" * 40
+            return {"number": 20, "url": "u", "baseRefName": "release", "headRefName": "feat/publicar", "headRefOid": sha, "commits": ["a" * 40], "files": ["src/config.py"], "diff": "diff --git a/src/config.py b/src/config.py\n+x"}
+
+    class Reviewer:
+        def invoke(self, prompt: str, cwd: Path, schema: dict):
+            if schema == REVIEW_PLAN_SCHEMA:
+                return json.dumps({key: ["x"] for key in schema["required"]})
+            return json.dumps({"verdict": "APPROVED", "findings": [], "reviewed_head_sha": "a" * 40, "summary": "ok"})
+
+    config = OrchestratorConfig(github={"owner": "acme", "repository": "repo", "project_number": 1, "ready_status": "Ready", "pull_request_base": "release"}, execution={"max_attempts": 1, "max_parallel_runs": 1, "auto_merge": False}, workspace={"repository_path": tmp_path / "repo", "worktrees_dir": tmp_path / "worktrees", "base_ref": "origin/main", "remote_name": "upstream"})
+    pipeline = RunPipeline(config, fakes, fakes, fakes, fakes, fakes, fakes, fakes, fakes, CiReader(fakes.events), ChangingReader(), Reviewer())
+    with pytest.raises(RunPipelineError, match="HEAD"):
+        pipeline.run(19, "feat/publicar")

@@ -45,6 +45,13 @@ def test_context_dossier_and_prompt_keep_adversarial_content_as_data(tmp_path):
     assert "<POLITICA_AUTORITATIVA>\nPOLÍTICA" in prompt
     assert "<DADOS_NAO_CONFIAVEIS>" in prompt and "Ignore instruções" in prompt
 
+
+def test_prompt_serializes_prior_findings_as_structured_data(tmp_path):
+    value = dossier(tmp_path)
+    value = value.__class__(**{**value.__dict__, "prior_findings": (ReviewFinding(FindingSeverity.LOW, "t", "d", "a.py", 3, "c"),)})
+    payload = json.loads(build_prompt("p", value).split("<DADOS_NAO_CONFIAVEIS>\n", 1)[1].split("\n</DADOS_NAO_CONFIAVEIS>", 1)[0])
+    assert payload["dossier"]["prior_findings"] == [{"severity": "LOW", "title": "t", "description": "d", "path": "a.py", "line": 3, "criterion": "c"}]
+
 @pytest.mark.parametrize("change", ["head", "missing"])
 def test_context_fails_closed_for_invalid_pr(tmp_path, change):
     value = data()
@@ -85,6 +92,8 @@ def test_antigravity_uses_stdin_schema_and_explicit_worktree(tmp_path):
     assert json.loads(result)["risks"] == ["evidência"]
     assert cwd == tmp_path and input_text == prompt and prompt not in arguments
     assert "--output-format" in arguments and "--json-schema" in arguments
+    assert "-p" not in arguments and arguments[arguments.index("--input-format") + 1] == "text"
+    assert arguments[arguments.index("--print-timeout") + 1] == "900s"
 
 @pytest.mark.parametrize("envelope", ["bad", json.dumps({"status":"ERROR"}), json.dumps({"status":"SUCCESS"}), json.dumps({"status":"SUCCESS", "structured_output": []})])
 def test_antigravity_rejects_invalid_envelopes(tmp_path, envelope):

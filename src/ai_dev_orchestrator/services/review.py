@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 import re
 from typing import Any, Protocol
@@ -19,7 +20,7 @@ class ReviewError(Exception):
 
 _PLAN_FIELDS = ("risks", "invariants", "acceptance_evidence", "side_effects", "regressions", "tests", "security_risks", "architecture_points")
 REVIEW_PLAN_SCHEMA = {"type": "object", "additionalProperties": False, "required": list(_PLAN_FIELDS), "properties": {name: {"type": "array", "items": {"type": "string"}} for name in _PLAN_FIELDS}}
-STRUCTURED_REVIEW_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["verdict", "findings", "reviewed_head_sha", "summary"], "properties": {"verdict": {"enum": ["APPROVED", "REJECTED"]}, "findings": {"type": "array"}, "reviewed_head_sha": {"type": "string"}, "summary": {"type": "string"}}}
+STRUCTURED_REVIEW_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["verdict", "findings", "reviewed_head_sha", "summary"], "properties": {"verdict": {"enum": ["APPROVED", "REJECTED"]}, "findings": {"type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["severity", "title", "description"], "properties": {"severity": {"enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"]}, "title": {"type": "string", "minLength": 1}, "description": {"type": "string", "minLength": 1}, "path": {"type": ["string", "null"], "minLength": 1}, "line": {"type": ["integer", "null"], "minimum": 1}, "criterion": {"type": ["string", "null"], "minLength": 1}}}}, "reviewed_head_sha": {"type": "string", "pattern": "^[0-9a-fA-F]{40,64}$"}, "summary": {"type": "string", "minLength": 1}}}
 
 
 class PullRequestReviewReader(Protocol):
@@ -136,9 +137,9 @@ def parse_structured_review(output: str, expected_sha: str, blocking: tuple[str,
 
 def build_prompt(policy: str, dossier: ReviewDossier, plan: ReviewPlan | None = None, checklists: tuple[str, ...] = ()) -> str:
     """Separa autoridade de evidência dinâmica com delimitadores inequívocos."""
-    payload: dict[str, Any] = {"dossier": dossier.__dict__}
+    payload: dict[str, Any] = {"dossier": asdict(dossier)}
     if plan is not None:
-        payload["review_plan"] = plan.__dict__
+        payload["review_plan"] = asdict(plan)
     if checklists:
         payload["checklists"] = checklists
     task = "Produza somente JSON do ReviewPlan." if plan is None else "Produza somente JSON do StructuredReview."
