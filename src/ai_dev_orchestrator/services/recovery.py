@@ -14,6 +14,7 @@ from ai_dev_orchestrator.adapters.github import PullRequest
 from ai_dev_orchestrator.config import OrchestratorConfig
 from ai_dev_orchestrator.domain.execution import ExecutionPhase, RunRecord, TERMINAL_PHASES
 from ai_dev_orchestrator.domain.review import ReviewVerdict
+from ai_dev_orchestrator.domain.review import StructuredReview
 from ai_dev_orchestrator.domain.worktree import GitWorktree
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
 from ai_dev_orchestrator.services.ci_gate import CiGate
@@ -31,6 +32,7 @@ class ResumeService:
 
     def __init__(self, config: OrchestratorConfig, pipeline: RunPipeline, store: SqliteExecutionStore) -> None:
         self.config, self.pipeline, self.store = config, pipeline, store
+        self._pending_rejected_review: StructuredReview | None = None
 
     @classmethod
     def from_config(cls, config: OrchestratorConfig) -> "ResumeService":
@@ -173,7 +175,10 @@ class ResumeService:
             local_head = None
         if local_head is None:
             try:
-                local_head = publisher.commit(worktree.path, record.issue_number)
+                if record.correction_attempts:
+                    local_head = publisher.commit_correction(worktree.path)
+                else:
+                    local_head = publisher.commit(worktree.path, record.issue_number)
             except Exception as error:
                 raise RecoveryError(f"Não foi possível criar o commit local da retomada: {error}") from error
             record = self._checkpoint("Commit local reconciliado", local_head, current_head_sha=local_head)
@@ -260,6 +265,7 @@ class ResumeService:
         if review.reviewed_head_sha != record.current_head_sha:
             raise RecoveryError("Reviewer retornou resultado para HEAD diferente")
         if review.verdict is ReviewVerdict.REJECTED:
+            self._pending_rejected_review = review
             return self._transition(ExecutionPhase.NEEDS_CHANGES, "Review fresco rejeitou o HEAD persistido", head_sha=record.current_head_sha, reviewed_head_sha=review.reviewed_head_sha, review_verdict=review.verdict.value)
         if self.config.execution.auto_merge:
             return self._transition(ExecutionPhase.MERGING, "Review fresco aprovado; merge requer nova revalidação", head_sha=record.current_head_sha, reviewed_head_sha=review.reviewed_head_sha, review_verdict=review.verdict.value)
@@ -270,11 +276,14 @@ class ResumeService:
             raise RecoveryError("Contexto insuficiente para retomar a correção")
         if record.correction_attempts >= self.config.review.max_correction_attempts:
             raise RecoveryError("Limite de correções atingido; nenhuma nova sessão ou publicação foi iniciada")
-        ci = CiGate(self.pipeline.ci_reader, self.config.ci).wait(pull_request.number, record.current_head_sha)
         issue = self.pipeline.issue_reader.get_issue(record.issue_number)
-        review = self.pipeline._review_head(issue, worktree, pull_request, record.current_head_sha, (), ci, ())
+        review = self._pending_rejected_review
+        if review is None or review.reviewed_head_sha != record.current_head_sha:
+            ci = CiGate(self.pipeline.ci_reader, self.config.ci).wait(pull_request.number, record.current_head_sha)
+            review = self.pipeline._review_head(issue, worktree, pull_request, record.current_head_sha, (), ci, ())
         if review.verdict is not ReviewVerdict.REJECTED:
             raise RecoveryError("Os findings persistidos não puderam ser reconstruídos como rejeitados")
+        self._pending_rejected_review = None
         prompt = CorrectionContextBuilder().build(issue, pull_request.number, pull_request.url, record.current_head_sha, review, ())
         attempts = record.correction_attempts + 1
         self._transition(
