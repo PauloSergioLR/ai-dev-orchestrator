@@ -33,6 +33,7 @@ class ResumeService:
     def __init__(self, config: OrchestratorConfig, pipeline: RunPipeline, store: SqliteExecutionStore) -> None:
         self.config, self.pipeline, self.store = config, pipeline, store
         self._pending_rejected_review: StructuredReview | None = None
+        self._pending_approved_review: tuple[StructuredReview, object] | None = None
 
     @classmethod
     def from_config(cls, config: OrchestratorConfig) -> "ResumeService":
@@ -155,7 +156,15 @@ class ResumeService:
             raise RecoveryError("Worktree persistido ausente; não é seguro iniciar sessão Codex")
         issue = self.pipeline.issue_reader.get_issue(record.issue_number)
         if record.codex_session_id:
-            execution = self.pipeline.codex_executor.resume(worktree.path, record.codex_session_id, build_initial_prompt(issue))
+            if record.correction_attempts:
+                execution = self.pipeline.codex_executor.resume(
+                    worktree.path, record.codex_session_id,
+                    self._correction_prompt(record, worktree, pull_request=None, issue=issue),
+                )
+            else:
+                execution = self.pipeline.codex_executor.resume(
+                    worktree.path, record.codex_session_id, build_initial_prompt(issue)
+                )
         else:
             raise RecoveryError("Sessão Codex persistida ausente; a retomada não cria sessão nova")
         if record.codex_session_id and execution.session_id != record.codex_session_id:
@@ -268,6 +277,7 @@ class ResumeService:
             self._pending_rejected_review = review
             return self._transition(ExecutionPhase.NEEDS_CHANGES, "Review fresco rejeitou o HEAD persistido", head_sha=record.current_head_sha, reviewed_head_sha=review.reviewed_head_sha, review_verdict=review.verdict.value)
         if self.config.execution.auto_merge:
+            self._pending_approved_review = (review, ci)
             return self._transition(ExecutionPhase.MERGING, "Review fresco aprovado; merge requer nova revalidação", head_sha=record.current_head_sha, reviewed_head_sha=review.reviewed_head_sha, review_verdict=review.verdict.value)
         return self._transition(ExecutionPhase.APPROVED_AWAITING_ACTION, "Review fresco aprovado; aguardando ação externa", head_sha=record.current_head_sha, reviewed_head_sha=review.reviewed_head_sha, review_verdict=review.verdict.value)
 
@@ -295,6 +305,22 @@ class ResumeService:
             raise RecoveryError("Codex retornou uma sessão diferente da sessão persistida")
         return self._transition(ExecutionPhase.TESTING, "Correção Codex concluída")
 
+    def _correction_prompt(
+        self, record: RunRecord, worktree: GitWorktree, pull_request: PullRequest | None, issue
+    ) -> str:
+        """Reconstrói o contexto de correção após queda durante CODEX_RUNNING."""
+        if pull_request is None:
+            pull_request = self._validate_pull_request(record)
+        if pull_request is None or not record.current_head_sha or self.pipeline.ci_reader is None:
+            raise RecoveryError("Contexto insuficiente para reconstruir a correção Codex")
+        review = self._pending_rejected_review
+        if review is None or review.reviewed_head_sha != record.current_head_sha:
+            ci = CiGate(self.pipeline.ci_reader, self.config.ci).wait(pull_request.number, record.current_head_sha)
+            review = self.pipeline._review_head(issue, worktree, pull_request, record.current_head_sha, (), ci, ())
+        if review.verdict is not ReviewVerdict.REJECTED:
+            raise RecoveryError("Findings de correção não foram confirmados para o HEAD persistido")
+        return CorrectionContextBuilder().build(issue, pull_request.number, pull_request.url, record.current_head_sha, review, ())
+
     def _reconcile_merge(self, record: RunRecord, worktree: GitWorktree | None, pull_request: PullRequest | None) -> RunRecord:
         if pull_request is None or self.pipeline.pull_request_merger is None or not record.reviewed_head_sha:
             raise RecoveryError("Dados insuficientes para reconciliar merge")
@@ -306,9 +332,14 @@ class ResumeService:
         if snapshot.state != "OPEN" or worktree is None or self.pipeline.ci_reader is None or self.pipeline.git_publisher is None:
             raise RecoveryError("Merge não confirmado de forma inequívoca; nenhum retry cego foi executado")
         # O gate inteiro é refeito a partir de leituras atuais antes da única mutação.
-        ci = CiGate(self.pipeline.ci_reader, self.config.ci).wait(pull_request.number, record.reviewed_head_sha)
-        issue = self.pipeline.issue_reader.get_issue(record.issue_number)
-        review = self.pipeline._review_head(issue, worktree, pull_request, record.reviewed_head_sha, (), ci, ())
+        pending = self._pending_approved_review
+        if pending is not None and pending[0].reviewed_head_sha == record.reviewed_head_sha:
+            review, ci = pending
+        else:
+            ci = CiGate(self.pipeline.ci_reader, self.config.ci).wait(pull_request.number, record.reviewed_head_sha)
+            issue = self.pipeline.issue_reader.get_issue(record.issue_number)
+            review = self.pipeline._review_head(issue, worktree, pull_request, record.reviewed_head_sha, (), ci, ())
+        self._pending_approved_review = None
         branch, local_head = self.pipeline.git_publisher.merge_state(worktree.path)
         # A leitura usada pelo gate deve ser imediatamente anterior ao merge.
         snapshot = self.pipeline.pull_request_merger.get_merge_snapshot(pull_request.number)
