@@ -1,0 +1,114 @@
+"""Fatos observados e decisões puras para a retomada segura."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import StrEnum
+
+from ai_dev_orchestrator.domain.execution import ExecutionPhase
+
+
+class WorktreeState(StrEnum):
+    ABSENT = "ABSENT"
+    CONVERGENT = "CONVERGENT"
+    DIVERGENT = "DIVERGENT"
+
+
+class PullRequestState(StrEnum):
+    OPEN = "OPEN"
+    MERGED = "MERGED"
+
+
+class CiState(StrEnum):
+    ABSENT = "ABSENT"
+    PENDING = "PENDING"
+    SUCCESS = "SUCCESS"
+    FAILURE = "FAILURE"
+
+
+class ReviewState(StrEnum):
+    ABSENT = "ABSENT"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
+class MergeState(StrEnum):
+    OPEN = "OPEN"
+    MERGED = "MERGED"
+
+
+class RecoveryAction(StrEnum):
+    """Uma única ação, ou um único checkpoint determinístico, por decisão."""
+
+    PREPARE_WORKTREE = "PREPARE_WORKTREE"
+    RESUME_CODEX = "RESUME_CODEX"
+    RUN_LOCAL_GATES = "RUN_LOCAL_GATES"
+    CREATE_COMMIT = "CREATE_COMMIT"
+    RECORD_EXISTING_COMMIT = "RECORD_EXISTING_COMMIT"
+    PUSH_BRANCH = "PUSH_BRANCH"
+    RECORD_EXISTING_PUSH = "RECORD_EXISTING_PUSH"
+    CREATE_PULL_REQUEST = "CREATE_PULL_REQUEST"
+    ADOPT_PULL_REQUEST = "ADOPT_PULL_REQUEST"
+    WAIT_FOR_CI = "WAIT_FOR_CI"
+    RECORD_CI_SUCCESS = "RECORD_CI_SUCCESS"
+    REVIEW_HEAD = "REVIEW_HEAD"
+    RESUME_CORRECTION = "RESUME_CORRECTION"
+    MERGE_PULL_REQUEST = "MERGE_PULL_REQUEST"
+    RECORD_EXISTING_MERGE = "RECORD_EXISTING_MERGE"
+    MARK_PROJECT_DONE = "MARK_PROJECT_DONE"
+    COMPLETE = "COMPLETE"
+    ADVANCE_PHASE = "ADVANCE_PHASE"
+    BLOCK = "BLOCK"
+
+
+@dataclass(frozen=True)
+class PullRequestObservation:
+    number: int
+    head_sha: str
+    state: PullRequestState = PullRequestState.OPEN
+
+
+@dataclass(frozen=True)
+class CiObservation:
+    state: CiState = CiState.ABSENT
+    head_sha: str | None = None
+
+
+@dataclass(frozen=True)
+class ReviewObservation:
+    state: ReviewState = ReviewState.ABSENT
+    head_sha: str | None = None
+
+
+@dataclass(frozen=True)
+class MergeObservation:
+    state: MergeState = MergeState.OPEN
+    merged_head_sha: str | None = None
+    merge_commit_sha: str | None = None
+
+
+@dataclass(frozen=True)
+class RecoveryObservation:
+    """Snapshot normalizado; a coleta desses fatos pertence aos adapters futuros."""
+
+    worktree_state: WorktreeState
+    local_head_sha: str | None = None
+    local_head_descends_from_checkpoint: bool = False
+    has_local_changes: bool = False
+    has_untracked_files: bool = False
+    remote_head_sha: str | None = None
+    remote_head_is_ancestor_of_local: bool = False
+    pull_requests: tuple[PullRequestObservation, ...] = ()
+    ci: CiObservation = field(default_factory=CiObservation)
+    review: ReviewObservation = field(default_factory=ReviewObservation)
+    findings_head_sha: str | None = None
+    merge: MergeObservation = field(default_factory=MergeObservation)
+    project_done: bool = False
+    auto_merge_enabled: bool = False
+
+
+@dataclass(frozen=True)
+class RecoveryDecision:
+    action: RecoveryAction
+    reason: str
+    next_phase: ExecutionPhase | None = None

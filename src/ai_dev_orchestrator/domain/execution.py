@@ -12,11 +12,16 @@ class ExecutionPhase(StrEnum):
     PREPARING = "PREPARING"
     CODEX_RUNNING = "CODEX_RUNNING"
     TESTING = "TESTING"
+    COMMIT_PENDING = "COMMIT_PENDING"
+    PUSH_PENDING = "PUSH_PENDING"
+    PR_PENDING = "PR_PENDING"
     PUBLISHING = "PUBLISHING"
     WAITING_CI = "WAITING_CI"
     GEMINI_REVIEWING = "GEMINI_REVIEWING"
     NEEDS_CHANGES = "NEEDS_CHANGES"
+    MERGE_PENDING = "MERGE_PENDING"
     MERGING = "MERGING"
+    PROJECT_DONE_PENDING = "PROJECT_DONE_PENDING"
     APPROVED_AWAITING_ACTION = "APPROVED_AWAITING_ACTION"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
@@ -32,16 +37,29 @@ TERMINAL_PHASES = frozenset(
 _ALLOWED = {
     ExecutionPhase.PREPARING: {ExecutionPhase.CODEX_RUNNING, ExecutionPhase.FAILED},
     ExecutionPhase.CODEX_RUNNING: {ExecutionPhase.TESTING, ExecutionPhase.FAILED},
-    ExecutionPhase.TESTING: {ExecutionPhase.PUBLISHING, ExecutionPhase.FAILED},
+    ExecutionPhase.TESTING: {
+        ExecutionPhase.COMMIT_PENDING,
+        ExecutionPhase.PUBLISHING,
+        ExecutionPhase.FAILED,
+    },
+    ExecutionPhase.COMMIT_PENDING: {ExecutionPhase.PUSH_PENDING, ExecutionPhase.FAILED},
+    ExecutionPhase.PUSH_PENDING: {ExecutionPhase.PR_PENDING, ExecutionPhase.FAILED},
+    ExecutionPhase.PR_PENDING: {ExecutionPhase.WAITING_CI, ExecutionPhase.FAILED},
     ExecutionPhase.PUBLISHING: {ExecutionPhase.WAITING_CI, ExecutionPhase.FAILED},
     ExecutionPhase.WAITING_CI: {ExecutionPhase.GEMINI_REVIEWING, ExecutionPhase.FAILED},
     ExecutionPhase.GEMINI_REVIEWING: {
         ExecutionPhase.NEEDS_CHANGES,
+        ExecutionPhase.MERGE_PENDING,
         ExecutionPhase.MERGING,
         ExecutionPhase.APPROVED_AWAITING_ACTION,
         ExecutionPhase.FAILED,
     },
     ExecutionPhase.NEEDS_CHANGES: {ExecutionPhase.CODEX_RUNNING, ExecutionPhase.FAILED},
+    ExecutionPhase.MERGE_PENDING: {
+        ExecutionPhase.PROJECT_DONE_PENDING,
+        ExecutionPhase.FAILED,
+    },
+    ExecutionPhase.PROJECT_DONE_PENDING: {ExecutionPhase.COMPLETED, ExecutionPhase.FAILED},
     ExecutionPhase.MERGING: {ExecutionPhase.COMPLETED, ExecutionPhase.FAILED},
 }
 
