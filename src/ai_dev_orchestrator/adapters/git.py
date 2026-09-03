@@ -72,7 +72,8 @@ class GitWorktreeAdapter:
         )
 
     def validate_existing_worktree(
-        self, repository: str | Path, worktree_path: str | Path, branch: str, base_ref: str
+        self, repository: str | Path, worktree_path: str | Path, branch: str, base_ref: str,
+        *, allow_dirty: bool = False,
     ) -> GitWorktree:
         """Confirma um worktree persistido sem o alterar.
 
@@ -106,7 +107,7 @@ class GitWorktreeAdapter:
             ["git", "-C", str(path), "status", "--porcelain", "--untracked-files=all"],
             "verificar estado do worktree",
         ).stdout.strip()
-        if dirty:
+        if dirty and not allow_dirty:
             raise GitWorktreeError("O worktree persistido possui alterações locais inesperadas")
         return GitWorktree(root, path, branch, base_ref)
 

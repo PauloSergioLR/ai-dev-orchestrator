@@ -18,6 +18,7 @@ from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
 from ai_dev_orchestrator.services.ci_gate import CiGate
 from ai_dev_orchestrator.services.merge import MergeGate
 from ai_dev_orchestrator.services.pipeline import RunPipeline, build_initial_prompt
+from ai_dev_orchestrator.services.review import CorrectionContextBuilder
 
 
 class RecoveryError(Exception):
@@ -52,40 +53,42 @@ class ResumeService:
 
         if record.phase is ExecutionPhase.PREPARING:
             if worktree is None:
-                if not record.branch or not record.worktree_path or not record.base_ref:
-                    raise RecoveryError("Dados persistidos insuficientes para preparar o worktree")
-                try:
-                    worktree = self.pipeline.worktree_creator.create_worktree(
-                        self.config.workspace.repository_path, record.branch,
-                        record.worktree_path, record.base_ref,
-                    )
-                except Exception as error:
-                    raise RecoveryError(f"Não foi possível preparar o worktree persistido: {error}") from error
+                raise RecoveryError("Worktree persistido ausente; a retomada não cria outro worktree")
             # Um worktree existente é reconhecido acima e nunca recriado.
             if record.project_item_id and record.project_status != self.config.github.in_progress_status:
                 self.pipeline.status_writer.set_status(record.project_item_id, self.config.github.in_progress_status)
                 self._checkpoint("Project marcado como em andamento na retomada", project_status=self.config.github.in_progress_status)
-            return self._transition(ExecutionPhase.CODEX_RUNNING, "Worktree persistido reconhecido")
+            self._transition(ExecutionPhase.CODEX_RUNNING, "Worktree persistido reconhecido")
+            return self.resume(issue_number)
         if record.phase is ExecutionPhase.CODEX_RUNNING:
-            return self._resume_codex(record, worktree)
+            self._resume_codex(record, worktree)
+            return self.resume(issue_number)
         if record.phase is ExecutionPhase.TESTING:
             if worktree is None or self.pipeline.local_validator is None:
                 raise RecoveryError("Não há infraestrutura para reexecutar gates locais")
             self.pipeline.local_validator.validate(worktree.path)
-            return self._transition(ExecutionPhase.PUBLISHING, "Gates locais reexecutados na retomada")
+            advanced = self._transition(ExecutionPhase.PUBLISHING, "Gates locais reexecutados na retomada")
+            if self.pipeline.git_publisher is None:
+                return advanced
+            return self.resume(issue_number)
         if record.phase is ExecutionPhase.PUBLISHING:
-            return self._reconcile_publication(record, worktree, pull_request)
+            self._reconcile_publication(record, worktree, pull_request)
+            return self.resume(issue_number)
         if record.phase is ExecutionPhase.WAITING_CI:
             if pull_request is None or not record.current_head_sha or self.pipeline.ci_reader is None:
                 raise RecoveryError("PR, HEAD ou leitor de CI ausente para retomada")
             ci = CiGate(self.pipeline.ci_reader, self.config.ci).wait(pull_request.number, record.current_head_sha)
-            return self._transition(ExecutionPhase.GEMINI_REVIEWING, "CI revalidada para o HEAD persistido", ci_head_sha=ci.expected_head_sha, head_sha=ci.expected_head_sha)
+            self._transition(ExecutionPhase.GEMINI_REVIEWING, "CI revalidada para o HEAD persistido", ci_head_sha=ci.expected_head_sha, head_sha=ci.expected_head_sha)
+            return self.resume(issue_number)
         if record.phase is ExecutionPhase.GEMINI_REVIEWING:
-            return self._refresh_review(record, worktree, pull_request)
+            self._refresh_review(record, worktree, pull_request)
+            return self.store.get(record.id) if self.store.get(record.id).phase in TERMINAL_PHASES else self.resume(issue_number)
         if record.phase is ExecutionPhase.NEEDS_CHANGES:
-            return self._resume_codex(record, worktree)
+            self._resume_correction(record, worktree, pull_request)
+            return self.resume(issue_number)
         if record.phase is ExecutionPhase.MERGING:
-            return self._reconcile_merge(record, worktree, pull_request)
+            self._reconcile_merge(record, worktree, pull_request)
+            return self.store.get(record.id) if self.store.get(record.id).phase in TERMINAL_PHASES else self.resume(issue_number)
         raise RecoveryError(f"Fase de retomada não suportada: {record.phase}")
 
     def _validate_worktree(self, record: RunRecord) -> GitWorktree | None:
@@ -99,7 +102,11 @@ class ResumeService:
                 raise RecoveryError("O worktree persistido não existe")
             return GitWorktree(self.config.workspace.repository_path, Path(record.worktree_path), record.branch, record.base_ref)
         try:
-            worktree = validator(self.config.workspace.repository_path, record.worktree_path, record.branch, record.base_ref)
+            allow_dirty = record.phase in {
+                ExecutionPhase.PREPARING, ExecutionPhase.CODEX_RUNNING,
+                ExecutionPhase.TESTING, ExecutionPhase.NEEDS_CHANGES,
+            } or record.phase is ExecutionPhase.PUBLISHING
+            worktree = validator(self.config.workspace.repository_path, record.worktree_path, record.branch, record.base_ref, allow_dirty=allow_dirty)
             if record.current_head_sha and self.pipeline.git_publisher is not None:
                 observed = self.pipeline.git_publisher.current_head(worktree.path)
                 if observed != record.current_head_sha:
@@ -136,8 +143,7 @@ class ResumeService:
         if record.codex_session_id:
             execution = self.pipeline.codex_executor.resume(worktree.path, record.codex_session_id, build_initial_prompt(issue))
         else:
-            execution = self.pipeline.codex_executor.execute(worktree.path, build_initial_prompt(issue))
-            self._checkpoint("Sessão Codex criada na retomada", codex_session_id=execution.session_id)
+            raise RecoveryError("Sessão Codex persistida ausente; a retomada não cria sessão nova")
         if record.codex_session_id and execution.session_id != record.codex_session_id:
             raise RecoveryError("Codex retornou uma sessão diferente da sessão persistida")
         return self._transition(ExecutionPhase.TESTING, "Sessão Codex persistida retomada")
@@ -148,23 +154,51 @@ class ResumeService:
         publisher = self.pipeline.git_publisher
         if publisher is None:
             raise RecoveryError("Publicador Git indisponível para reconciliação")
-        local_head = publisher.current_head(worktree.path)
-        if record.current_head_sha and local_head != record.current_head_sha:
+        previous_head = record.current_head_sha
+        try:
+            _, local_head = publisher.merge_state(worktree.path)
+        except Exception:
+            local_head = None
+        if local_head is None:
+            try:
+                local_head = publisher.commit(worktree.path, record.issue_number)
+            except Exception as error:
+                raise RecoveryError(f"Não foi possível criar o commit local da retomada: {error}") from error
+            record = self._checkpoint("Commit local reconciliado", local_head, current_head_sha=local_head)
+        elif record.current_head_sha and local_head != record.current_head_sha:
             raise RecoveryError("HEAD local divergiu durante a publicação")
         remote_head_reader = getattr(publisher, "remote_head", None)
         if remote_head_reader is None:
             raise RecoveryError("Não é possível confirmar a branch remota sem leitura explícita")
         remote_head = remote_head_reader(worktree.path, self.config.workspace.remote_name, record.branch)
+        if remote_head is None or (previous_head is not None and remote_head == previous_head):
+            try:
+                publisher.push(worktree.path, self.config.workspace.remote_name, record.branch)
+                remote_head = remote_head_reader(worktree.path, self.config.workspace.remote_name, record.branch)
+            except Exception as error:
+                raise RecoveryError(f"Não foi possível confirmar o push da branch: {error}") from error
         if remote_head != local_head:
-            raise RecoveryError("Branch remota ausente ou divergente; push não será repetido cegamente")
+            raise RecoveryError("Branch remota divergiu do HEAD local; push foi recusado")
         if pull_request is None:
             finder = getattr(self.pipeline.pull_request_creator, "find_open_by_branch", None)
             if finder is None:
                 raise RecoveryError("Não é possível procurar PR existente com segurança")
             matches = finder(record.branch, self.config.github.pull_request_base)
-            if len(matches) != 1:
-                raise RecoveryError("PR existente ausente ou ambíguo; criação automática foi recusada")
-            pull_request = matches[0]
+            if len(matches) > 1:
+                raise RecoveryError("Pull Requests existentes são ambíguos")
+            if not matches:
+                issue = self.pipeline.issue_reader.get_issue(record.issue_number)
+                if self.pipeline.local_validator is None:
+                    raise RecoveryError("Gates locais ausentes para criar o Pull Request")
+                gates = self.pipeline.local_validator.validate(worktree.path)
+                try:
+                    pull_request = self.pipeline.pull_request_creator.create(issue, record.branch, gates)
+                except Exception as error:
+                    raise RecoveryError(f"Não foi possível criar Pull Request após reconciliação: {error}") from error
+            else:
+                pull_request = matches[0]
+                if pull_request.head_sha != local_head:
+                    raise RecoveryError("Pull Request encontrado aponta para HEAD divergente")
             record = self._checkpoint("PR existente reconciliado", local_head, pull_request_number=pull_request.number, pull_request_url=pull_request.url, current_head_sha=local_head)
         return self._transition(ExecutionPhase.WAITING_CI, "Publicação reconciliada sem novo push ou PR", head_sha=local_head, current_head_sha=local_head)
 
@@ -181,6 +215,21 @@ class ResumeService:
         if self.config.execution.auto_merge:
             return self._transition(ExecutionPhase.MERGING, "Review fresco aprovado; merge requer nova revalidação", head_sha=record.current_head_sha, reviewed_head_sha=review.reviewed_head_sha, review_verdict=review.verdict.value)
         return self._transition(ExecutionPhase.APPROVED_AWAITING_ACTION, "Review fresco aprovado; aguardando ação externa", head_sha=record.current_head_sha, reviewed_head_sha=review.reviewed_head_sha, review_verdict=review.verdict.value)
+
+    def _resume_correction(self, record: RunRecord, worktree: GitWorktree | None, pull_request: PullRequest | None) -> RunRecord:
+        if worktree is None or pull_request is None or not record.codex_session_id or not record.current_head_sha or self.pipeline.ci_reader is None:
+            raise RecoveryError("Contexto insuficiente para retomar a correção")
+        ci = CiGate(self.pipeline.ci_reader, self.config.ci).wait(pull_request.number, record.current_head_sha)
+        issue = self.pipeline.issue_reader.get_issue(record.issue_number)
+        review = self.pipeline._review_head(issue, worktree, pull_request, record.current_head_sha, (), ci, ())
+        if review.verdict is not ReviewVerdict.REJECTED:
+            raise RecoveryError("Os findings persistidos não puderam ser reconstruídos como rejeitados")
+        prompt = CorrectionContextBuilder().build(issue, pull_request.number, pull_request.url, record.current_head_sha, review, ())
+        self._transition(ExecutionPhase.CODEX_RUNNING, "Sessão Codex será retomada para correção")
+        execution = self.pipeline.codex_executor.resume(worktree.path, record.codex_session_id, prompt)
+        if execution.session_id != record.codex_session_id:
+            raise RecoveryError("Codex retornou uma sessão diferente da sessão persistida")
+        return self._transition(ExecutionPhase.TESTING, "Correção Codex concluída")
 
     def _reconcile_merge(self, record: RunRecord, worktree: GitWorktree | None, pull_request: PullRequest | None) -> RunRecord:
         if pull_request is None or self.pipeline.pull_request_merger is None or not record.reviewed_head_sha:
@@ -213,7 +262,13 @@ class ResumeService:
     def _complete_project(self, record: RunRecord, merge_commit_sha: str, merged_head_sha: str) -> RunRecord:
         if not record.project_item_id:
             raise RecoveryError("Item do Project ausente após merge confirmado")
-        if record.project_status != "Done":
+        project_done = False
+        try:
+            items = self.pipeline.project_reader.list_items()
+            project_done = any(item.id == record.project_item_id and item.status == "Done" for item in items)
+        except Exception as error:
+            raise RecoveryError(f"Não foi possível revalidar o Project após merge: {error}") from error
+        if not project_done:
             self.pipeline.status_writer.set_status(record.project_item_id, "Done")
         return self._transition(ExecutionPhase.COMPLETED, "Merge e Project Done reconciliados", merge_commit_sha=merge_commit_sha, merged_head_sha=merged_head_sha, project_status="Done")
 

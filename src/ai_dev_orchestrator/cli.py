@@ -77,11 +77,24 @@ def resume(
     issue: int = typer.Option(..., "--issue", min=1, help="Número positivo da Issue."),
 ) -> None:
     """Retoma com segurança a execução ativa persistida de uma Issue."""
+    service: ResumeService | None = None
     try:
-        record = ResumeService.from_config(load_config()).resume(issue)
+        service = ResumeService.from_config(load_config())
+        record = service.resume(issue)
+    except KeyboardInterrupt:
+        if service is not None and service.pipeline._execution_id is not None:
+            try:
+                service._checkpoint("Retomada interrompida pelo usuário")
+            except Exception:
+                pass
+        typer.echo("Retomada interrompida; o checkpoint existente foi preservado.", err=True)
+        raise typer.Exit(code=130) from None
     except (ConfigurationError, ExecutionStoreError, RecoveryError, RunPipelineError) as error:
         typer.echo(f"Erro: {error}", err=True)
         raise typer.Exit(code=1) from error
+    except Exception:
+        typer.echo("Erro: retomada recusada por falha externa; nenhum novo efeito foi confirmado.", err=True)
+        raise typer.Exit(code=1) from None
     typer.echo(f"Issue #{record.issue_number} retomada em {record.phase}.")
 
 
