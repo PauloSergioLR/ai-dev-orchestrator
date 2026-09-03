@@ -187,6 +187,39 @@ def test_limit_stops_without_a_second_resume(tmp_path: Path) -> None:
     assert fakes.events.count("criar-pr") == 1
 
 
+def test_wait_for_pr_head_accepts_only_previous_then_expected(tmp_path: Path, monkeypatch) -> None:
+    fakes = LoopFakes()
+    heads = [SHA_A, SHA_B]
+    fakes.get_review_data = lambda _: {  # type: ignore[method-assign]
+        "number": 32, "url": "https://github.com/acme/repo/pull/32", "state": "OPEN",
+        "baseRefName": "main", "headRefName": "feat/review-loop", "headRefOid": heads.pop(0),
+    }
+    monkeypatch.setattr("ai_dev_orchestrator.services.pipeline.time.sleep", lambda _: None)
+
+    pipeline(tmp_path, fakes)._wait_for_pull_request_head(
+        PullRequest(32, "https://github.com/acme/repo/pull/32", "", "main", "feat/review-loop"),
+        "feat/review-loop", SHA_A, SHA_B,
+    )
+
+    assert fakes.events == []
+
+
+def test_wait_for_pr_head_rejects_third_sha_without_mutation(tmp_path: Path) -> None:
+    fakes = LoopFakes()
+    fakes.get_review_data = lambda _: {  # type: ignore[method-assign]
+        "number": 32, "url": "https://github.com/acme/repo/pull/32", "state": "OPEN",
+        "baseRefName": "main", "headRefName": "feat/review-loop", "headRefOid": SHA_C,
+    }
+
+    with pytest.raises(RunPipelineError, match="SHA incompatível"):
+        pipeline(tmp_path, fakes)._wait_for_pull_request_head(
+            PullRequest(32, "https://github.com/acme/repo/pull/32", "", "main", "feat/review-loop"),
+            "feat/review-loop", SHA_A, SHA_B,
+        )
+
+    assert fakes.events == []
+
+
 def test_different_session_from_resume_fails_before_gates_or_publication(tmp_path: Path) -> None:
     fakes = LoopFakes(wrong_session=True)
 

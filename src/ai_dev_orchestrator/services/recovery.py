@@ -189,7 +189,9 @@ class ResumeService:
             raise RecoveryError("Branch remota aponta para SHA incompatível")
         if pull_request is not None and pull_request.head_sha not in {previous_head, local_head}:
             raise RecoveryError("Pull Request aponta para SHA incompatível")
-        if remote_head is None or remote_head == previous_head:
+        if remote_head is None or (
+            remote_head == previous_head and remote_head != local_head
+        ):
             try:
                 publisher.push(worktree.path, self.config.workspace.remote_name, record.branch)
                 remote_head = remote_head_reader(worktree.path, self.config.workspace.remote_name, record.branch)
@@ -266,13 +268,19 @@ class ResumeService:
     def _resume_correction(self, record: RunRecord, worktree: GitWorktree | None, pull_request: PullRequest | None) -> RunRecord:
         if worktree is None or pull_request is None or not record.codex_session_id or not record.current_head_sha or self.pipeline.ci_reader is None:
             raise RecoveryError("Contexto insuficiente para retomar a correção")
+        if record.correction_attempts >= self.config.review.max_correction_attempts:
+            raise RecoveryError("Limite de correções atingido; nenhuma nova sessão ou publicação foi iniciada")
         ci = CiGate(self.pipeline.ci_reader, self.config.ci).wait(pull_request.number, record.current_head_sha)
         issue = self.pipeline.issue_reader.get_issue(record.issue_number)
         review = self.pipeline._review_head(issue, worktree, pull_request, record.current_head_sha, (), ci, ())
         if review.verdict is not ReviewVerdict.REJECTED:
             raise RecoveryError("Os findings persistidos não puderam ser reconstruídos como rejeitados")
         prompt = CorrectionContextBuilder().build(issue, pull_request.number, pull_request.url, record.current_head_sha, review, ())
-        self._transition(ExecutionPhase.CODEX_RUNNING, "Sessão Codex será retomada para correção")
+        attempts = record.correction_attempts + 1
+        self._transition(
+            ExecutionPhase.CODEX_RUNNING, "Sessão Codex será retomada para correção",
+            correction_attempts=attempts,
+        )
         execution = self.pipeline.codex_executor.resume(worktree.path, record.codex_session_id, prompt)
         if execution.session_id != record.codex_session_id:
             raise RecoveryError("Codex retornou uma sessão diferente da sessão persistida")
@@ -293,6 +301,8 @@ class ResumeService:
         issue = self.pipeline.issue_reader.get_issue(record.issue_number)
         review = self.pipeline._review_head(issue, worktree, pull_request, record.reviewed_head_sha, (), ci, ())
         branch, local_head = self.pipeline.git_publisher.merge_state(worktree.path)
+        # A leitura usada pelo gate deve ser imediatamente anterior ao merge.
+        snapshot = self.pipeline.pull_request_merger.get_merge_snapshot(pull_request.number)
         MergeGate().validate(snapshot, pull_request_number=pull_request.number, pull_request_url=pull_request.url,
                             base=self.config.github.pull_request_base, branch=branch, local_head=local_head,
                             review=review, ci_result=ci, blocking_severities=self.config.review.blocking_severities)

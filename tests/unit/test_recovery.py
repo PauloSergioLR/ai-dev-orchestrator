@@ -142,3 +142,19 @@ def test_pr_propagation_accepts_only_previous_head_until_expected_head_arrives(t
 
     assert pull_request.head_sha == new
     assert reader.calls == 2
+
+
+def test_recovery_propagation_rejects_third_sha_without_mutation(tmp_path: Path) -> None:
+    old = "4ac557b7f9e39fbb31883e336bb5b24ef2535073"
+    new = "7a2ef15fa9480095356365ea5f767f5f0704d155"
+    reader = _ReviewReader("a" * 40)
+    pipeline = _Pipeline(_Validator())
+    pipeline.review_reader = reader
+    service = ResumeService(_config(tmp_path), pipeline, SqliteExecutionStore(tmp_path / "state.db"))  # type: ignore[arg-type]
+
+    with pytest.raises(RecoveryError, match="SHA incompatível"):
+        service._wait_for_pull_request_head(
+            PullRequest(38, "https://github.com/acme/repo/pull/38", "", "main", "feat/execution-recovery", old), new, old
+        )
+
+    assert reader.calls == 1

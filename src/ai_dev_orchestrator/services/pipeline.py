@@ -714,7 +714,9 @@ class RunPipeline:
             self.git_publisher.push(
                 worktree.path, self.config.workspace.remote_name, worktree.branch
             )
-            self._wait_for_pull_request_head(pull_request, worktree.branch, new_head)
+            self._wait_for_pull_request_head(
+                pull_request, worktree.branch, ci_result.expected_head_sha, new_head
+            )
             self._transition(
                 ExecutionPhase.WAITING_CI,
                 "Correção publicada; aguardando CI",
@@ -761,7 +763,8 @@ class RunPipeline:
             )
 
     def _wait_for_pull_request_head(
-        self, pull_request: PullRequest, branch: str, expected_head_sha: str
+        self, pull_request: PullRequest, branch: str, previous_head_sha: str,
+        expected_head_sha: str,
     ) -> None:
         """Aguarda, apenas por leitura, a propagação limitada do HEAD do PR."""
         assert self.review_reader is not None
@@ -777,6 +780,8 @@ class RunPipeline:
                 raise RunPipelineError("O Pull Request existente divergiu ou foi fechado")
             if data.get("headRefOid") == expected_head_sha:
                 return
+            if data.get("headRefOid") != previous_head_sha:
+                raise RunPipelineError("O Pull Request aponta para SHA incompatível")
             if attempt < 2:
                 time.sleep(min(self.config.ci.poll_interval_seconds, 1))
         raise RunPipelineError("O Pull Request não propagou o HEAD publicado no prazo limitado")
