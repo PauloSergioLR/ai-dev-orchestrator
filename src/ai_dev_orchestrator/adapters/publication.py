@@ -49,6 +49,17 @@ class GitPublicationAdapter:
             raise GitPublicationError("Worktree possui alterações não commitadas")
         return branch, self.current_head(worktree)
 
+    def remote_head(self, worktree: str | Path, remote_name: str, branch: str) -> str | None:
+        """Lê o HEAD remoto da branch sem efetuar push."""
+        result = self._run(["git", "ls-remote", "--heads", remote_name, f"refs/heads/{branch}"], worktree, "ler branch remota")
+        line = result.stdout.strip()
+        if not line:
+            return None
+        sha = line.split()[0]
+        if not sha:
+            raise GitPublicationError("Git não retornou o HEAD remoto")
+        return sha
+
     def _commit(self, worktree: str | Path, message: str) -> str:
         status = self._run(["git", "status", "--porcelain", "--untracked-files=all"], worktree, "verificar alterações")
         if not status.stdout.strip():

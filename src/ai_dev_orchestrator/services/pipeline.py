@@ -276,10 +276,6 @@ class RunPipeline:
                     base_ref=self.config.workspace.base_ref,
                 )
                 self._execution_id = record.id
-                self._transition(
-                    ExecutionPhase.CODEX_RUNNING,
-                    "Worktree e execução Codex serão preparados",
-                )
             except Exception as error:
                 raise RunPipelineError(
                     f"Falha ao persistir estado antes de criar o worktree: {error}"
@@ -295,6 +291,10 @@ class RunPipeline:
             raise RunPipelineError(
                 f"Falha ao criar branch e worktree: {error}"
             ) from error
+        self._transition(
+            ExecutionPhase.CODEX_RUNNING,
+            "Worktree persistido preparado; execução Codex será iniciada",
+        )
         try:
             self.status_writer.set_status(
                 item.id, self.config.github.in_progress_status
@@ -353,6 +353,7 @@ class RunPipeline:
                 f"Falha ao preparar ou criar o commit; worktree e staging foram preservados em "
                 f"{worktree.path}: {error}"
             ) from error
+        self._checkpoint("Commit local criado", head_sha=commit_sha, current_head_sha=commit_sha)
         try:
             self.git_publisher.push(
                 worktree.path, self.config.workspace.remote_name, worktree.branch
@@ -361,6 +362,7 @@ class RunPipeline:
             raise RunPipelineError(
                 f"Falha ao enviar a branch; o commit {commit_sha} foi preservado em {worktree.path}: {error}"
             ) from error
+        self._checkpoint("Push da branch confirmado", head_sha=commit_sha, current_head_sha=commit_sha)
         try:
             pull_request = self.pull_request_creator.create(
                 issue, worktree.branch, gates

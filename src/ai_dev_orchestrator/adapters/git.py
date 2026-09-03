@@ -71,6 +71,45 @@ class GitWorktreeAdapter:
             base_ref=base_ref,
         )
 
+    def validate_existing_worktree(
+        self, repository: str | Path, worktree_path: str | Path, branch: str, base_ref: str
+    ) -> GitWorktree:
+        """Confirma um worktree persistido sem o alterar.
+
+        Esta operação é usada exclusivamente pelo recovery; em particular, não faz
+        checkout, reset, clean ou qualquer tentativa de "consertar" o Git.
+        """
+        root = self.validate_repository(repository).resolve()
+        path = Path(worktree_path).resolve()
+        if not path.is_dir():
+            raise GitWorktreeError("O worktree persistido não existe")
+        # ``--show-toplevel`` de um worktree retorna o próprio worktree, logo
+        # a identidade é conferida pelo diretório Git comum.
+        self.validate_repository(path)
+        common_dir = self._run(
+            ["git", "-C", str(path), "rev-parse", "--git-common-dir"],
+            "validar repositório comum do worktree",
+        ).stdout.strip()
+        common_path = Path(common_dir)
+        if not common_path.is_absolute():
+            common_path = path / common_path
+        if common_path.resolve() != (root / ".git").resolve():
+            raise GitWorktreeError("O worktree persistido não pertence ao repositório configurado")
+        observed_branch = self._run(
+            ["git", "-C", str(path), "branch", "--show-current"], "ler branch do worktree"
+        ).stdout.strip()
+        if observed_branch != branch:
+            raise GitWorktreeError("A branch do worktree divergiu da branch persistida")
+        # A base não é reescrita; apenas deve continuar sendo uma referência resolvível.
+        self._verify_base_ref(root, base_ref)
+        dirty = self._run(
+            ["git", "-C", str(path), "status", "--porcelain", "--untracked-files=all"],
+            "verificar estado do worktree",
+        ).stdout.strip()
+        if dirty:
+            raise GitWorktreeError("O worktree persistido possui alterações locais inesperadas")
+        return GitWorktree(root, path, branch, base_ref)
+
     def remove_worktree(self, repository: str | Path, worktree_path: str | Path) -> None:
         """Remove um worktree sem forçar a operação ou apagar sua branch."""
         repository_root = self.validate_repository(repository)

@@ -14,6 +14,7 @@ from ai_dev_orchestrator.infrastructure.database import (
     ExecutionStoreError,
     SqliteExecutionStore,
 )
+from ai_dev_orchestrator.services.recovery import RecoveryError, ResumeService
 
 app = typer.Typer(
     help="Orquestrador local-first de desenvolvimento com IA.",
@@ -69,6 +70,19 @@ def run(
         typer.echo(f"Erro: {error}", err=True)
         raise typer.Exit(code=1) from error
     _show_run_result(result)
+
+
+@app.command()
+def resume(
+    issue: int = typer.Option(..., "--issue", min=1, help="Número positivo da Issue."),
+) -> None:
+    """Retoma com segurança a execução ativa persistida de uma Issue."""
+    try:
+        record = ResumeService.from_config(load_config()).resume(issue)
+    except (ConfigurationError, ExecutionStoreError, RecoveryError, RunPipelineError) as error:
+        typer.echo(f"Erro: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Issue #{record.issue_number} retomada em {record.phase}.")
 
 
 @app.command()

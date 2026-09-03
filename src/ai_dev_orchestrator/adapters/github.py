@@ -216,6 +216,26 @@ class GitHubPullRequestAdapter:
                 f"Pull Request #{number} já criado em {url}, mas o GitHub CLI retornou JSON inválido"
             ) from error
 
+    def find_open_by_branch(self, branch: str, base: str) -> tuple[PullRequest, ...]:
+        """Procura PRs abertos da branch para reconciliar uma criação interrompida."""
+        result = self.runner.run([
+            "gh", "pr", "list", "--repo", self.config.repository_full_name,
+            "--head", branch, "--base", base, "--state", "open",
+            "--json", "number,url,title,baseRefName,headRefName", "--limit", "100",
+        ])
+        if result.error or not result.succeeded:
+            detail = result.error or result.stderr.strip() or result.stdout.strip()
+            raise GitHubPullRequestError(f"Não foi possível procurar Pull Request da branch: {detail}")
+        try:
+            payload = json.loads(result.stdout)
+            if not isinstance(payload, list):
+                raise ValueError("lista esperada")
+            return tuple(PullRequest(
+                item["number"], item["url"], item["title"], item["baseRefName"], item["headRefName"]
+            ) for item in payload)
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+            raise GitHubPullRequestError("Resposta de busca de Pull Request inválida") from error
+
     def _parse_created_url(self, stdout: str) -> tuple[str, int]:
         lines = [line.strip() for line in stdout.splitlines() if line.strip()]
         if len(lines) != 1:
