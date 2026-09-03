@@ -8,6 +8,7 @@ externa ou interrompe, nunca tenta a mutação novamente por tentativa e erro.
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 from ai_dev_orchestrator.adapters.github import PullRequest
 from ai_dev_orchestrator.config import OrchestratorConfig
@@ -107,7 +108,11 @@ class ResumeService:
                 ExecutionPhase.TESTING, ExecutionPhase.NEEDS_CHANGES,
             } or record.phase is ExecutionPhase.PUBLISHING
             worktree = validator(self.config.workspace.repository_path, record.worktree_path, record.branch, record.base_ref, allow_dirty=allow_dirty)
-            if record.current_head_sha and self.pipeline.git_publisher is not None:
+            if (
+                record.current_head_sha
+                and record.phase is not ExecutionPhase.PUBLISHING
+                and self.pipeline.git_publisher is not None
+            ):
                 observed = self.pipeline.git_publisher.current_head(worktree.path)
                 if observed != record.current_head_sha:
                     raise RecoveryError("HEAD local divergiu do checkpoint persistido")
@@ -132,9 +137,16 @@ class ResumeService:
                 or data.get("url") != record.pull_request_url
                 or data.get("headRefName") != record.branch
                 or data.get("baseRefName") != self.config.github.pull_request_base
-                or (expected is not None and data.get("headRefOid") != expected)):
+                or (
+                    expected is not None
+                    and record.phase is not ExecutionPhase.PUBLISHING
+                    and data.get("headRefOid") != expected
+                )):
             raise RecoveryError("Pull Request persistido divergiu do repositório ou do HEAD esperado")
-        return PullRequest(record.pull_request_number, record.pull_request_url, "", data["baseRefName"], record.branch)
+        return PullRequest(
+            record.pull_request_number, record.pull_request_url, "", data["baseRefName"],
+            record.branch, data.get("headRefOid", ""),
+        )
 
     def _resume_codex(self, record: RunRecord, worktree: GitWorktree | None) -> RunRecord:
         if worktree is None:
@@ -165,13 +177,19 @@ class ResumeService:
             except Exception as error:
                 raise RecoveryError(f"Não foi possível criar o commit local da retomada: {error}") from error
             record = self._checkpoint("Commit local reconciliado", local_head, current_head_sha=local_head)
-        elif record.current_head_sha and local_head != record.current_head_sha:
-            raise RecoveryError("HEAD local divergiu durante a publicação")
+        elif previous_head and local_head != previous_head:
+            ancestor_reader = getattr(publisher, "is_ancestor", None)
+            if ancestor_reader is None or not ancestor_reader(worktree.path, previous_head, local_head):
+                raise RecoveryError("HEAD local divergiu do checkpoint sem relação de ancestralidade")
         remote_head_reader = getattr(publisher, "remote_head", None)
         if remote_head_reader is None:
             raise RecoveryError("Não é possível confirmar a branch remota sem leitura explícita")
         remote_head = remote_head_reader(worktree.path, self.config.workspace.remote_name, record.branch)
-        if remote_head is None or (previous_head is not None and remote_head == previous_head):
+        if remote_head not in {None, previous_head, local_head}:
+            raise RecoveryError("Branch remota aponta para SHA incompatível")
+        if pull_request is not None and pull_request.head_sha not in {previous_head, local_head}:
+            raise RecoveryError("Pull Request aponta para SHA incompatível")
+        if remote_head is None or remote_head == previous_head:
             try:
                 publisher.push(worktree.path, self.config.workspace.remote_name, record.branch)
                 remote_head = remote_head_reader(worktree.path, self.config.workspace.remote_name, record.branch)
@@ -179,6 +197,10 @@ class ResumeService:
                 raise RecoveryError(f"Não foi possível confirmar o push da branch: {error}") from error
         if remote_head != local_head:
             raise RecoveryError("Branch remota divergiu do HEAD local; push foi recusado")
+        if pull_request is not None:
+            pull_request = self._wait_for_pull_request_head(
+                pull_request, local_head, previous_head
+            )
         if pull_request is None:
             finder = getattr(self.pipeline.pull_request_creator, "find_open_by_branch", None)
             if finder is None:
@@ -201,6 +223,31 @@ class ResumeService:
                     raise RecoveryError("Pull Request encontrado aponta para HEAD divergente")
             record = self._checkpoint("PR existente reconciliado", local_head, pull_request_number=pull_request.number, pull_request_url=pull_request.url, current_head_sha=local_head)
         return self._transition(ExecutionPhase.WAITING_CI, "Publicação reconciliada sem novo push ou PR", head_sha=local_head, current_head_sha=local_head)
+
+    def _wait_for_pull_request_head(
+        self, pull_request: PullRequest, expected_head: str, previous_head: str | None
+    ) -> PullRequest:
+        """Reconsulta o PR por poucas tentativas; não executa mutações."""
+        if self.pipeline.review_reader is None:
+            raise RecoveryError("Leitor de Pull Request indisponível")
+        for attempt in range(3):
+            data = self.pipeline.review_reader.get_review_data(pull_request.number)
+            if not isinstance(data, dict) or (
+                data.get("number") != pull_request.number
+                or data.get("url") != pull_request.url
+                or data.get("headRefName") != pull_request.head
+                or data.get("baseRefName") != self.config.github.pull_request_base
+                or data.get("state") != "OPEN"
+            ):
+                raise RecoveryError("Pull Request divergiu durante a reconciliação")
+            observed = data.get("headRefOid")
+            if observed == expected_head:
+                return PullRequest(pull_request.number, pull_request.url, "", pull_request.base, pull_request.head, observed)
+            if observed != previous_head:
+                raise RecoveryError("Pull Request aponta para SHA incompatível")
+            if attempt < 2:
+                time.sleep(min(self.config.ci.poll_interval_seconds, 1))
+        raise RecoveryError("Pull Request não propagou o HEAD publicado no prazo limitado")
 
     def _refresh_review(self, record: RunRecord, worktree: GitWorktree | None, pull_request: PullRequest | None) -> RunRecord:
         if worktree is None or pull_request is None or not record.current_head_sha or self.pipeline.ci_reader is None:

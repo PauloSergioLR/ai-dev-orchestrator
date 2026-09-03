@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 import re
+import time
 from typing import Protocol
 
 from ai_dev_orchestrator.adapters.codex import CodexAdapter, CodexExecution
@@ -94,6 +95,7 @@ class GitPublisher(Protocol):
     def push(self, worktree: str | Path, remote_name: str, branch: str) -> None: ...
     def commit_correction(self, worktree: str | Path) -> str: ...
     def current_head(self, worktree: str | Path) -> str: ...
+    def is_ancestor(self, worktree: str | Path, ancestor: str, descendant: str) -> bool: ...
 
 
 class PullRequestCreator(Protocol):
@@ -712,7 +714,7 @@ class RunPipeline:
             self.git_publisher.push(
                 worktree.path, self.config.workspace.remote_name, worktree.branch
             )
-            self._ensure_existing_pull_request(pull_request, worktree.branch, new_head)
+            self._wait_for_pull_request_head(pull_request, worktree.branch, new_head)
             self._transition(
                 ExecutionPhase.WAITING_CI,
                 "Correção publicada; aguardando CI",
@@ -757,6 +759,27 @@ class RunPipeline:
             raise RunPipelineError(
                 "O Pull Request existente divergiu, foi fechado ou não aponta para o novo HEAD"
             )
+
+    def _wait_for_pull_request_head(
+        self, pull_request: PullRequest, branch: str, expected_head_sha: str
+    ) -> None:
+        """Aguarda, apenas por leitura, a propagação limitada do HEAD do PR."""
+        assert self.review_reader is not None
+        for attempt in range(3):
+            data = self.review_reader.get_review_data(pull_request.number)
+            if not isinstance(data, dict) or (
+                data.get("number") != pull_request.number
+                or data.get("headRefName") != branch
+                or data.get("url") != pull_request.url
+                or data.get("baseRefName") != self.config.github.pull_request_base
+                or data.get("state") != "OPEN"
+            ):
+                raise RunPipelineError("O Pull Request existente divergiu ou foi fechado")
+            if data.get("headRefOid") == expected_head_sha:
+                return
+            if attempt < 2:
+                time.sleep(min(self.config.ci.poll_interval_seconds, 1))
+        raise RunPipelineError("O Pull Request não propagou o HEAD publicado no prazo limitado")
 
     def _ensure_local_head_is_current(
         self, worktree: Path, expected_head_sha: str

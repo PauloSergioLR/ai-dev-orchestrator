@@ -60,6 +60,20 @@ class GitPublicationAdapter:
             raise GitPublicationError("Git não retornou o HEAD remoto")
         return sha
 
+    def is_ancestor(self, worktree: str | Path, ancestor: str, descendant: str) -> bool:
+        """Confirma relação linear de commits sem alterar o repositório."""
+        result = self.runner.run(
+            ["git", "merge-base", "--is-ancestor", ancestor, descendant], cwd=worktree
+        )
+        if result.error:
+            raise GitPublicationError(f"Não foi possível comparar histórico Git: {result.error}")
+        if result.returncode == 0:
+            return True
+        if result.returncode == 1:
+            return False
+        self._raise_result(result, "comparar histórico Git")
+        raise AssertionError("resultado Git inalcançável")
+
     def _commit(self, worktree: str | Path, message: str) -> str:
         status = self._run(["git", "status", "--porcelain", "--untracked-files=all"], worktree, "verificar alterações")
         if not status.stdout.strip():
@@ -84,3 +98,9 @@ class GitPublicationAdapter:
             message = f"Git retornou código {result.returncode} ao {operation}"
             raise GitPublicationError(f"{message}: {detail}" if detail else message)
         return result
+
+    @staticmethod
+    def _raise_result(result: CommandResult, operation: str) -> None:
+        detail = result.stderr.strip() or result.stdout.strip()
+        message = f"Git retornou código {result.returncode} ao {operation}"
+        raise GitPublicationError(f"{message}: {detail}" if detail else message)
