@@ -7,6 +7,8 @@ from typer.testing import CliRunner
 from ai_dev_orchestrator import __version__
 from ai_dev_orchestrator.cli import app
 from ai_dev_orchestrator.services.pipeline import RunResult
+from ai_dev_orchestrator.domain.execution import ExecutionPhase
+from ai_dev_orchestrator.services.recovery import RecoveryError
 
 runner = CliRunner()
 
@@ -48,3 +50,52 @@ def test_run_delegates_to_pipeline_and_displays_summary(monkeypatch) -> None:
     assert result.exit_code == 0
     assert calls == [(17, "feat/test")]
     assert "Sessão Codex: session-17" in result.output
+
+
+def test_resume_delegates_only_the_issue_and_shows_short_summary(monkeypatch) -> None:
+    calls: list[int] = []
+
+    class FakeService:
+        def resume(self, issue: int):
+            calls.append(issue)
+            return type("Record", (), {"issue_number": issue, "phase": ExecutionPhase.TESTING})()
+
+    monkeypatch.setattr("ai_dev_orchestrator.cli.load_config", lambda: object())
+    monkeypatch.setattr("ai_dev_orchestrator.cli.ResumeService.from_config", lambda config: FakeService())
+
+    result = runner.invoke(app, ["resume", "--issue", "37"])
+
+    assert result.exit_code == 0
+    assert calls == [37]
+    assert result.output == "Issue #37 retomada em TESTING.\n"
+    assert runner.invoke(app, ["resume", "--issue", "37", "--branch", "feat/x"]).exit_code != 0
+
+
+def test_resume_without_active_execution_fails_without_traceback(monkeypatch) -> None:
+    class FakeService:
+        def resume(self, issue: int):
+            raise RecoveryError("Não há execução ativa para a Issue #37")
+
+    monkeypatch.setattr("ai_dev_orchestrator.cli.load_config", lambda: object())
+    monkeypatch.setattr("ai_dev_orchestrator.cli.ResumeService.from_config", lambda config: FakeService())
+
+    result = runner.invoke(app, ["resume", "--issue", "37"])
+
+    assert result.exit_code == 1
+    assert "execução ativa" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_resume_terminal_execution_fails_without_traceback(monkeypatch) -> None:
+    class FakeService:
+        def resume(self, issue: int):
+            raise RecoveryError("A execução da Issue #37 é terminal e não pode ser retomada")
+
+    monkeypatch.setattr("ai_dev_orchestrator.cli.load_config", lambda: object())
+    monkeypatch.setattr("ai_dev_orchestrator.cli.ResumeService.from_config", lambda config: FakeService())
+
+    result = runner.invoke(app, ["resume", "--issue", "37"])
+
+    assert result.exit_code == 1
+    assert "terminal" in result.output
+    assert "Traceback" not in result.output
