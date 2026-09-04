@@ -79,6 +79,12 @@ class SqliteExecutionStore:
                     "quota_classification": "TEXT",
                     "quota_observed_at": "TEXT",
                     "quota_retry_at": "TEXT",
+                    "human_reason_code": "TEXT",
+                    "human_reason": "TEXT",
+                    "blocked_phase": "TEXT",
+                    "failure_classification": "TEXT",
+                    "suggested_action": "TEXT",
+                    "human_required_at": "TEXT",
                 }
                 for name, declaration in additions.items():
                     if name not in existing_columns:
@@ -88,6 +94,9 @@ class SqliteExecutionStore:
                 )
                 c.execute(
                     "CREATE TABLE IF NOT EXISTS review_findings (execution_id TEXT NOT NULL REFERENCES executions(id), reviewed_head_sha TEXT NOT NULL, finding_order INTEGER NOT NULL, severity TEXT NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL, path TEXT, line INTEGER, criterion TEXT, created_at TEXT NOT NULL, PRIMARY KEY(execution_id, reviewed_head_sha, finding_order))"
+                )
+                c.execute(
+                    "CREATE TABLE IF NOT EXISTS notification_deliveries (execution_id TEXT NOT NULL REFERENCES executions(id), event_key TEXT NOT NULL, channel TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL, last_error TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(execution_id, event_key, channel))"
                 )
                 c.execute(
                     "CREATE UNIQUE INDEX IF NOT EXISTS one_active_execution_per_issue ON executions(issue_number) WHERE terminal = 0"
@@ -243,12 +252,19 @@ class SqliteExecutionStore:
             "quota_classification",
             "quota_observed_at",
             "quota_retry_at",
+            "human_reason_code",
+            "human_reason",
+            "blocked_phase",
+            "failure_classification",
+            "suggested_action",
+            "human_required_at",
         }
         if invalid := set(updates) - allowed:
             raise ExecutionStoreError(
                 f"Campos de execução inválidos: {', '.join(sorted(invalid))}"
             )
         self._validate_models(current, updates)
+        updates = _sanitize_updates(updates)
         fields = {
             **updates,
             "phase": phase.value,
@@ -324,6 +340,12 @@ class SqliteExecutionStore:
             "quota_classification",
             "quota_observed_at",
             "quota_retry_at",
+            "human_reason_code",
+            "human_reason",
+            "blocked_phase",
+            "failure_classification",
+            "suggested_action",
+            "human_required_at",
         }
         if invalid := set(updates) - allowed:
             raise ExecutionStoreError(
@@ -338,6 +360,7 @@ class SqliteExecutionStore:
                 "A sessão Codex não pode ser trocada dentro da mesma execução"
             )
         self._validate_models(current, updates)
+        updates = _sanitize_updates(updates)
         fields = {**updates, "updated_at": _now()}
         try:
             with self._connection() as c:
@@ -410,6 +433,56 @@ class SqliteExecutionStore:
             raise ExecutionStoreError(f"Não foi possível registrar review: {error}") from error
         return self.get(execution_id)
 
+    def begin_notification(
+        self, execution_id: str, event_key: str, channel: str, *, retry_failed: bool = False
+    ) -> bool:
+        """Reserva uma entrega; eventos já enviados são idempotentes."""
+        now = _now()
+        try:
+            with self._connection() as c:
+                row = c.execute(
+                    "SELECT status, attempts FROM notification_deliveries WHERE execution_id = ? AND event_key = ? AND channel = ?",
+                    (execution_id, event_key, channel),
+                ).fetchone()
+                if row is not None and (
+                    row["status"] in {"SENDING", "SENT"} or not retry_failed
+                ):
+                    return False
+                if row is None:
+                    c.execute(
+                        "INSERT INTO notification_deliveries VALUES (?, ?, ?, 'SENDING', 1, NULL, ?)",
+                        (execution_id, event_key, channel, now),
+                    )
+                else:
+                    c.execute(
+                        "UPDATE notification_deliveries SET status = 'SENDING', attempts = ?, last_error = NULL, updated_at = ? WHERE execution_id = ? AND event_key = ? AND channel = ?",
+                        (row["attempts"] + 1, now, execution_id, event_key, channel),
+                    )
+            return True
+        except sqlite3.Error as error:
+            raise ExecutionStoreError(f"Não foi possível reservar notificação: {error}") from error
+
+    def finish_notification(
+        self, execution_id: str, event_key: str, channel: str, error: str | None = None
+    ) -> None:
+        try:
+            with self._connection() as c:
+                c.execute(
+                    "UPDATE notification_deliveries SET status = ?, last_error = ?, updated_at = ? WHERE execution_id = ? AND event_key = ? AND channel = ?",
+                    ("FAILED" if error else "SENT", _sanitize(error) if error else None,
+                     _now(), execution_id, event_key, channel),
+                )
+        except sqlite3.Error as failure:
+            raise ExecutionStoreError(f"Não foi possível concluir notificação: {failure}") from failure
+
+    def notification_deliveries(self, execution_id: str) -> tuple[dict[str, object], ...]:
+        with self._connection() as c:
+            rows = c.execute(
+                "SELECT event_key, channel, status, attempts, last_error, updated_at FROM notification_deliveries WHERE execution_id = ? ORDER BY event_key, channel",
+                (execution_id,),
+            ).fetchall()
+        return tuple(dict(row) for row in rows)
+
     def review_findings(self, execution_id: str, reviewed_head_sha: str | None = None) -> tuple[ReviewFinding, ...]:
         sql = "SELECT * FROM review_findings WHERE execution_id = ?"
         parameters: tuple[object, ...] = (execution_id,)
@@ -450,7 +523,7 @@ def _sanitize(value: str) -> str:
 
 def _redact_secrets(value: str) -> str:
     return re.sub(
-        r"(?i)(token|authorization|password|secret)\s*[:=]\s*\S+",
+        r"(?i)(token|authorization|password|secret|api[_ -]?key)\s*[:=]\s*\S+|bearer\s+\S+",
         r"\1=[redigido]",
         value.replace("\n", " "),
     )
@@ -460,10 +533,19 @@ def _sanitize_finding(value: str, limit: int) -> str:
     return _redact_secrets(value)[:limit]
 
 
+def _sanitize_updates(updates: dict[str, object]) -> dict[str, object]:
+    result = dict(updates)
+    for field in ("last_error", "human_reason", "suggested_action"):
+        value = result.get(field)
+        if isinstance(value, str):
+            result[field] = _sanitize(value)
+    return result
+
+
 def _record(row: sqlite3.Row) -> RunRecord:
     excluded = {"id", "issue_number", "phase", "created_at", "updated_at", "terminal"}
     values = {key: row[key] for key in row.keys() if key not in excluded}
-    for field in ("quota_observed_at", "quota_retry_at"):
+    for field in ("quota_observed_at", "quota_retry_at", "human_required_at"):
         if values.get(field):
             values[field] = _parse_time(values[field])
     return RunRecord(

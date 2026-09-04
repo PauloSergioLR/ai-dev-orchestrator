@@ -1,5 +1,6 @@
 """Interface de linha de comando do AI Dev Orchestrator."""
 
+import os
 import typer
 from pathlib import Path
 
@@ -153,6 +154,7 @@ def init_project(
             "in_progress_status": existing.github.in_progress_status if existing else "In Progress",
             "ai_review_status": existing.github.ai_review_status if existing else "AI Review",
             "done_status": existing.github.done_status if existing else "Done",
+            "human_required_status": existing.github.human_required_status if existing else "Human Review",
             "pull_request_target": target, "protected_branches": protected,
             "status_field_name": existing.github.status_field_name if existing else "Status",
         },
@@ -168,6 +170,7 @@ def init_project(
         "convergence": existing.convergence.model_dump() if existing else {},
         "review": existing.review.model_dump() if existing else {},
         "supervisor": existing.supervisor.model_dump() if existing else {},
+        "notifications": existing.notifications.model_dump() if existing else {},
     }
     if advanced:
         values["ci"]["poll_interval_seconds"] = typer.prompt(
@@ -195,6 +198,37 @@ def init_project(
         f"worktrees={values['workspace']['worktrees_dir']}"
     )
     typer.confirm("Salvar configuração?", default=True, abort=True)
+    if existing is None and typer.confirm(
+        "Deseja configurar notificações operacionais?", default=False
+    ):
+        channel_text = typer.prompt(
+            "Canais (email, discord, telegram; separados por vírgula)"
+        )
+        channels = tuple(
+            value.strip().casefold()
+            for value in channel_text.split(",")
+            if value.strip()
+        )
+        values["notifications"]["channels"] = channels
+        if "email" in channels:
+            values["notifications"]["smtp_host"] = typer.prompt("Host SMTP")
+            values["notifications"]["smtp_sender"] = typer.prompt("Remetente SMTP")
+            recipients = typer.prompt("Destinatários de e-mail (separados por vírgula)")
+            values["notifications"]["email_recipients"] = tuple(
+                value.strip() for value in recipients.split(",") if value.strip()
+            )
+        required = {
+            "email": ("ORCH_SMTP_USERNAME", "ORCH_SMTP_PASSWORD"),
+            "discord": ("ORCH_DISCORD_WEBHOOK_URL",),
+            "telegram": ("ORCH_TELEGRAM_BOT_TOKEN", "ORCH_TELEGRAM_CHAT_ID"),
+        }
+        for channel in channels:
+            if channel in required:
+                missing = tuple(name for name in required[channel] if not os.environ.get(name))
+                if missing:
+                    typer.echo(
+                        f"Variáveis de ambiente ausentes para {channel}: {', '.join(missing)}"
+                    )
     try:
         config = OrchestratorConfig(**values)
         service.write(path, config)

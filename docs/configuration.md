@@ -156,3 +156,22 @@ Arquivo ausente, TOML inválido e valores inválidos geram um erro de configura�
 claro, com a causa original preservada para diagnóstico. Não armazene tokens,
 senhas ou qualquer credencial neste arquivo. Autenticação futura deve usar as
 ferramentas autenticadas ou um mecanismo de segredos específico.
+
+## Intervenção humana e notificações
+
+`github.human_required_status` define o Status aplicado quando a execução entra
+em `HUMAN_REQUIRED` (por padrão, `Human Review`). A seção `[notifications]`
+aceita zero, um ou vários canais em `channels`: `email`, `discord` e `telegram`.
+O pipeline emite um evento operacional único e os adapters fazem a entrega de
+forma independente; falha em um canal não impede os demais.
+
+O TOML guarda somente host, porta, remetente, destinatários e nomes das
+variáveis de ambiente. Credenciais devem ser fornecidas por
+`ORCH_SMTP_USERNAME`, `ORCH_SMTP_PASSWORD`, `ORCH_DISCORD_WEBHOOK_URL`,
+`ORCH_TELEGRAM_BOT_TOKEN` e `ORCH_TELEGRAM_CHAT_ID` (ou pelos nomes de ambiente
+substituídos na configuração). O SQLite registra apenas status, tentativas e
+erros redigidos de entrega, nunca os valores dessas variáveis.
+
+Notificações são deduplicadas por execução, causa e canal. Uma causa nova pode
+gerar outro aviso. Entregas falhas podem ser retomadas explicitamente sem
+repetir commits, pushes, criação de PR, merge ou atualização do Project.

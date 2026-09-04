@@ -25,6 +25,7 @@ class ExecutionPhase(StrEnum):
     MERGING = "MERGING"
     PROJECT_DONE_PENDING = "PROJECT_DONE_PENDING"
     APPROVED_AWAITING_ACTION = "APPROVED_AWAITING_ACTION"
+    HUMAN_REQUIRED = "HUMAN_REQUIRED"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
 
@@ -34,6 +35,7 @@ TERMINAL_PHASES = frozenset(
         ExecutionPhase.COMPLETED,
         ExecutionPhase.FAILED,
         ExecutionPhase.APPROVED_AWAITING_ACTION,
+        ExecutionPhase.HUMAN_REQUIRED,
     }
 )
 _ALLOWED = {
@@ -87,6 +89,10 @@ _ALLOWED = {
     },
 }
 
+# Qualquer fase ativa pode parar de forma segura e explícita para intervenção.
+for _phase in tuple(_ALLOWED):
+    _ALLOWED[_phase].add(ExecutionPhase.HUMAN_REQUIRED)
+
 
 def validate_transition(old: ExecutionPhase, new: ExecutionPhase) -> None:
     """Recusa saltos e reaberturas que ocultariam o histórico da execução."""
@@ -123,6 +129,12 @@ class RunRecord:
     quota_classification: str | None = None
     quota_observed_at: datetime | None = None
     quota_retry_at: datetime | None = None
+    human_reason_code: str | None = None
+    human_reason: str | None = None
+    blocked_phase: str | None = None
+    failure_classification: str | None = None
+    suggested_action: str | None = None
+    human_required_at: datetime | None = None
 
 
 @dataclass(frozen=True)

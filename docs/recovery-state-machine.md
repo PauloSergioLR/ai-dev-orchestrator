@@ -84,3 +84,10 @@ da chamada ao Codex, preservando auditoria mesmo se o provider falhar.
 
 A cobertura tem três níveis: planner puro, executor com doubles dos adapters e
 integração controlada do observer, effects, serviço de retomada e CLI.
+
+Decisões `BLOCK` e falhas não recuperáveis são convertidas em
+`HUMAN_REQUIRED`, preservando a identidade da execução, sessão Codex, PR e
+HEAD. Quotas com horário confiável permanecem nas fases `WAITING_*_QUOTA`; quota
+sem retry seguro exige intervenção. O Status do Project e as notificações são
+efeitos posteriores ao checkpoint local, portanto sua indisponibilidade não
+apaga o estado que requer uma pessoa.

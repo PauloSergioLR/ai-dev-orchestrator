@@ -41,6 +41,7 @@ class GitHubConfig(BaseModel):
     in_progress_status: str = Field(default="In Progress", min_length=1)
     ai_review_status: str = Field(default="AI Review", min_length=1)
     done_status: str = Field(default="Done", min_length=1)
+    human_required_status: str = Field(default="Human Review", min_length=1)
     pull_request_target: str = Field(
         default="main",
         min_length=1,
@@ -207,6 +208,35 @@ class SupervisorConfig(BaseModel):
     retry_without_reset_seconds: float | None = Field(default=None, gt=0)
 
 
+class NotificationsConfig(BaseModel):
+    """Canais e referências de ambiente; nunca contém credenciais."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    channels: tuple[str, ...] = ()
+    smtp_host: str = "localhost"
+    smtp_port: int = Field(default=587, gt=0, le=65535)
+    smtp_sender: str = ""
+    email_recipients: tuple[str, ...] = ()
+    smtp_starttls: StrictBool = True
+    smtp_username_env: str = "ORCH_SMTP_USERNAME"
+    smtp_password_env: str = "ORCH_SMTP_PASSWORD"
+    discord_webhook_env: str = "ORCH_DISCORD_WEBHOOK_URL"
+    telegram_token_env: str = "ORCH_TELEGRAM_BOT_TOKEN"
+    telegram_chat_id_env: str = "ORCH_TELEGRAM_CHAT_ID"
+
+    @field_validator("channels")
+    @classmethod
+    def channels_must_be_supported(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(channel.casefold() for channel in value)
+        supported = {"email", "discord", "telegram"}
+        if any(channel not in supported for channel in normalized):
+            raise ValueError("aceita apenas email, discord e telegram")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("não pode conter canais duplicados")
+        return normalized
+
+
 class _EnvironmentSettingsSource(PydanticBaseSettingsSource):
     """Converte o booleano textual de ambiente sem relaxar o TOML."""
 
@@ -247,6 +277,7 @@ class OrchestratorConfig(BaseSettings):
     review: ReviewConfig = Field(default_factory=ReviewConfig)
     providers: ProviderConfig = Field(default_factory=ProviderConfig)
     supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
+    notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
 
     @classmethod
     def settings_customise_sources(
