@@ -20,6 +20,12 @@ efeito e o checkpoint será reconciliada pela próxima observação e planejamen
 Antes de qualquer efeito, o executor recarrega o record, confere que ele não
 mudou desde o planejamento e valida que a ação é compatível com a fase atual.
 
+Na integração final, o observer coleta fatos externos somente por leituras e o
+serviço `resume` repete observar, planejar e aplicar uma única ação até haver
+checkpoint terminal ou bloqueio seguro. Novas execuções usam as fases explícitas
+de commit, push, PR, merge e Project Done; `PUBLISHING` e `MERGING` permanecem
+somente para compatibilidade histórica.
+
 ## Fases e ações
 
 As fases legadas `PUBLISHING` e `MERGING` permanecem por compatibilidade.

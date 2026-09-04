@@ -14,6 +14,7 @@ from ai_dev_orchestrator.infrastructure.database import (
     ExecutionStoreError,
     SqliteExecutionStore,
 )
+from ai_dev_orchestrator.services.resume import ResumeError, ResumeService
 
 app = typer.Typer(
     help="Orquestrador local-first de desenvolvimento com IA.",
@@ -94,6 +95,25 @@ def state(
     typer.echo(f"HEAD: {record.current_head_sha or '-'}")
     typer.echo(f"Correções: {record.correction_attempts}")
     typer.echo(f"Atualizado em: {record.updated_at.isoformat()}")
+
+
+@app.command()
+def resume(
+    issue: int = typer.Option(..., "--issue", min=1, help="Número positivo da Issue."),
+) -> None:
+    """Retoma uma execução ativa a partir do estado persistido."""
+    try:
+        result = ResumeService.from_config(load_config()).resume(issue)
+    except (ConfigurationError, ResumeError, ExecutionStoreError) as error:
+        typer.echo(f"Erro: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Issue: #{result.issue_number}")
+    typer.echo(f"Execução: {result.execution_id}")
+    typer.echo(f"Fase: {result.phase}")
+    typer.echo(f"Branch: {result.branch or '-'}")
+    typer.echo(f"Sessão Codex: {result.codex_session_id or '-'}")
+    typer.echo(f"PR: #{result.pull_request_number or '-'}")
+    typer.echo(f"HEAD: {result.current_head_sha or '-'}")
 
 
 def _show_run_result(result: RunResult) -> None:
