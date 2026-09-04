@@ -31,6 +31,11 @@ class ResumeResult:
     pull_request_number: int | None
     current_head_sha: str | None
     correction_attempts: int
+    pull_request_url: str | None = None
+    ci_status: str | None = None
+    review_verdict: str | None = None
+    merge_status: str = "NOT_REQUESTED"
+    project_status: str | None = None
 
 
 class ResumeService:
@@ -94,6 +99,18 @@ class ResumeService:
 
     @staticmethod
     def _result(run: RunRecord) -> ResumeResult:
-        return ResumeResult(run.issue_number, run.id, run.phase.value, run.branch,
-                            run.codex_session_id, run.pull_request_number,
-                            run.current_head_sha, run.correction_attempts)
+        return ResumeResult(
+            run.issue_number,
+            run.id,
+            run.phase.value,
+            run.branch,
+            run.codex_session_id,
+            run.pull_request_number,
+            run.current_head_sha,
+            run.correction_attempts,
+            pull_request_url=run.pull_request_url,
+            ci_status="SUCCESS" if run.ci_head_sha else None,
+            review_verdict=run.review_verdict,
+            merge_status="SUCCESS" if run.merge_commit_sha else "NOT_REQUESTED",
+            project_status=run.project_status,
+        )

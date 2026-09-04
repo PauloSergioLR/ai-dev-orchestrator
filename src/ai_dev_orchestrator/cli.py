@@ -15,6 +15,7 @@ from ai_dev_orchestrator.infrastructure.database import (
     SqliteExecutionStore,
 )
 from ai_dev_orchestrator.services.resume import ResumeError, ResumeService
+from ai_dev_orchestrator.services.work import WorkError, WorkService
 
 app = typer.Typer(
     help="Orquestrador local-first de desenvolvimento com IA.",
@@ -115,6 +116,56 @@ def resume(
     typer.echo(f"PR: #{result.pull_request_number or '-'}")
     typer.echo(f"HEAD: {result.current_head_sha or '-'}")
     typer.echo(f"Correções: {result.correction_attempts}")
+
+
+@app.command()
+def work() -> None:
+    """Retoma uma execução ou executa a próxima Issue Ready elegível."""
+    try:
+        result = WorkService.from_config(load_config()).work()
+    except (
+        ConfigurationError,
+        ExecutionStoreError,
+        ResumeError,
+        RunPipelineError,
+        WorkError,
+    ) as error:
+        typer.echo(f"Erro: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    if result is None:
+        typer.echo("Nenhuma Issue Ready elegível.")
+        return
+    if result.resumed:
+        resumed = result.resume
+        if resumed is None:
+            raise typer.Exit(code=1)
+        typer.echo(f"Execução existente retomada: {resumed.execution_id}")
+        typer.echo(f"Issue: #{resumed.issue_number}")
+        typer.echo(f"Branch: {resumed.branch or '-'}")
+        pr = f"#{resumed.pull_request_number}" if resumed.pull_request_number else "-"
+        typer.echo(f"PR: {pr} {resumed.pull_request_url or ''}".rstrip())
+        typer.echo(f"CI: {resumed.ci_status or '-'}")
+        typer.echo(f"Gemini: {resumed.review_verdict or '-'}")
+        typer.echo(f"Fase: {resumed.phase}")
+        typer.echo(f"Correções: {resumed.correction_attempts}")
+        typer.echo(f"Merge: {resumed.merge_status}")
+        typer.echo(f"Project status: {resumed.project_status or '-'}")
+        return
+    run_result = result.run
+    if run_result is None:
+        raise typer.Exit(code=1)
+    typer.echo(f"Issue selecionada: #{run_result.issue_number}")
+    typer.echo(f"Branch: {run_result.branch}")
+    typer.echo(
+        f"PR: #{run_result.pull_request_number} {run_result.pull_request_url}".rstrip()
+    )
+    typer.echo(f"CI: {run_result.ci_status or '-'}")
+    typer.echo(
+        f"Gemini: {run_result.review.verdict if run_result.review else '-'}"
+    )
+    typer.echo(f"Correções: {run_result.correction_attempts}")
+    typer.echo(f"Merge: {run_result.merge_status}")
+    typer.echo(f"Project status: {run_result.project_status}")
 
 
 def _show_run_result(result: RunResult) -> None:

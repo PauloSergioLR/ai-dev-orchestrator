@@ -8,6 +8,7 @@ from ai_dev_orchestrator import __version__
 from ai_dev_orchestrator.cli import app
 from ai_dev_orchestrator.services.pipeline import RunResult
 from ai_dev_orchestrator.services.resume import ResumeError, ResumeResult
+from ai_dev_orchestrator.services.work import WorkResult
 
 runner = CliRunner()
 
@@ -95,3 +96,35 @@ def test_resume_reports_controlled_error(monkeypatch) -> None:
 
     assert result.exit_code == 1
     assert "Erro: Nenhuma execução ativa" in result.output
+
+
+def test_work_requires_no_issue_or_branch_and_delegates(monkeypatch) -> None:
+    run_result = RunResult(42, "item", "work/acao", Path("worktree"), "origin/main",
+                           "session", "fim", "Done")
+
+    class Service:
+        def work(self) -> WorkResult:
+            return WorkResult(False, run=run_result)
+
+    monkeypatch.setattr("ai_dev_orchestrator.cli.load_config", lambda: object())
+    monkeypatch.setattr("ai_dev_orchestrator.cli.WorkService.from_config", lambda _: Service())
+
+    result = runner.invoke(app, ["work"])
+
+    assert result.exit_code == 0
+    assert "Issue selecionada: #42" in result.output
+    assert "Branch: work/acao" in result.output
+
+
+def test_work_reports_no_eligible_issue_as_success(monkeypatch) -> None:
+    class Service:
+        def work(self) -> None:
+            return None
+
+    monkeypatch.setattr("ai_dev_orchestrator.cli.load_config", lambda: object())
+    monkeypatch.setattr("ai_dev_orchestrator.cli.WorkService.from_config", lambda _: Service())
+
+    result = runner.invoke(app, ["work"])
+
+    assert result.exit_code == 0
+    assert result.output == "Nenhuma Issue Ready elegível.\n"

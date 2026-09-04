@@ -71,6 +71,30 @@ class GitWorktreeAdapter:
             base_ref=base_ref,
         )
 
+    def prepare_remote_base(
+        self,
+        repository: str | Path,
+        remote_name: str,
+        base_ref: str,
+        branch: str,
+    ) -> str:
+        """Atualiza a base remota e recusa colisões antes de criar um worktree."""
+        repository_root = self.validate_repository(repository)
+        self._validate_branch(repository_root, branch)
+        self._ensure_branch_is_new(repository_root, branch)
+        base_branch = self._remote_branch(remote_name, base_ref)
+        remote_ref = f"refs/remotes/{remote_name}/{base_branch}"
+        self._run(
+            [
+                "git", "-C", str(repository_root), "fetch", "--no-tags", "--", remote_name,
+                f"refs/heads/{base_branch}:{remote_ref}",
+            ],
+            "sincronizar a base remota",
+        )
+        self._verify_base_ref(repository_root, remote_ref)
+        self._ensure_remote_branch_is_new(repository_root, remote_name, branch)
+        return remote_ref
+
     def remove_worktree(self, repository: str | Path, worktree_path: str | Path) -> None:
         """Remove um worktree sem forçar a operação ou apagar sua branch."""
         repository_root = self.validate_repository(repository)
@@ -108,6 +132,38 @@ class GitWorktreeAdapter:
             raise GitWorktreeError(f"A branch local já existe: {branch}")
         if result.returncode != 1:
             self._raise_git_failure(result, "verificar a branch local")
+
+    def _ensure_remote_branch_is_new(
+        self, repository_root: Path, remote_name: str, branch: str
+    ) -> None:
+        result = self.runner.run(
+            [
+                "git", "-C", str(repository_root), "ls-remote", "--exit-code", "--heads",
+                "--", remote_name, f"refs/heads/{branch}",
+            ]
+        )
+        if result.error:
+            raise GitWorktreeError(
+                f"Não foi possível verificar a branch remota: {result.error}"
+            )
+        if result.returncode == 0:
+            raise GitWorktreeError(f"A branch remota já existe: {remote_name}/{branch}")
+        if result.returncode != 2:
+            self._raise_git_failure(result, "verificar a branch remota")
+
+    @staticmethod
+    def _remote_branch(remote_name: str, base_ref: str) -> str:
+        prefixes = (f"refs/remotes/{remote_name}/", f"{remote_name}/", "refs/heads/")
+        branch = base_ref
+        for prefix in prefixes:
+            if branch.startswith(prefix):
+                branch = branch[len(prefix):]
+                break
+        if not branch or branch.startswith("refs/"):
+            raise GitWorktreeError(
+                f"A referência base não identifica uma branch remota: {base_ref}"
+            )
+        return branch
 
     def _verify_base_ref(self, repository_root: Path, base_ref: str) -> None:
         result = self._run(
