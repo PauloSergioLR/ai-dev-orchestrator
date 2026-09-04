@@ -12,6 +12,7 @@ from typing import Callable, Iterator
 from ai_dev_orchestrator.config import OrchestratorConfig
 from ai_dev_orchestrator.domain.execution import ExecutionPhase
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
+from ai_dev_orchestrator.services.pipeline import RunPipelineError
 from ai_dev_orchestrator.services.work import WorkResult, WorkService
 
 
@@ -91,7 +92,19 @@ class SupervisorService:
                             quota_retry_at=None,
                             last_error=None,
                         )
-                result = self.work_service.work()
+                try:
+                    result = self.work_service.work()
+                except RunPipelineError:
+                    # O pipeline sinaliza a quota depois de persistir o checkpoint.
+                    # Só a evidência inequívoca no store autoriza o supervisor a
+                    # converter esse erro em espera; demais falhas continuam terminais.
+                    active_after_error = self.store.list_active()
+                    if len(active_after_error) == 1 and active_after_error[0].phase in {
+                        ExecutionPhase.WAITING_CODEX_QUOTA,
+                        ExecutionPhase.WAITING_GEMINI_QUOTA,
+                    }:
+                        continue
+                    raise
                 if result is None:
                     return
                 if _is_waiting(result):
