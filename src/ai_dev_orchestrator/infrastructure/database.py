@@ -13,8 +13,9 @@ from ai_dev_orchestrator.domain.execution import (
     TERMINAL_PHASES,
     validate_transition,
 )
+from ai_dev_orchestrator.domain.review import ReviewFinding, ReviewVerdict, StructuredReview
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _SUMMARY_LIMIT = 500
 
 
@@ -58,6 +59,8 @@ class SqliteExecutionStore:
                         "INSERT INTO schema_version(version) VALUES (?)",
                         (SCHEMA_VERSION,),
                     )
+                elif row["version"] == 1:
+                    c.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
                 elif row["version"] != SCHEMA_VERSION:
                     raise SchemaVersionError(
                         f"Versão de schema não suportada: {row['version']}"
@@ -67,6 +70,9 @@ class SqliteExecutionStore:
                 )
                 c.execute(
                     "CREATE TABLE IF NOT EXISTS execution_events (execution_id TEXT NOT NULL REFERENCES executions(id), sequence INTEGER NOT NULL, previous_phase TEXT, phase TEXT NOT NULL, created_at TEXT NOT NULL, summary TEXT NOT NULL, head_sha TEXT, PRIMARY KEY(execution_id, sequence))"
+                )
+                c.execute(
+                    "CREATE TABLE IF NOT EXISTS review_findings (execution_id TEXT NOT NULL REFERENCES executions(id), reviewed_head_sha TEXT NOT NULL, finding_order INTEGER NOT NULL, severity TEXT NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL, path TEXT, line INTEGER, criterion TEXT, created_at TEXT NOT NULL, PRIMARY KEY(execution_id, reviewed_head_sha, finding_order))"
                 )
                 c.execute(
                     "CREATE UNIQUE INDEX IF NOT EXISTS one_active_execution_per_issue ON executions(issue_number) WHERE terminal = 0"
@@ -316,6 +322,56 @@ class SqliteExecutionStore:
             ) from error
         return self.get(execution_id)
 
+    def record_review(
+        self, execution_id: str, review: StructuredReview, summary: str
+    ) -> RunRecord:
+        """Persiste veredito, findings e evento em uma única transação."""
+        try:
+            with self._connection() as c:
+                row = c.execute("SELECT * FROM executions WHERE id = ?", (execution_id,)).fetchone()
+                if row is None:
+                    raise ExecutionStoreError("Execução persistida não encontrada")
+                current = _record(row)
+                if current.phase != ExecutionPhase.GEMINI_REVIEWING:
+                    raise ExecutionStoreError("Review só pode ser registrada em GEMINI_REVIEWING")
+                if not current.current_head_sha or review.reviewed_head_sha != current.current_head_sha:
+                    raise ExecutionStoreError("Review não corresponde ao HEAD atual")
+                if review.verdict == ReviewVerdict.REJECTED and not review.findings:
+                    raise ExecutionStoreError("Review rejeitada exige ao menos um finding")
+                now = _now()
+                c.execute("DELETE FROM review_findings WHERE execution_id = ? AND reviewed_head_sha = ?", (execution_id, review.reviewed_head_sha))
+                for order, finding in enumerate(review.findings, start=1):
+                    c.execute(
+                        "INSERT INTO review_findings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (execution_id, review.reviewed_head_sha, order, finding.severity.value,
+                         _sanitize_finding(finding.title, 300), _sanitize_finding(finding.description, 4000),
+                         _sanitize_finding(finding.path, 500) if finding.path else None,
+                         finding.line, _sanitize_finding(finding.criterion, 500) if finding.criterion else None, now),
+                    )
+                sequence = c.execute("SELECT COALESCE(MAX(sequence), 0) + 1 FROM execution_events WHERE execution_id = ?", (execution_id,)).fetchone()[0]
+                c.execute("UPDATE executions SET reviewed_head_sha = ?, review_verdict = ?, updated_at = ? WHERE id = ?", (review.reviewed_head_sha, review.verdict.value, now, execution_id))
+                c.execute("INSERT INTO execution_events(execution_id, sequence, previous_phase, phase, created_at, summary, head_sha) VALUES (?, ?, ?, ?, ?, ?, ?)", (execution_id, sequence, current.phase.value, current.phase.value, now, _sanitize(summary), review.reviewed_head_sha))
+        except ExecutionStoreError:
+            raise
+        except sqlite3.Error as error:
+            raise ExecutionStoreError(f"Não foi possível registrar review: {error}") from error
+        return self.get(execution_id)
+
+    def review_findings(self, execution_id: str, reviewed_head_sha: str | None = None) -> tuple[ReviewFinding, ...]:
+        sql = "SELECT * FROM review_findings WHERE execution_id = ?"
+        parameters: tuple[object, ...] = (execution_id,)
+        if reviewed_head_sha is not None:
+            sql += " AND reviewed_head_sha = ?"
+            parameters += (reviewed_head_sha,)
+        sql += " ORDER BY created_at, reviewed_head_sha, finding_order"
+        try:
+            with self._connection() as c:
+                rows = c.execute(sql, parameters).fetchall()
+            from ai_dev_orchestrator.domain.review import FindingSeverity
+            return tuple(ReviewFinding(FindingSeverity(row["severity"]), row["title"], row["description"], row["path"], row["line"], row["criterion"]) for row in rows)
+        except sqlite3.Error as error:
+            raise ExecutionStoreError(f"Não foi possível consultar findings: {error}") from error
+
     def _fetch_one(self, sql: str, parameters: tuple[object, ...]) -> RunRecord | None:
         try:
             with self._connection() as c:
@@ -336,11 +392,19 @@ def _parse_time(value: str) -> datetime:
 
 
 def _sanitize(value: str) -> str:
+    return _redact_secrets(value)[:_SUMMARY_LIMIT]
+
+
+def _redact_secrets(value: str) -> str:
     return re.sub(
         r"(?i)(token|authorization|password|secret)\s*[:=]\s*\S+",
         r"\1=[redigido]",
         value.replace("\n", " "),
-    )[:_SUMMARY_LIMIT]
+    )
+
+
+def _sanitize_finding(value: str, limit: int) -> str:
+    return _redact_secrets(value)[:limit]
 
 
 def _record(row: sqlite3.Row) -> RunRecord:

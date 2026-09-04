@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 from ai_dev_orchestrator import __version__
 from ai_dev_orchestrator.cli import app
 from ai_dev_orchestrator.services.pipeline import RunResult
+from ai_dev_orchestrator.services.resume import ResumeError, ResumeResult
 
 runner = CliRunner()
 
@@ -48,3 +49,49 @@ def test_run_delegates_to_pipeline_and_displays_summary(monkeypatch) -> None:
     assert result.exit_code == 0
     assert calls == [(17, "feat/test")]
     assert "Sessão Codex: session-17" in result.output
+
+
+def test_resume_accepts_only_issue_and_displays_a_short_summary(monkeypatch) -> None:
+    calls: list[int] = []
+
+    class Service:
+        def resume(self, issue: int) -> ResumeResult:
+            calls.append(issue)
+            return ResumeResult(37, "execution-37", "WAITING_CI", "feat/recovery",
+                                "session-37", 39, "a" * 40, 2)
+
+    monkeypatch.setattr("ai_dev_orchestrator.cli.load_config", lambda: object())
+    monkeypatch.setattr("ai_dev_orchestrator.cli.ResumeService.from_config",
+                        lambda _config: Service())
+
+    result = runner.invoke(app, ["resume", "--issue", "37"])
+
+    assert result.exit_code == 0
+    assert calls == [37]
+    assert "Execução: execution-37" in result.output
+    assert "Fase: WAITING_CI" in result.output
+    assert "Sessão Codex: session-37" in result.output
+    assert "PR: #39" in result.output
+    assert f"HEAD: {'a' * 40}" in result.output
+    assert "Correções: 2" in result.output
+
+
+def test_resume_has_no_branch_override() -> None:
+    result = runner.invoke(app, ["resume", "--issue", "37", "--branch", "outra"])
+
+    assert result.exit_code != 0
+
+
+def test_resume_reports_controlled_error(monkeypatch) -> None:
+    class Service:
+        def resume(self, issue: int) -> ResumeResult:
+            raise ResumeError("Nenhuma execução ativa")
+
+    monkeypatch.setattr("ai_dev_orchestrator.cli.load_config", lambda: object())
+    monkeypatch.setattr("ai_dev_orchestrator.cli.ResumeService.from_config",
+                        lambda _config: Service())
+
+    result = runner.invoke(app, ["resume", "--issue", "37"])
+
+    assert result.exit_code == 1
+    assert "Erro: Nenhuma execução ativa" in result.output

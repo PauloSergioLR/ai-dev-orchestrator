@@ -276,10 +276,6 @@ class RunPipeline:
                     base_ref=self.config.workspace.base_ref,
                 )
                 self._execution_id = record.id
-                self._transition(
-                    ExecutionPhase.CODEX_RUNNING,
-                    "Worktree e execução Codex serão preparados",
-                )
             except Exception as error:
                 raise RunPipelineError(
                     f"Falha ao persistir estado antes de criar o worktree: {error}"
@@ -295,6 +291,15 @@ class RunPipeline:
             raise RunPipelineError(
                 f"Falha ao criar branch e worktree: {error}"
             ) from error
+        self._transition(
+            ExecutionPhase.CODEX_RUNNING,
+            "Worktree preparado; execução Codex será iniciada",
+            current_head_sha=(
+                self.git_publisher.current_head(worktree.path)
+                if self.git_publisher and hasattr(self.git_publisher, "current_head")
+                else None
+            ),
+        )
         try:
             self.status_writer.set_status(
                 item.id, self.config.github.in_progress_status
@@ -343,9 +348,7 @@ class RunPipeline:
                 f"Falha nos gates locais; o Status está em '{self.config.github.in_progress_status}' "
                 f"e o worktree foi preservado em {worktree.path}: {error}"
             ) from error
-        self._transition(
-            ExecutionPhase.PUBLISHING, "Commit, push e Pull Request serão publicados"
-        )
+        self._transition(ExecutionPhase.COMMIT_PENDING, "Commit será publicado")
         try:
             commit_sha = self.git_publisher.commit(worktree.path, issue.number)
         except Exception as error:
@@ -353,6 +356,7 @@ class RunPipeline:
                 f"Falha ao preparar ou criar o commit; worktree e staging foram preservados em "
                 f"{worktree.path}: {error}"
             ) from error
+        self._transition(ExecutionPhase.PUSH_PENDING, "Commit confirmado; push será publicado", current_head_sha=commit_sha)
         try:
             self.git_publisher.push(
                 worktree.path, self.config.workspace.remote_name, worktree.branch
@@ -361,6 +365,7 @@ class RunPipeline:
             raise RunPipelineError(
                 f"Falha ao enviar a branch; o commit {commit_sha} foi preservado em {worktree.path}: {error}"
             ) from error
+        self._transition(ExecutionPhase.PR_PENDING, "Push confirmado; Pull Request será criado", current_head_sha=commit_sha)
         try:
             pull_request = self.pull_request_creator.create(
                 issue, worktree.branch, gates
@@ -522,7 +527,7 @@ class RunPipeline:
             if branch != worktree.branch:
                 raise MergeGateError("Branch local divergiu da branch da Issue")
             self._transition(
-                ExecutionPhase.MERGING,
+                ExecutionPhase.MERGE_PENDING,
                 "Merge remoto será solicitado",
                 head_sha=review.reviewed_head_sha,
                 reviewed_head_sha=review.reviewed_head_sha,
@@ -547,8 +552,9 @@ class RunPipeline:
                 f"Auto-merge recusado ou não confirmado para Pull Request #{pull_request.number}; nenhum Status Done foi escrito: {error}"
             ) from error
         try:
-            self._checkpoint(
-                "Merge confirmado no GitHub",
+            self._transition(
+                ExecutionPhase.PROJECT_DONE_PENDING,
+                "Merge confirmado no GitHub; Project Done será atualizado",
                 merge_commit_sha=merge.merge_commit_sha,
                 merged_head_sha=merge.merged_head_sha,
                 head_sha=merge.merged_head_sha,
@@ -646,6 +652,7 @@ class RunPipeline:
             ci_result,
             (),
         )
+        self._record_review(review)
         prior_findings: tuple[ReviewFinding, ...] = ()
         corrections = 0
         while review.verdict is ReviewVerdict.REJECTED:
@@ -699,16 +706,19 @@ class RunPipeline:
             self._ensure_local_head_is_current(
                 worktree.path, ci_result.expected_head_sha
             )
-            self._transition(
-                ExecutionPhase.PUBLISHING,
-                "Commit e push da correção serão publicados",
-            )
+            self._transition(ExecutionPhase.COMMIT_PENDING, "Commit da correção será publicado")
             new_head = self.git_publisher.commit_correction(worktree.path)
             self._ensure_existing_pull_request(
                 pull_request, worktree.branch, ci_result.expected_head_sha
             )
+            self._transition(ExecutionPhase.PUSH_PENDING, "Commit da correção confirmado; push será publicado", current_head_sha=new_head)
             self.git_publisher.push(
                 worktree.path, self.config.workspace.remote_name, worktree.branch
+            )
+            self._transition(
+                ExecutionPhase.PR_PENDING,
+                "Push da correção confirmado; Pull Request existente será revalidado",
+                current_head_sha=new_head,
             )
             self._ensure_existing_pull_request(pull_request, worktree.branch, new_head)
             self._transition(
@@ -736,7 +746,17 @@ class RunPipeline:
                 ci_result,
                 prior_findings,
             )
+            self._record_review(review)
         return review, ci_result, gates, final_message, corrections, prior_findings
+
+    def _record_review(self, review: StructuredReview) -> None:
+        """Persiste o veredito antes de qualquer transição dependente dele."""
+        if self.execution_store is None or self._execution_id is None:
+            return
+        recorder = getattr(self.execution_store, "record_review", None)
+        if recorder is None:
+            raise RunPipelineError("Store não suporta persistência estruturada de review")
+        recorder(self._execution_id, review, "Review independente persistida")
 
     def _ensure_existing_pull_request(
         self, pull_request: PullRequest, branch: str, expected_head_sha: str
