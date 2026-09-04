@@ -99,6 +99,15 @@ class CiConfig(BaseModel):
         return value
 
 
+class ConvergenceConfig(BaseModel):
+    """Limites para observar a consistência eventual após efeitos no GitHub."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    poll_interval_seconds: float = Field(default=1, gt=0)
+    timeout_seconds: float = Field(default=30, gt=0)
+
+
 class ReviewConfig(BaseModel):
     """Política local do reviewer independente."""
 
@@ -182,6 +191,7 @@ class OrchestratorConfig(BaseSettings):
     workspace: WorkspaceConfig
     state: StateConfig = Field(default_factory=StateConfig)
     ci: CiConfig = Field(default_factory=CiConfig)
+    convergence: ConvergenceConfig = Field(default_factory=ConvergenceConfig)
     review: ReviewConfig = Field(default_factory=ReviewConfig)
 
     @classmethod

@@ -24,7 +24,12 @@ from ai_dev_orchestrator.services.pipeline import RunPipeline, build_initial_pro
 from ai_dev_orchestrator.services.recovery_executor import CommitResult
 from ai_dev_orchestrator.services.validation import LocalValidationService
 from ai_dev_orchestrator.services.merge import MergeGate
+from ai_dev_orchestrator.services.merge import wait_for_merge_confirmation
 from ai_dev_orchestrator.services.review import CorrectionContextBuilder
+from ai_dev_orchestrator.services.convergence import (
+    ConvergencePoller,
+    ObservationDecision,
+)
 
 
 class RecoveryEffects:
@@ -40,6 +45,7 @@ class RecoveryEffects:
         self.pull_requests = GitHubPullRequestAdapter(config)
         self.projects = GitHubProjectStatusAdapter(config)
         self.reviewer = AntigravityAdapter(config.review.timeout_seconds)
+        self.convergence = ConvergencePoller(config.convergence)
 
     def prepare_worktree(self, run: RunRecord) -> str:
         if not run.branch or not run.worktree_path or not run.base_ref:
@@ -64,12 +70,14 @@ class RecoveryEffects:
 
     def push_branch(self, run: RunRecord) -> None:
         self.publication.push(run.worktree_path or "", self.config.workspace.remote_name, run.branch or "")
+        if run.pull_request_number:
+            self._wait_pull_request_snapshot(run.pull_request_number, run)
 
     def create_pull_request(self, run: RunRecord) -> PullRequestObservation:
         issue = self.issues.get_issue(run.issue_number)
         gates = self.validation.validate(run.worktree_path or "")
         created = self.pull_requests.create(issue, run.branch or "", gates)
-        current = self.pull_requests.get_merge_snapshot(created.number)
+        current = self._wait_pull_request_snapshot(created.number, run)
         try:
             state = PullRequestState(current.state)
         except ValueError as error:
@@ -128,11 +136,47 @@ class RecoveryEffects:
                             ci_result=ci_result,
                             blocking_severities=self.config.review.blocking_severities)
         result = self.pull_requests.merge(run.pull_request_number, run.reviewed_head_sha)
-        confirmed = self.pull_requests.get_merge_snapshot(run.pull_request_number)
-        if not confirmed.merged or confirmed.head_sha != run.reviewed_head_sha or confirmed.merge_commit_sha != result.merge_commit_sha:
-            raise ValueError("GitHub não confirmou merge do HEAD aprovado")
+        wait_for_merge_confirmation(
+            self._poller(),
+            lambda: self.pull_requests.get_merge_snapshot(run.pull_request_number or 0),
+            pull_request_number=run.pull_request_number,
+            pull_request_url=run.pull_request_url,
+            expected_head_sha=run.reviewed_head_sha,
+            expected_merge_commit_sha=result.merge_commit_sha,
+        )
         self.pull_requests.verify_merge_commit(result.merge_commit_sha, result.merged_head_sha)
         return MergeObservation(MergeState.MERGED, result.merged_head_sha, result.merge_commit_sha)
 
     def mark_project_done(self, run: RunRecord) -> None:
         self.projects.set_status(run.project_item_id or "", "Done")
+
+    def _poller(self) -> ConvergencePoller:
+        """Mantém compatibilidade com instâncias construídas por testes sem __init__."""
+        poller = getattr(self, "convergence", None)
+        if poller is None:
+            poller = ConvergencePoller(self.config.convergence)
+            self.convergence = poller
+        return poller
+
+    def _wait_pull_request_snapshot(
+        self, pull_request_number: int, run: RunRecord
+    ):
+        """Confirma identidade e HEAD após push ou criação, sem repetir o efeito."""
+
+        def classify(snapshot):
+            if (
+                snapshot.number != pull_request_number
+                or snapshot.base != self.config.github.pull_request_base
+                or snapshot.head_branch != run.branch
+                or snapshot.state != "OPEN"
+            ):
+                raise ValueError("Pull Request divergiu, foi fechado ou trocou de identidade")
+            if snapshot.head_sha == run.current_head_sha:
+                return ObservationDecision.CONVERGED
+            return ObservationDecision.RETRY
+
+        return self._poller().wait(
+            lambda: self.pull_requests.get_merge_snapshot(pull_request_number),
+            classify,
+            f"HEAD {run.current_head_sha} do Pull Request #{pull_request_number}",
+        )

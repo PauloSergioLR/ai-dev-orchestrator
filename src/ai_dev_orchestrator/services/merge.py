@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+from typing import Callable
 
 from ai_dev_orchestrator.domain.ci import CiResult, CiStatus
 from ai_dev_orchestrator.domain.review import ReviewVerdict, StructuredReview
+from ai_dev_orchestrator.services.convergence import ConvergencePoller, ObservationDecision
 
 
 class MergeGateError(Exception):
@@ -58,6 +60,41 @@ class MergeGate:
             raise MergeGateError("SHA aprovado pelo reviewer é inválido")
         if not (snapshot.head_sha == approved_sha == ci_result.expected_head_sha == local_head):
             raise MergeGateError("HEAD do PR, CI, review e worktree não convergem")
+
+
+def wait_for_merge_confirmation(
+    poller: ConvergencePoller,
+    read: Callable[[], MergePullRequestSnapshot],
+    *,
+    pull_request_number: int,
+    pull_request_url: str,
+    expected_head_sha: str,
+    expected_merge_commit_sha: str,
+) -> MergePullRequestSnapshot:
+    """Aguarda OPEN -> MERGED sem repetir a mutação de merge."""
+
+    def classify(snapshot: MergePullRequestSnapshot) -> ObservationDecision:
+        if (
+            snapshot.number != pull_request_number
+            or snapshot.url != pull_request_url
+            or snapshot.head_sha != expected_head_sha
+        ):
+            raise MergeGateError("Identidade do Pull Request divergiu após o merge")
+        if snapshot.state == "OPEN" and not snapshot.merged:
+            return ObservationDecision.RETRY
+        if (
+            snapshot.state == "MERGED"
+            and snapshot.merged
+            and snapshot.merge_commit_sha == expected_merge_commit_sha
+        ):
+            return ObservationDecision.CONVERGED
+        raise MergeGateError("GitHub retornou estado impossível ou divergente após o merge")
+
+    return poller.wait(
+        read,
+        classify,
+        f"merge do Pull Request #{pull_request_number}",
+    )
 
 
 def _is_sha(value: str) -> bool:

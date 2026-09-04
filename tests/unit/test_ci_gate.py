@@ -116,3 +116,27 @@ def test_first_snapshot_must_match_the_published_commit() -> None:
         gate(reader, clock).wait(42, SHA)
     assert reader.calls == [42]
     assert clock.sleeps == []
+
+
+def test_previous_pr_head_is_transient_then_ci_converges_to_expected_sha() -> None:
+    previous = "b" * 40
+    reader = Reader([
+        PullRequestCiSnapshot(previous, ()),
+        PullRequestCiSnapshot(SHA, ()),
+        PullRequestCiSnapshot(SHA, (check(),)),
+    ])
+    clock = FakeTime()
+
+    result = gate(reader, clock).wait(42, SHA, stale_head_sha=previous)
+
+    assert result.status is CiStatus.SUCCESS
+    assert reader.calls == [42, 42, 42]
+    assert clock.sleeps == [5, 5]
+
+
+def test_unexpected_ci_head_is_not_treated_as_known_stale_head() -> None:
+    reader = Reader([PullRequestCiSnapshot("c" * 40, ())])
+    clock = FakeTime()
+    with pytest.raises(CiGateError, match="mudou"):
+        gate(reader, clock).wait(42, SHA, stale_head_sha="b" * 40)
+    assert clock.sleeps == []

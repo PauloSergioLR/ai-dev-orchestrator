@@ -33,11 +33,11 @@ def create(adapter_value: GitHubPullRequestAdapter):
 
 
 def test_create_uses_supported_commands_and_returns_metadata() -> None:
-    value, runner = adapter([CommandResult(0, "https://github.com/acme/repo/pull/42\n"), CommandResult(0, '{"title":"Título original","baseRefName":"release","headRefName":"feat/test"}')])
+    value, runner = adapter([CommandResult(0, "https://github.com/acme/repo/pull/42\n")])
     pr = create(value)
     assert (pr.number, pr.url, pr.title, pr.base, pr.head) == (42, "https://github.com/acme/repo/pull/42", "Título original", "release", "feat/test")
     assert "--json" not in runner.calls[0]
-    assert runner.calls[1] == ["gh", "pr", "view", pr.url, "--repo", "acme/repo", "--json", "title,baseRefName,headRefName"]
+    assert len(runner.calls) == 1
     body = runner.calls[0][runner.calls[0].index("--body") + 1]
     assert "feat/test" in body and "Codex" in body and "ruff" in body and "Closes #19" in body
     assert runner.calls[0][runner.calls[0].index("--base") + 1] == "release"
@@ -49,12 +49,6 @@ def test_rejects_invalid_or_other_repository_url(stdout: str) -> None:
     with pytest.raises(GitHubPullRequestError, match="URL válida"):
         create(value)
     assert len(runner.calls) == 1
-
-
-def test_view_failure_reports_created_pr_url_and_number() -> None:
-    value, _ = adapter([CommandResult(0, "https://github.com/acme/repo/pull/42\n"), CommandResult(1, stderr="sem permissão")])
-    with pytest.raises(GitHubPullRequestError, match=r"#42.*pull/42"):
-        create(value)
 
 
 def test_review_data_uses_pagination_and_accepts_renamed_diff() -> None:
