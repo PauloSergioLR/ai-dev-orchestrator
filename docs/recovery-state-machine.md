@@ -24,7 +24,7 @@ As novas fases explicitam cada efeito: `COMMIT_PENDING`, `PUSH_PENDING`,
 | `PREPARING` | worktree ausente ou convergente | preparar ou avançar |
 | `CODEX_RUNNING` | sessão Codex persistida | retomar Codex |
 | `TESTING` | gates pendentes | executar gates locais |
-| `COMMIT_PENDING` | alteração rastreada ou commit direto comprovado | criar ou registrar commit |
+| `COMMIT_PENDING` | qualquer alteração do worktree ou commit direto comprovado | criar ou registrar commit |
 | `PUSH_PENDING` | remoto ausente, pai direto ou igual ao local | push ou registrar push |
 | `PR_PENDING` | identidade completa do PR convergente | criar ou adotar PR |
 | `WAITING_CI` | CI do HEAD exato | aguardar ou registrar sucesso |
@@ -37,12 +37,25 @@ O planner falha fechado: contradição, ambiguidade, SHA divergente ou estado
 `UNKNOWN` produz `BLOCK`. Em especial, `UNKNOWN` nunca é interpretado como
 false ou `NOT_DONE`.
 
+Toda fase que depende de worktree exige a identidade persistida completa:
+branch, caminho do worktree e ref base. As fases publicadas também exigem HEAD
+local idêntico ao checkpoint. A partir de `WAITING_CI`, o número e a URL do PR
+devem estar persistidos juntos, e a observação deve conter exatamente um PR com
+repositório, base, branch e HEAD convergentes. Uma identidade parcial bloqueia.
+
 ## Provas de histórico e review
 
 Para não aceitar divergências silenciosas, commit e push usam relações diretas:
 um commit já existente só é aceito quando o pai imediato do HEAD local é o
-checkpoint; um push pendente só é permitido para remoto ausente ou pai direto
-do HEAD local. Relações ancestrais arbitrárias não bastam.
+checkpoint; um push pendente só é permitido para remoto ausente ou SHA igual ao
+pai imediato do HEAD local. Relações ancestrais arbitrárias não bastam. O fato
+de o worktree estar dirty inclui arquivos novos: a validação de conteúdo cabe
+aos gates do futuro executor, não ao planner.
+
+`PROJECT_DONE_PENDING` somente pode marcar o projeto depois de merge comprovado
+no record: item de projeto, SHA revisado, SHA merged igual ao revisado e commit
+de merge precisam estar presentes. Isso impede marcar Done após uma observação
+incompleta ou após merge não persistido.
 
 O resultado do Gemini só é recuperável depois que executor futuro persistir
 veredito, SHA revisado e findings no store. Se o processo cair após a chamada

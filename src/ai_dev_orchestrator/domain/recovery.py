@@ -109,10 +109,8 @@ class RecoveryObservation:
     worktree_state: WorktreeState
     local_head_sha: str | None = None
     local_head_parent_sha: str | None = None
-    has_local_changes: bool = False
-    has_untracked_files: bool = False
+    has_worktree_changes: bool = False
     remote_head_sha: str | None = None
-    remote_head_is_direct_parent_of_local: bool = False
     pull_requests: tuple[PullRequestObservation, ...] = ()
     ci: CiObservation = field(default_factory=CiObservation)
     findings_head_sha: str | None = None
