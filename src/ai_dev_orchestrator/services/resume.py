@@ -61,10 +61,19 @@ class ResumeService:
         run = self.store.checkpoint(run.id, summary="Retomada iniciada")
         seen: set[tuple[object, ...]] = set()
         while True:
-            observation = self.observer.observe(run)
+            try:
+                observation = self.observer.observe(run)
+            except KeyboardInterrupt:
+                self.store.checkpoint(run.id, summary="Retomada interrompida")
+                raise
+            except Exception as error:
+                raise ResumeError(f"Não foi possível observar a retomada: {error}") from error
             decision = self.planner.plan(run, observation)
-            signature = (run.phase, run.current_head_sha, run.codex_session_id,
-                         run.pull_request_number, run.reviewed_head_sha,
+            signature = (run.phase, run.branch, run.worktree_path, run.base_ref,
+                         run.codex_session_id, run.pull_request_number, run.pull_request_url,
+                         run.current_head_sha, run.ci_head_sha, run.reviewed_head_sha,
+                         run.review_verdict, run.correction_attempts, run.merge_commit_sha,
+                         run.merged_head_sha, run.project_status,
                          observation, decision.action, decision.next_phase)
             if signature in seen:
                 raise ResumeError("Retomada sem progresso detectada")

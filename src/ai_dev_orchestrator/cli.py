@@ -114,6 +114,7 @@ def resume(
     typer.echo(f"Sessão Codex: {result.codex_session_id or '-'}")
     typer.echo(f"PR: #{result.pull_request_number or '-'}")
     typer.echo(f"HEAD: {result.current_head_sha or '-'}")
+    typer.echo(f"Correções: {result.correction_attempts}")
 
 
 def _show_run_result(result: RunResult) -> None:

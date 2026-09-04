@@ -652,6 +652,7 @@ class RunPipeline:
             ci_result,
             (),
         )
+        self._record_review(review)
         prior_findings: tuple[ReviewFinding, ...] = ()
         corrections = 0
         while review.verdict is ReviewVerdict.REJECTED:
@@ -714,6 +715,11 @@ class RunPipeline:
             self.git_publisher.push(
                 worktree.path, self.config.workspace.remote_name, worktree.branch
             )
+            self._transition(
+                ExecutionPhase.PR_PENDING,
+                "Push da correção confirmado; Pull Request existente será revalidado",
+                current_head_sha=new_head,
+            )
             self._ensure_existing_pull_request(pull_request, worktree.branch, new_head)
             self._transition(
                 ExecutionPhase.WAITING_CI,
@@ -740,7 +746,17 @@ class RunPipeline:
                 ci_result,
                 prior_findings,
             )
+            self._record_review(review)
         return review, ci_result, gates, final_message, corrections, prior_findings
+
+    def _record_review(self, review: StructuredReview) -> None:
+        """Persiste o veredito antes de qualquer transição dependente dele."""
+        if self.execution_store is None or self._execution_id is None:
+            return
+        recorder = getattr(self.execution_store, "record_review", None)
+        if recorder is None:
+            raise RunPipelineError("Store não suporta persistência estruturada de review")
+        recorder(self._execution_id, review, "Review independente persistida")
 
     def _ensure_existing_pull_request(
         self, pull_request: PullRequest, branch: str, expected_head_sha: str

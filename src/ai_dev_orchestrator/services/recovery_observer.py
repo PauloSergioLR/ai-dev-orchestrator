@@ -17,6 +17,10 @@ from ai_dev_orchestrator.infrastructure.process import CommandRunner
 from ai_dev_orchestrator.services.ci_gate import classify_required_checks
 
 
+class RecoveryObservationError(Exception):
+    """Um fato externo necessário não pôde ser lido com segurança."""
+
+
 class RecoveryObserver:
     """Snapshot read-only; falhas de leitura viram estado desconhecido ou divergente."""
 
@@ -33,7 +37,7 @@ class RecoveryObserver:
         ci = self._ci(run, prs)
         merge = self._merge(run, prs)
         project = self._project(run)
-        remote = self._git(run, ["rev-parse", "--verify", f"{self.config.workspace.remote_name}/{run.branch}"]) if run.branch else None
+        remote = self._remote_head(run)
         return RecoveryObservation(
             worktree, local_head_sha=head, local_head_parent_sha=parent,
             has_worktree_changes=dirty, remote_head_sha=remote,
@@ -45,13 +49,21 @@ class RecoveryObserver:
     def _worktree(self, run: RunRecord) -> tuple[WorktreeState, str | None, str | None, bool]:
         if not run.worktree_path or not Path(run.worktree_path).is_dir():
             return WorktreeState.ABSENT, None, None, False
-        branch = self._git(run, ["branch", "--show-current"])
-        root = self._git(run, ["rev-parse", "--show-toplevel"])
+        if run.base_ref != self.config.workspace.base_ref:
+            return WorktreeState.DIVERGENT, None, None, False
+        branch = self._git_required(run, ["branch", "--show-current"])
+        root = self._git_required(run, ["rev-parse", "--show-toplevel"])
         if not branch or branch != run.branch or not root:
             return WorktreeState.DIVERGENT, None, None, False
-        head = self._git(run, ["rev-parse", "HEAD"])
+        common = self._git_required(run, ["rev-parse", "--git-common-dir"])
+        expected = self.runner.run(["git", "-C", str(self.config.workspace.repository_path), "rev-parse", "--git-common-dir"])
+        if expected.error or not expected.succeeded:
+            raise RecoveryObservationError("Não foi possível provar o repositório do worktree")
+        if Path(run.worktree_path).joinpath(common).resolve() != Path(self.config.workspace.repository_path, expected.stdout.strip()).resolve():
+            return WorktreeState.DIVERGENT, None, None, False
+        head = self._git_required(run, ["rev-parse", "HEAD"])
         parent = self._git(run, ["rev-parse", "HEAD^"])
-        status = self._git(run, ["status", "--porcelain", "--untracked-files=all"], raw=True)
+        status = self._git_required(run, ["status", "--porcelain", "--untracked-files=all"], raw=True)
         return WorktreeState.CONVERGENT, head, parent, bool(status and status.strip())
 
     def _git(self, run: RunRecord, arguments: list[str], raw: bool = False) -> str | None:
@@ -62,6 +74,28 @@ class RecoveryObserver:
             return None
         return result.stdout if raw else result.stdout.strip() or None
 
+    def _git_required(self, run: RunRecord, arguments: list[str], raw: bool = False) -> str | None:
+        value = self._git(run, arguments, raw)
+        if value is None:
+            raise RecoveryObservationError("Não foi possível ler o estado do worktree")
+        return value
+
+    def _remote_head(self, run: RunRecord) -> str | None:
+        if not run.branch:
+            raise RecoveryObservationError("Branch persistida ausente")
+        result = self.runner.run(["git", "ls-remote", "--heads", self.config.workspace.remote_name, f"refs/heads/{run.branch}"])
+        if result.error or not result.succeeded:
+            raise RecoveryObservationError("Não foi possível consultar o HEAD remoto")
+        lines = [line.split() for line in result.stdout.splitlines() if line.strip()]
+        if not lines:
+            return None
+        if len(lines) != 1 or len(lines[0]) != 2 or lines[0][1] != f"refs/heads/{run.branch}":
+            raise RecoveryObservationError("Resposta remota ambígua")
+        sha = lines[0][0]
+        if len(sha) not in {40, 64} or any(char not in "0123456789abcdefABCDEF" for char in sha):
+            raise RecoveryObservationError("SHA remoto inválido")
+        return sha
+
     def _pull_requests(self, branch: str | None) -> tuple[PullRequestObservation, ...]:
         if not branch:
             return ()
@@ -69,7 +103,7 @@ class RecoveryObserver:
                                   "--head", branch, "--state", "all", "--json",
                                   "number,url,state,baseRefName,headRefName,headRefOid,isDraft,mergedAt,mergeCommit"])
         if result.error or not result.succeeded:
-            return ()
+            raise RecoveryObservationError("Não foi possível consultar Pull Requests")
         try:
             values = json.loads(result.stdout)
             return tuple(PullRequestObservation(
@@ -77,8 +111,8 @@ class RecoveryObserver:
                 value["baseRefName"], value["headRefName"], value["headRefOid"],
                 PullRequestState.MERGED if value.get("mergedAt") else PullRequestState(value["state"]),
             ) for value in values)
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            return ()
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise RecoveryObservationError("Resposta de Pull Requests inválida") from error
 
     def _ci(self, run: RunRecord, prs: tuple[PullRequestObservation, ...]) -> CiObservation:
         if len(prs) != 1:
@@ -87,8 +121,8 @@ class RecoveryObserver:
             snapshot = self.ci_reader.get_ci_snapshot(prs[0].number)
             state, _ = classify_required_checks(snapshot.checks, self.config.ci.required_checks)
             return CiObservation(CiState(state.value), snapshot.head_sha)
-        except Exception:
-            return CiObservation()
+        except Exception as error:
+            raise RecoveryObservationError("Não foi possível consultar CI") from error
 
     def _merge(self, run: RunRecord, prs: tuple[PullRequestObservation, ...]) -> MergeObservation:
         if len(prs) != 1:

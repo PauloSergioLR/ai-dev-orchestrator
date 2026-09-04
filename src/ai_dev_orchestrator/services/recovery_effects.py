@@ -24,6 +24,7 @@ from ai_dev_orchestrator.services.pipeline import RunPipeline, build_initial_pro
 from ai_dev_orchestrator.services.recovery_executor import CommitResult
 from ai_dev_orchestrator.services.validation import LocalValidationService
 from ai_dev_orchestrator.services.merge import MergeGate
+from ai_dev_orchestrator.services.review import CorrectionContextBuilder
 
 
 class RecoveryEffects:
@@ -71,19 +72,20 @@ class RecoveryEffects:
         return PullRequestObservation(created.number, created.url, self.config.github.repository_full_name, created.base, created.head, self.publication.current_head(run.worktree_path or ""), PullRequestState.OPEN)
 
     def wait_for_ci(self, run: RunRecord) -> CiObservation:
+        result = self._wait_ci_result(run)
+        return CiObservation(CiState(result.status.value), result.expected_head_sha)
+
+    def _wait_ci_result(self, run: RunRecord):
         from ai_dev_orchestrator.adapters.github import GitHubCiAdapter
         from ai_dev_orchestrator.services.ci_gate import CiGate
-        result = CiGate(GitHubCiAdapter(self.config), self.config.ci).wait(run.pull_request_number or 0, run.current_head_sha or "")
-        return CiObservation(CiState(result.status.value), result.expected_head_sha)
+        return CiGate(GitHubCiAdapter(self.config), self.config.ci).wait(run.pull_request_number or 0, run.current_head_sha or "")
 
     def review_head(self, run: RunRecord, prior_findings: tuple[ReviewFinding, ...]) -> StructuredReview:
         if not run.pull_request_number or not run.pull_request_url or not run.current_head_sha:
             raise ValueError("Identidade de review incompleta")
         issue = self.issues.get_issue(run.issue_number)
         gates = self.validation.validate(run.worktree_path or "")
-        ci = self.wait_for_ci(run)
-        from ai_dev_orchestrator.domain.ci import CiResult, CiStatus
-        ci_result = CiResult(run.current_head_sha, (), CiStatus(ci.state.value))
+        ci_result = self._wait_ci_result(run)
         pipeline = RunPipeline(self.config, self.issues, self.projects, self.projects,
                                self.worktrees, self.codex, self.validation, self.publication,
                                self.pull_requests, self.pull_requests, self.pull_requests,
@@ -93,7 +95,11 @@ class RecoveryEffects:
         return pipeline._review_head(issue, worktree, pull, run.current_head_sha, gates, ci_result, prior_findings)
 
     def resume_correction(self, run: RunRecord, findings: tuple[ReviewFinding, ...]) -> str:
-        prompt = f"Corrija os findings persistidos da Issue #{run.issue_number} no mesmo HEAD revisado."
+        if not findings or not run.pull_request_number or not run.pull_request_url or not run.reviewed_head_sha or not run.codex_session_id:
+            raise ValueError("Contexto de correção incompleto")
+        issue = self.issues.get_issue(run.issue_number)
+        rejected = StructuredReview(ReviewVerdict.REJECTED, findings, run.reviewed_head_sha, "Findings persistidos")
+        prompt = CorrectionContextBuilder().build(issue, run.pull_request_number, run.pull_request_url, run.reviewed_head_sha, rejected, ())
         return self.codex.resume(run.worktree_path or "", run.codex_session_id or "", prompt).session_id
 
     def merge_pull_request(self, run: RunRecord) -> MergeObservation:
@@ -101,13 +107,12 @@ class RecoveryEffects:
             raise ValueError("Identidade de merge incompleta")
         branch, local_head = self.publication.merge_state(run.worktree_path or "")
         snapshot = self.pull_requests.get_merge_snapshot(run.pull_request_number)
-        ci = self.wait_for_ci(run)
-        from ai_dev_orchestrator.domain.ci import CiResult, CiStatus
+        ci_result = self._wait_ci_result(run)
         review = StructuredReview(ReviewVerdict.APPROVED, (), run.reviewed_head_sha, "Review persistida")
         MergeGate().validate(snapshot, pull_request_number=run.pull_request_number,
                             pull_request_url=run.pull_request_url, base=self.config.github.pull_request_base,
                             branch=branch, local_head=local_head, review=review,
-                            ci_result=CiResult(run.reviewed_head_sha, (), CiStatus(ci.state.value)),
+                            ci_result=ci_result,
                             blocking_severities=self.config.review.blocking_severities)
         result = self.pull_requests.merge(run.pull_request_number, run.reviewed_head_sha)
         confirmed = self.pull_requests.get_merge_snapshot(run.pull_request_number)
