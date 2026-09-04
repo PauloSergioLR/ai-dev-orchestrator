@@ -14,6 +14,7 @@ from ai_dev_orchestrator.domain.execution import ExecutionPhase
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
 from ai_dev_orchestrator.services.pipeline import RunPipelineError
 from ai_dev_orchestrator.services.work import WorkResult, WorkService
+from ai_dev_orchestrator.services.escalation import HumanEscalationService
 
 
 class SupervisorError(Exception):
@@ -27,6 +28,7 @@ class SupervisorService:
         work_service: WorkService,
         store: SqliteExecutionStore,
         sleep: Callable[[float], None] = time.sleep,
+        escalator: HumanEscalationService | None = None,
     ) -> None:
         self.config, self.work_service, self.store, self.sleep = (
             config,
@@ -34,6 +36,7 @@ class SupervisorService:
             store,
             sleep,
         )
+        self.escalator = escalator
 
     @classmethod
     def from_config(cls, config: OrchestratorConfig) -> "SupervisorService":
@@ -41,6 +44,7 @@ class SupervisorService:
             config,
             WorkService.from_config(config),
             SqliteExecutionStore(config.state.database_path),
+            escalator=HumanEscalationService.from_config(config),
         )
 
     def watch(self) -> None:
@@ -60,6 +64,15 @@ class SupervisorService:
                     if retry_at is None:
                         interval = self.config.supervisor.retry_without_reset_seconds
                         if interval is None:
+                            if self.escalator:
+                                self.escalator.escalate(
+                                    run.id,
+                                    "QUOTA_WITHOUT_SAFE_RETRY",
+                                    "Provider não informou um instante confiável para retry e não há política local segura.",
+                                    classification=run.quota_classification,
+                                    suggested_action="Verifique a quota e retome manualmente a mesma execução.",
+                                )
+                                continue
                             raise SupervisorError(
                                 "Provider não informou retry e nenhuma política segura foi configurada"
                             )

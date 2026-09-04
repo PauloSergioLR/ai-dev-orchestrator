@@ -6,6 +6,7 @@ ready_status = "Ready"
 in_progress_status = "In Progress"
 ai_review_status = "AI Review"
 done_status = "Done"
+human_required_status = "Human Review"
 pull_request_target = "main"
 protected_branches = ["main"]
 status_field_name = "Status"
@@ -49,3 +50,17 @@ poll_interval_seconds = 60
 max_sleep_seconds = 300
 # Defina apenas se sua política aceitar retries sem horário informado pelo provider.
 # retry_without_reset_seconds = 1800
+
+[notifications]
+# Zero, um ou vários canais. Segredos permanecem somente no ambiente.
+channels = [] # opções: "email", "discord", "telegram"
+smtp_host = "smtp.example.com"
+smtp_port = 587
+smtp_sender = "orchestrator@example.com"
+email_recipients = ["operacoes@example.com"]
+smtp_starttls = true
+smtp_username_env = "ORCH_SMTP_USERNAME"
+smtp_password_env = "ORCH_SMTP_PASSWORD"
+discord_webhook_env = "ORCH_DISCORD_WEBHOOK_URL"
+telegram_token_env = "ORCH_TELEGRAM_BOT_TOKEN"
+telegram_chat_id_env = "ORCH_TELEGRAM_CHAT_ID"

@@ -24,6 +24,12 @@ class RecoveryObserver(Protocol):
     def observe(self, run: RunRecord) -> RecoveryObservation: ...
 
 
+class HumanEscalator(Protocol):
+    def escalate(
+        self, execution_id: str, reason_code: str, reason: str, **details: object
+    ) -> RunRecord: ...
+
+
 @dataclass(frozen=True)
 class ResumeResult:
     issue_number: int
@@ -45,9 +51,13 @@ class ResumeResult:
 class ResumeService:
     def __init__(self, store: SqliteExecutionStore, observer: RecoveryObserver,
                  planner: RecoveryPlanner, executor: RecoveryExecutor,
-                 codex_model: str | None = None, gemini_model: str | None = None) -> None:
+                 codex_model: str | None = None, gemini_model: str | None = None,
+                 escalator: HumanEscalator | None = None,
+                 ci_timeout_seconds: float | None = None) -> None:
         self.store, self.observer, self.planner, self.executor = store, observer, planner, executor
         self.codex_model, self.gemini_model = codex_model, gemini_model
+        self.escalator = escalator
+        self.ci_timeout_seconds = ci_timeout_seconds
 
     @classmethod
     def from_config(cls, config: OrchestratorConfig) -> "ResumeService":
@@ -56,7 +66,8 @@ class ResumeService:
         from ai_dev_orchestrator.services.recovery_observer import RecoveryObserver as RealObserver
         store = SqliteExecutionStore(config.state.database_path)
         policy = RecoveryPolicy(config.github.repository_full_name, config.github.pull_request_base, config.execution.auto_merge, config.review.max_correction_attempts, config.github.done_status)
-        return cls(store, RealObserver(config, store), RecoveryPlanner(policy), RecoveryExecutor(policy, store, RecoveryEffects(config)), config.providers.codex_model, config.providers.gemini_model)
+        from ai_dev_orchestrator.services.escalation import HumanEscalationService
+        return cls(store, RealObserver(config, store), RecoveryPlanner(policy), RecoveryExecutor(policy, store, RecoveryEffects(config)), config.providers.codex_model, config.providers.gemini_model, HumanEscalationService.from_config(config), config.ci.timeout_seconds)
 
     def resume(self, issue_number: int) -> ResumeResult:
         if issue_number <= 0:
@@ -78,6 +89,8 @@ class ResumeService:
             )
         run = self.store.checkpoint(run.id, summary="Retomada iniciada")
         run = self._resume_quota_if_due(run)
+        if run.phase in TERMINAL_PHASES:
+            return self._result(run)
         if run.phase in {
             ExecutionPhase.WAITING_CODEX_QUOTA,
             ExecutionPhase.WAITING_GEMINI_QUOTA,
@@ -94,8 +107,29 @@ class ResumeService:
                 run = self._record_provider_wait(run, error)
                 return self._result(run)
             except Exception as error:
+                if self.escalator:
+                    run = self.escalator.escalate(
+                        run.id,
+                        "ORCHESTRATOR_INTERNAL_ERROR",
+                        f"Não foi possível observar a retomada: {error}",
+                        suggested_action="Inspecione o estado local e remoto antes de retomar.",
+                    )
+                    return self._result(run)
                 raise ResumeError(f"Não foi possível observar a retomada: {error}") from error
             decision = self.planner.plan(run, observation)
+            if (
+                self.escalator
+                and run.phase == ExecutionPhase.WAITING_CI
+                and decision.action.value == "WAIT_FOR_CI"
+                and self._ci_wait_expired(run)
+            ):
+                run = self.escalator.escalate(
+                    run.id,
+                    "CI_STUCK_TIMEOUT",
+                    "CI permaneceu pendente além do timeout configurado.",
+                    suggested_action="Inspecione os checks pendentes e retome a mesma execução.",
+                )
+                return self._result(run)
             signature = (run.phase, run.branch, run.worktree_path, run.base_ref,
                          run.codex_session_id, run.pull_request_number, run.pull_request_url,
                          run.current_head_sha, run.ci_head_sha, run.reviewed_head_sha,
@@ -106,6 +140,14 @@ class ResumeService:
                 raise ResumeError("Retomada sem progresso detectada")
             seen.add(signature)
             if decision.action.value == "BLOCK":
+                if self.escalator:
+                    run = self.escalator.escalate(
+                        run.id,
+                        _recovery_reason_code(decision.reason),
+                        decision.reason,
+                        suggested_action="Reconcilie o estado indicado e retome a mesma execução.",
+                    )
+                    return self._result(run)
                 raise ResumeError(decision.reason)
             try:
                 run = self.executor.execute(run, decision, observation)
@@ -116,6 +158,14 @@ class ResumeService:
                 run = self._record_provider_wait(run, error)
                 return self._result(run)
             except Exception as error:
+                if self.escalator:
+                    run = self.escalator.escalate(
+                        run.id,
+                        _recovery_reason_code(str(error)),
+                        str(error),
+                        suggested_action="Corrija a causa e retome a mesma execução.",
+                    )
+                    return self._result(run)
                 raise ResumeError(f"Retomada interrompida em {run.phase}: {error}") from error
             if run.phase in TERMINAL_PHASES:
                 return self._result(run)
@@ -149,6 +199,14 @@ class ResumeService:
             return run
         retry_at = run.quota_retry_at
         if retry_at is None:
+            if self.escalator:
+                return self.escalator.escalate(
+                    run.id,
+                    "QUOTA_WITHOUT_SAFE_RETRY",
+                    "Provider não informou um instante confiável para retry.",
+                    classification=run.quota_classification,
+                    suggested_action="Verifique a quota do provider e retome manualmente quando estiver disponível.",
+                )
             raise ResumeError(
                 "Provider não informou quando retentar; intervenção necessária"
             )
@@ -177,6 +235,14 @@ class ResumeService:
             ProviderFailureKind.TRANSIENT_RATE_LIMIT,
             ProviderFailureKind.TERMINAL_QUOTA,
         }:
+            if self.escalator:
+                return self.escalator.escalate(
+                    run.id,
+                    failure.classification.value,
+                    str(failure),
+                    classification=failure.classification.value,
+                    suggested_action="Corrija a autenticação/modelo do provider e retome a mesma execução.",
+                )
             self.store.transition(
                 run.id,
                 ExecutionPhase.FAILED,
@@ -203,3 +269,32 @@ class ResumeService:
             codex_session_id=failure.session_id or run.codex_session_id,
             last_error=str(failure),
         )
+
+    def _ci_wait_expired(self, run: RunRecord) -> bool:
+        if self.ci_timeout_seconds is None:
+            return False
+        entered = next(
+            (
+                event.created_at
+                for event in self.store.events(run.id)
+                if event.phase == ExecutionPhase.WAITING_CI
+                and event.previous_phase != ExecutionPhase.WAITING_CI
+            ),
+            run.updated_at,
+        )
+        return (datetime.now(timezone.utc) - entered).total_seconds() >= self.ci_timeout_seconds
+
+
+def _recovery_reason_code(reason: str) -> str:
+    normalized = reason.casefold()
+    if "limite" in normalized and "corre" in normalized:
+        return "CORRECTION_LIMIT_REACHED"
+    if "ci " in normalized and "falh" in normalized:
+        return "CI_TERMINAL_FAILURE"
+    if "merge" in normalized:
+        return "MERGE_IMPOSSIBLE"
+    if "amb" in normalized or "desconhecido" in normalized:
+        return "REMOTE_STATE_AMBIGUOUS"
+    if "diverg" in normalized or "converg" in normalized or "head" in normalized:
+        return "GIT_PR_HEAD_DIVERGENCE"
+    return "RECOVERY_HUMAN_REQUIRED"

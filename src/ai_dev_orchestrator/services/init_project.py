@@ -232,6 +232,7 @@ ready_status = {q(config.github.ready_status)}
 in_progress_status = {q(config.github.in_progress_status)}
 ai_review_status = {q(config.github.ai_review_status)}
 done_status = {q(config.github.done_status)}
+human_required_status = {q(config.github.human_required_status)}
 pull_request_target = {q(config.github.pull_request_target)}
 protected_branches = {array(config.github.protected_branches)}
 status_field_name = {q(config.github.status_field_name)}
@@ -277,4 +278,18 @@ max_sleep_seconds = {config.supervisor.max_sleep_seconds}
         f"retry_without_reset_seconds = {config.supervisor.retry_without_reset_seconds}\n"
         if config.supervisor.retry_without_reset_seconds is not None
         else ""
-    )
+    ) + f"""
+
+[notifications]
+channels = {array(config.notifications.channels)}
+smtp_host = {q(config.notifications.smtp_host)}
+smtp_port = {config.notifications.smtp_port}
+smtp_sender = {q(config.notifications.smtp_sender)}
+email_recipients = {array(config.notifications.email_recipients)}
+smtp_starttls = {str(config.notifications.smtp_starttls).lower()}
+smtp_username_env = {q(config.notifications.smtp_username_env)}
+smtp_password_env = {q(config.notifications.smtp_password_env)}
+discord_webhook_env = {q(config.notifications.discord_webhook_env)}
+telegram_token_env = {q(config.notifications.telegram_token_env)}
+telegram_chat_id_env = {q(config.notifications.telegram_chat_id_env)}
+"""

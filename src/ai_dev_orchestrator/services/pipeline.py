@@ -74,6 +74,12 @@ class ProjectStatusWriter(Protocol):
     def set_status(self, project_item_id: str, status_name: str) -> None: ...
 
 
+class HumanEscalator(Protocol):
+    def escalate(
+        self, execution_id: str, reason_code: str, reason: str, **details: object
+    ): ...
+
+
 class WorktreeCreator(Protocol):
     def create_worktree(
         self,
@@ -212,6 +218,7 @@ class RunPipeline:
         pull_request_merger: PullRequestMerger | None = None,
         execution_store: ExecutionStore | None = None,
         convergence: ConvergencePoller | None = None,
+        escalator: HumanEscalator | None = None,
     ) -> None:
         self.config = config
         self.issue_reader = issue_reader
@@ -228,11 +235,14 @@ class RunPipeline:
         self.pull_request_merger = pull_request_merger
         self.execution_store = execution_store
         self.convergence = convergence or ConvergencePoller(config.convergence)
+        self.escalator = escalator
         self._execution_id: str | None = None
 
     @classmethod
     def from_config(cls, config: OrchestratorConfig) -> RunPipeline:
         pull_requests = GitHubPullRequestAdapter(config)
+        store = SqliteExecutionStore(config.state.database_path)
+        from ai_dev_orchestrator.services.escalation import HumanEscalationService
         return cls(
             config,
             GitHubIssueAdapter(config),
@@ -249,10 +259,38 @@ class RunPipeline:
                 config.review.timeout_seconds, model=config.providers.gemini_model
             ),
             pull_requests,
-            SqliteExecutionStore(config.state.database_path),
+            store,
+            escalator=HumanEscalationService.from_config(config),
         )
 
     def run(
+        self, issue_number: int, branch: str, *, base_ref: str | None = None
+    ) -> RunResult:
+        try:
+            return self._run(issue_number, branch, base_ref=base_ref)
+        except Exception as error:
+            if (
+                self.escalator is not None
+                and self.execution_store is not None
+                and self._execution_id is not None
+            ):
+                current = self.execution_store.get(self._execution_id)
+                if current.phase not in {
+                    ExecutionPhase.HUMAN_REQUIRED,
+                    ExecutionPhase.FAILED,
+                    ExecutionPhase.COMPLETED,
+                    ExecutionPhase.APPROVED_AWAITING_ACTION,
+                    ExecutionPhase.WAITING_CODEX_QUOTA,
+                    ExecutionPhase.WAITING_GEMINI_QUOTA,
+                }:
+                    self._escalate(
+                        "ORCHESTRATOR_INTERNAL_ERROR",
+                        str(error),
+                        suggested_action="Inspecione o checkpoint e retome a mesma execução após corrigir a causa.",
+                    )
+            raise
+
+    def _run(
         self, issue_number: int, branch: str, *, base_ref: str | None = None
     ) -> RunResult:
         if issue_number <= 0:
@@ -446,6 +484,11 @@ class RunPipeline:
                 pull_request.number, commit_sha
             )
         except Exception as error:
+            self._escalate(
+                "CI_TERMINAL_OR_STUCK",
+                str(error),
+                suggested_action="Abra os checks do PR, corrija a falha e retome a mesma execução.",
+            )
             raise RunPipelineError(
                 f"Falha no gate de CI da Issue #{issue.number}, Pull Request #{pull_request.number} "
                 f"em {pull_request.url}; Status permanece em '{self.config.github.ai_review_status}', "
@@ -591,6 +634,11 @@ class RunPipeline:
                 merge.merge_commit_sha, merge.merged_head_sha
             )
         except Exception as error:
+            self._escalate(
+                "MERGE_IMPOSSIBLE",
+                str(error),
+                suggested_action="Verifique regras de proteção e o estado do PR aprovado.",
+            )
             raise RunPipelineError(
                 f"Auto-merge recusado ou não confirmado para Pull Request #{pull_request.number}; nenhum Status Done foi escrito: {error}"
             ) from error
@@ -712,6 +760,11 @@ class RunPipeline:
             previous_findings = prior_findings
             prior_findings += review.findings
             if corrections >= self.config.review.max_correction_attempts:
+                self._escalate(
+                    "CORRECTION_LIMIT_REACHED",
+                    f"Limite configurado de {self.config.review.max_correction_attempts} correções atingido.",
+                    suggested_action="Revise os findings e intervenha no worktree preservado.",
+                )
                 raise RunPipelineError(
                     f"Limite de correções atingido para Issue #{issue.number}, Pull Request #{pull_request.number}, "
                     f"HEAD {ci_result.expected_head_sha}, tentativa {corrections}, sessão {session_id} preservada; nenhum merge foi executado"
@@ -948,7 +1001,15 @@ class RunPipeline:
             ProviderFailureKind.TRANSIENT_RATE_LIMIT,
             ProviderFailureKind.TERMINAL_QUOTA,
         }:
-            if self.execution_store is not None and self._execution_id is not None:
+            if self.escalator is not None and self._execution_id is not None:
+                self.escalator.escalate(
+                    self._execution_id,
+                    failure.classification.value,
+                    str(failure),
+                    classification=failure.classification.value,
+                    suggested_action="Corrija a autenticação/modelo do provider e retome a mesma execução.",
+                )
+            elif self.execution_store is not None and self._execution_id is not None:
                 self.execution_store.transition(
                     self._execution_id,
                     ExecutionPhase.FAILED,
@@ -969,3 +1030,9 @@ class RunPipeline:
         if failure.session_id:
             updates["codex_session_id"] = failure.session_id
         self._transition(phase, "Provider indisponível por limite de uso", **updates)
+
+    def _escalate(self, reason_code: str, reason: str, **details: object) -> None:
+        if self.escalator is not None and self._execution_id is not None:
+            self.escalator.escalate(
+                self._execution_id, reason_code, reason, **details
+            )
