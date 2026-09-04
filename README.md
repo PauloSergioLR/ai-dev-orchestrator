@@ -14,10 +14,12 @@ O comando apenas informa o estado de Python, CLIs, repositório Git e configura�
 O Antigravity CLI é o executável local usado para a revisão com Gemini.
 Ele não corrige problemas, instala ferramentas, altera autenticação ou envia prompts para IAs.
 
-## Uso diário
+## Configuração inicial e uso diário
 
 ```powershell
+orch init
 orch work
+orch watch
 ```
 
 Ou, sem instalar o entry point:
@@ -31,6 +33,17 @@ seleciona deterministicamente a próxima Issue aberta e elegível em `Ready`,
 sincroniza a base remota, cria uma branch descritiva e conduz o pipeline completo:
 Codex, gates locais, commit, push, Pull Request, CI, review Gemini, correções,
 auto-merge quando habilitado e atualização do Project para `Done`.
+
+`orch init` descobre o repositório, o remote, branches e convenções documentadas,
+confirma somente escolhas ambíguas e grava atomicamente o perfil humano em
+`orchestrator.toml`. `AGENTS.md` melhora as sugestões, mas não é obrigatório e
+seu texto nunca é executado como comando.
+
+`orch watch` usa o mesmo `WorkService` e recovery em modo sequencial. Quando um
+provider informa de forma confiável a próxima tentativa, aguarda sem busy-loop e
+retoma a mesma execução, sessão, worktree, branch, PR e HEAD. Sem esse horário (ou
+uma política local explícita), para de modo seguro e pede intervenção. `Ctrl+C`
+encerra o supervisor sem apagar checkpoints.
 
 ## Execução manual de Issue
 
@@ -52,7 +65,7 @@ continuam disponíveis para operação e diagnóstico explícitos.
 Crie sua configuração local a partir do exemplo:
 
 ```powershell
-Copy-Item orchestrator.example.toml orchestrator.toml
+orch init
 ```
 
 O arquivo `orchestrator.toml` é local e não é versionado. Consulte a

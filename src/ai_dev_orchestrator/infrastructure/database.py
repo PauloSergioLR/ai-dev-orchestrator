@@ -68,6 +68,21 @@ class SqliteExecutionStore:
                 c.execute(
                     "CREATE TABLE IF NOT EXISTS executions (id TEXT PRIMARY KEY, issue_number INTEGER NOT NULL, project_item_id TEXT, phase TEXT NOT NULL, branch TEXT, worktree_path TEXT, base_ref TEXT, codex_session_id TEXT, pull_request_number INTEGER, pull_request_url TEXT, current_head_sha TEXT, ci_head_sha TEXT, reviewed_head_sha TEXT, review_verdict TEXT, correction_attempts INTEGER NOT NULL DEFAULT 0, merge_commit_sha TEXT, merged_head_sha TEXT, project_status TEXT, last_error TEXT, terminal INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
                 )
+                existing_columns = {
+                    column["name"]
+                    for column in c.execute("PRAGMA table_info(executions)").fetchall()
+                }
+                additions = {
+                    "codex_model": "TEXT NOT NULL DEFAULT 'default'",
+                    "gemini_model": "TEXT NOT NULL DEFAULT 'default'",
+                    "quota_provider": "TEXT",
+                    "quota_classification": "TEXT",
+                    "quota_observed_at": "TEXT",
+                    "quota_retry_at": "TEXT",
+                }
+                for name, declaration in additions.items():
+                    if name not in existing_columns:
+                        c.execute(f"ALTER TABLE executions ADD COLUMN {name} {declaration}")
                 c.execute(
                     "CREATE TABLE IF NOT EXISTS execution_events (execution_id TEXT NOT NULL REFERENCES executions(id), sequence INTEGER NOT NULL, previous_phase TEXT, phase TEXT NOT NULL, created_at TEXT NOT NULL, summary TEXT NOT NULL, head_sha TEXT, PRIMARY KEY(execution_id, sequence))"
                 )
@@ -89,7 +104,7 @@ class SqliteExecutionStore:
         try:
             with self._connection() as c:
                 c.execute(
-                    "INSERT INTO executions(id, issue_number, project_item_id, phase, branch, worktree_path, base_ref, terminal, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                    "INSERT INTO executions(id, issue_number, project_item_id, phase, branch, worktree_path, base_ref, codex_model, gemini_model, terminal, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
                     (
                         execution_id,
                         issue_number,
@@ -98,6 +113,8 @@ class SqliteExecutionStore:
                         details.get("branch"),
                         details.get("worktree_path"),
                         details.get("base_ref"),
+                        details.get("codex_model", "default"),
+                        details.get("gemini_model", "default"),
                         now,
                         now,
                     ),
@@ -220,11 +237,18 @@ class SqliteExecutionStore:
             "merged_head_sha",
             "project_status",
             "last_error",
+            "codex_model",
+            "gemini_model",
+            "quota_provider",
+            "quota_classification",
+            "quota_observed_at",
+            "quota_retry_at",
         }
         if invalid := set(updates) - allowed:
             raise ExecutionStoreError(
                 f"Campos de execução inválidos: {', '.join(sorted(invalid))}"
             )
+        self._validate_models(current, updates)
         fields = {
             **updates,
             "phase": phase.value,
@@ -294,6 +318,12 @@ class SqliteExecutionStore:
             "merged_head_sha",
             "project_status",
             "last_error",
+            "codex_model",
+            "gemini_model",
+            "quota_provider",
+            "quota_classification",
+            "quota_observed_at",
+            "quota_retry_at",
         }
         if invalid := set(updates) - allowed:
             raise ExecutionStoreError(
@@ -307,6 +337,7 @@ class SqliteExecutionStore:
             raise ExecutionStoreError(
                 "A sessão Codex não pode ser trocada dentro da mesma execução"
             )
+        self._validate_models(current, updates)
         fields = {**updates, "updated_at": _now()}
         try:
             with self._connection() as c:
@@ -335,6 +366,14 @@ class SqliteExecutionStore:
                 f"Não foi possível registrar checkpoint: {error}"
             ) from error
         return self.get(execution_id)
+
+    @staticmethod
+    def _validate_models(current: RunRecord, updates: dict[str, object]) -> None:
+        for field in ("codex_model", "gemini_model"):
+            if field in updates and getattr(current, field) != updates[field]:
+                raise ExecutionStoreError(
+                    "O modelo do provider não pode ser trocado dentro da mesma execução"
+                )
 
     def record_review(
         self, execution_id: str, review: StructuredReview, summary: str
@@ -423,11 +462,15 @@ def _sanitize_finding(value: str, limit: int) -> str:
 
 def _record(row: sqlite3.Row) -> RunRecord:
     excluded = {"id", "issue_number", "phase", "created_at", "updated_at", "terminal"}
+    values = {key: row[key] for key in row.keys() if key not in excluded}
+    for field in ("quota_observed_at", "quota_retry_at"):
+        if values.get(field):
+            values[field] = _parse_time(values[field])
     return RunRecord(
         row["id"],
         row["issue_number"],
         ExecutionPhase(row["phase"]),
         _parse_time(row["created_at"]),
         _parse_time(row["updated_at"]),
-        **{key: row[key] for key in row.keys() if key not in excluded},
+        **values,
     )

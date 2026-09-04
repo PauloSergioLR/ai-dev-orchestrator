@@ -168,6 +168,6 @@ class RecoveryObserver:
             matches = [item for item in self.projects.list_items() if item.id == run.project_item_id]
             if len(matches) != 1 or matches[0].status is None:
                 return ProjectState.UNKNOWN
-            return ProjectState.DONE if matches[0].status == "Done" else ProjectState.NOT_DONE
+            return ProjectState.DONE if matches[0].status == self.config.github.done_status else ProjectState.NOT_DONE
         except Exception:
             return ProjectState.UNKNOWN

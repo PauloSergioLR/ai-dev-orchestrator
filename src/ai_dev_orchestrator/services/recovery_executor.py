@@ -139,7 +139,7 @@ class RecoveryExecutor:
             ):
                 raise RecoveryExecutionError("Projeto exige merge persistido e comprovado")
             self.effects.mark_project_done(run)
-            return self.store.transition(run.id, ExecutionPhase.COMPLETED, summary=decision.reason, project_status="Done")
+            return self.store.transition(run.id, ExecutionPhase.COMPLETED, summary=decision.reason, project_status=self.policy.done_status)
         if action == RecoveryAction.COMPLETE:
             return self.store.transition(run.id, ExecutionPhase.COMPLETED, summary=decision.reason)
         raise RecoveryExecutionError("Ação de recovery desconhecida")

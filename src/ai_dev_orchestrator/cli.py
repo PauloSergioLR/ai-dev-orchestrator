@@ -1,6 +1,7 @@
 """Interface de linha de comando do AI Dev Orchestrator."""
 
 import typer
+from pathlib import Path
 
 from ai_dev_orchestrator import __version__
 from ai_dev_orchestrator.config import ConfigurationError, load_config
@@ -16,6 +17,9 @@ from ai_dev_orchestrator.infrastructure.database import (
 )
 from ai_dev_orchestrator.services.resume import ResumeError, ResumeService
 from ai_dev_orchestrator.services.work import WorkError, WorkService
+from ai_dev_orchestrator.services.init_project import ProjectInitError, ProjectInitService
+from ai_dev_orchestrator.services.supervisor import SupervisorError, SupervisorService
+from ai_dev_orchestrator.config import OrchestratorConfig
 
 app = typer.Typer(
     help="Orquestrador local-first de desenvolvimento com IA.",
@@ -53,6 +57,184 @@ def doctor() -> None:
 
     if has_errors(checks):
         raise typer.Exit(code=1)
+
+
+@app.command("init")
+def init_project(
+    advanced: bool = typer.Option(
+        False, "--advanced", help="Permite ajustar polling e timeouts."
+    ),
+) -> None:
+    """Descobre e grava interativamente o perfil local deste projeto."""
+    service = ProjectInitService()
+    try:
+        found = service.discover(Path.cwd())
+    except ProjectInitError as error:
+        typer.echo(f"Erro: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    path = found.repository_path / "orchestrator.toml"
+    existing = None
+    if path.exists():
+        try:
+            existing = load_config(path)
+        except ConfigurationError as error:
+            typer.echo(f"Erro: {error}", err=True)
+            raise typer.Exit(code=1) from error
+        if existing.workspace.repository_path.resolve() != found.repository_path:
+            raise typer.BadParameter(
+                "repository_path configurado diverge do repositório Git detectado"
+            )
+    typer.echo("AI Dev Orchestrator — Configuração do projeto\n")
+    detected_repo = (
+        f"{found.owner}/{found.repository}" if found.owner and found.repository else "não identificado"
+    )
+    typer.echo(f"Repositório detectado: {detected_repo}")
+    typer.echo(f"Default branch: {found.default_branch or 'não detectada'}")
+    typer.echo(f"Branches relevantes: {', '.join(found.branches) or 'nenhuma detectada'}")
+    for evidence in found.evidence:
+        typer.echo(f"Interpretação: {evidence}")
+    remote_name = (
+        existing.workspace.remote_name
+        if existing and existing.workspace.remote_name in found.remote_names
+        else found.remote_name
+    )
+    if len(found.remote_names) > 1 and "origin" not in found.remote_names:
+        remote_name = _prompt_branch("Remote Git", found.remote_names, None)
+    owner = existing.github.owner if existing else found.owner
+    repository = existing.github.repository if existing else found.repository
+    if not owner or not repository:
+        owner = typer.prompt("Owner do GitHub")
+        repository = typer.prompt("Repositório do GitHub")
+    elif found.owner and existing and (
+        owner != found.owner or repository != found.repository
+    ):
+        raise typer.BadParameter(
+            "Configuração existente diverge do remote GitHub detectado"
+        )
+    choices = found.branches or tuple(
+        value for value in (found.suggested_base_branch, found.default_branch) if value
+    )
+    base_default = existing.workspace.base_branch if existing else (
+        found.suggested_base_branch or (choices[0] if len(choices) == 1 else None)
+    )
+    base = _prompt_branch("Base das novas branches", choices, base_default)
+    target_default = existing.github.pull_request_target if existing else base
+    target = _prompt_branch("Destino dos Pull Requests", choices, target_default)
+    protected_default = existing.github.protected_branches if existing else (
+        ("main",) if "main" in choices else ()
+    )
+    protected_text = typer.prompt(
+        "Branches protegidas (separadas por vírgula; vazio = nenhuma)",
+        default=", ".join(protected_default), show_default=True,
+    )
+    protected = tuple(value.strip() for value in protected_text.split(",") if value.strip())
+    project_number = existing.github.project_number if existing else (
+        found.github_projects[0]
+        if len(found.github_projects) == 1
+        else typer.prompt("Número do GitHub Project", type=int)
+    )
+    codex_model = typer.prompt(
+        "Modelo Codex (default/auto ou identificador explícito)",
+        default=existing.providers.codex_model if existing else "default",
+    )
+    if found.gemini_models:
+        typer.echo("Modelos enumerados pelo Antigravity: " + ", ".join(found.gemini_models))
+    gemini_model = typer.prompt(
+        "Modelo Gemini (default/auto ou identificador explícito)",
+        default=existing.providers.gemini_model if existing else "default",
+    )
+    normalized_gemini = "default" if gemini_model.casefold() in {"default", "auto"} else gemini_model
+    if found.gemini_models and normalized_gemini != "default" and normalized_gemini not in found.gemini_models:
+        raise typer.BadParameter("Modelo Gemini não consta na enumeração da CLI")
+    values = {
+        "github": {
+            "owner": owner, "repository": repository, "project_number": project_number,
+            "ready_status": existing.github.ready_status if existing else "Ready",
+            "in_progress_status": existing.github.in_progress_status if existing else "In Progress",
+            "ai_review_status": existing.github.ai_review_status if existing else "AI Review",
+            "done_status": existing.github.done_status if existing else "Done",
+            "pull_request_target": target, "protected_branches": protected,
+            "status_field_name": existing.github.status_field_name if existing else "Status",
+        },
+        "workspace": {
+            "repository_path": found.repository_path,
+            "worktrees_dir": existing.workspace.worktrees_dir if existing else found.repository_path.parent / f"{found.repository_path.name}-worktrees",
+            "base_branch": base, "remote_name": remote_name,
+        },
+        "providers": {"codex_model": codex_model, "gemini_model": gemini_model},
+        "execution": existing.execution.model_dump() if existing else {"max_attempts": 2, "max_parallel_runs": 1, "auto_merge": False},
+        "state": existing.state.model_dump() if existing else {},
+        "ci": existing.ci.model_dump() if existing else {},
+        "convergence": existing.convergence.model_dump() if existing else {},
+        "review": existing.review.model_dump() if existing else {},
+        "supervisor": existing.supervisor.model_dump() if existing else {},
+    }
+    if advanced:
+        values["ci"]["poll_interval_seconds"] = typer.prompt(
+            "Polling da CI (segundos)",
+            default=values["ci"].get("poll_interval_seconds", 5), type=float,
+        )
+        values["ci"]["timeout_seconds"] = typer.prompt(
+            "Timeout da CI (segundos)",
+            default=values["ci"].get("timeout_seconds", 900), type=float,
+        )
+        values["supervisor"]["poll_interval_seconds"] = typer.prompt(
+            "Polling do supervisor (segundos)",
+            default=values["supervisor"].get("poll_interval_seconds", 60), type=float,
+        )
+        values["supervisor"]["max_sleep_seconds"] = typer.prompt(
+            "Espera máxima por ciclo (segundos)",
+            default=values["supervisor"].get("max_sleep_seconds", 300), type=float,
+        )
+    typer.echo(
+        f"\nResumo: base={base}; target={target}; protegidas="
+        f"{', '.join(protected) or 'nenhuma'}; Project={project_number}; "
+        f"auto-merge={values['execution']['auto_merge']}; "
+        f"correções={values['review'].get('max_correction_attempts', 3)}; "
+        f"checks={', '.join(values['ci'].get('required_checks', ('test',)))}; "
+        f"worktrees={values['workspace']['worktrees_dir']}"
+    )
+    typer.confirm("Salvar configuração?", default=True, abort=True)
+    try:
+        config = OrchestratorConfig(**values)
+        service.write(path, config)
+    except (ValueError, ProjectInitError) as error:
+        typer.echo(f"Erro: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Configuração salva em {path}")
+
+
+def _prompt_branch(label: str, choices: tuple[str, ...], default: str | None) -> str:
+    if default and (len(choices) <= 1 or default in choices):
+        return typer.prompt(label, default=default)
+    if not choices:
+        return typer.prompt(label)
+    typer.echo(f"\n{label}:")
+    for index, branch in enumerate(choices, 1):
+        typer.echo(f"[{index}] {branch}")
+    selected = typer.prompt("Escolha", type=int)
+    if selected < 1 or selected > len(choices):
+        raise typer.BadParameter("Escolha de branch inválida")
+    return choices[selected - 1]
+
+
+@app.command()
+def watch() -> None:
+    """Opera sequencialmente e atravessa quotas com retry confiável."""
+    try:
+        SupervisorService.from_config(load_config()).watch()
+    except KeyboardInterrupt:
+        typer.echo("Supervisor interrompido; checkpoints preservados.")
+    except (
+        ConfigurationError,
+        ExecutionStoreError,
+        ResumeError,
+        RunPipelineError,
+        WorkError,
+        SupervisorError,
+    ) as error:
+        typer.echo(f"Erro: {error}", err=True)
+        raise typer.Exit(code=1) from error
 
 
 @app.command()
@@ -95,6 +277,13 @@ def state(
     typer.echo(f"PR: #{record.pull_request_number or '-'}")
     typer.echo(f"HEAD: {record.current_head_sha or '-'}")
     typer.echo(f"Correções: {record.correction_attempts}")
+    if record.quota_provider:
+        typer.echo(f"Provider em espera: {record.quota_provider}")
+        typer.echo(f"Classificação: {record.quota_classification}")
+        typer.echo(
+            "Próxima tentativa: "
+            + (record.quota_retry_at.isoformat() if record.quota_retry_at else "não informada")
+        )
     typer.echo(f"Atualizado em: {record.updated_at.isoformat()}")
 
 

@@ -7,6 +7,7 @@ import tomllib
 from typing import Any
 
 from pydantic import (
+    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
@@ -39,13 +40,33 @@ class GitHubConfig(BaseModel):
     ready_status: str = Field(min_length=1)
     in_progress_status: str = Field(default="In Progress", min_length=1)
     ai_review_status: str = Field(default="AI Review", min_length=1)
-    pull_request_base: str = Field(default="main", min_length=1)
+    done_status: str = Field(default="Done", min_length=1)
+    pull_request_target: str = Field(
+        default="main",
+        min_length=1,
+        validation_alias=AliasChoices("pull_request_target", "pull_request_base"),
+    )
+    protected_branches: tuple[str, ...] = ("main",)
     status_field_name: str = Field(default="Status", min_length=1)
 
     @property
     def repository_full_name(self) -> str:
         """Retorna o identificador completo do repositório no GitHub."""
         return f"{self.owner}/{self.repository}"
+
+    @property
+    def pull_request_base(self) -> str:
+        """Alias de compatibilidade para configurações e integrações antigas."""
+        return self.pull_request_target
+
+    @field_validator("protected_branches")
+    @classmethod
+    def protected_branches_must_be_unambiguous(
+        cls, value: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        if any(not branch for branch in value) or len(set(value)) != len(value):
+            raise ValueError("não pode conter nomes vazios ou duplicados")
+        return value
 
 
 class ExecutionConfig(BaseModel):
@@ -143,7 +164,9 @@ class WorkspaceConfig(BaseModel):
 
     repository_path: Path
     worktrees_dir: Path
-    base_ref: str = Field(min_length=1)
+    base_branch: str = Field(
+        min_length=1, validation_alias=AliasChoices("base_branch", "base_ref")
+    )
     remote_name: str = Field(default="origin", min_length=1)
 
     @field_validator("repository_path", "worktrees_dir")
@@ -153,6 +176,35 @@ class WorkspaceConfig(BaseModel):
         if not value.is_absolute():
             raise ValueError("deve ser um caminho absoluto")
         return value
+
+    @property
+    def base_ref(self) -> str:
+        """Alias de compatibilidade; novas configurações usam base_branch."""
+        return self.base_branch
+
+
+class ProviderConfig(BaseModel):
+    """Seleção estável de modelos, sem guardar credenciais."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    codex_model: str = Field(default="default", min_length=1)
+    gemini_model: str = Field(default="default", min_length=1)
+
+    @field_validator("codex_model", "gemini_model")
+    @classmethod
+    def normalize_auto(cls, value: str) -> str:
+        return "default" if value.casefold() in {"auto", "default"} else value
+
+
+class SupervisorConfig(BaseModel):
+    """Política conservadora do modo desacompanhado."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    poll_interval_seconds: float = Field(default=60, gt=0)
+    max_sleep_seconds: float = Field(default=300, gt=0)
+    retry_without_reset_seconds: float | None = Field(default=None, gt=0)
 
 
 class _EnvironmentSettingsSource(PydanticBaseSettingsSource):
@@ -193,6 +245,8 @@ class OrchestratorConfig(BaseSettings):
     ci: CiConfig = Field(default_factory=CiConfig)
     convergence: ConvergenceConfig = Field(default_factory=ConvergenceConfig)
     review: ReviewConfig = Field(default_factory=ReviewConfig)
+    providers: ProviderConfig = Field(default_factory=ProviderConfig)
+    supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
 
     @classmethod
     def settings_customise_sources(

@@ -18,6 +18,8 @@ class ExecutionPhase(StrEnum):
     PUBLISHING = "PUBLISHING"
     WAITING_CI = "WAITING_CI"
     GEMINI_REVIEWING = "GEMINI_REVIEWING"
+    WAITING_CODEX_QUOTA = "WAITING_CODEX_QUOTA"
+    WAITING_GEMINI_QUOTA = "WAITING_GEMINI_QUOTA"
     NEEDS_CHANGES = "NEEDS_CHANGES"
     MERGE_PENDING = "MERGE_PENDING"
     MERGING = "MERGING"
@@ -36,7 +38,9 @@ TERMINAL_PHASES = frozenset(
 )
 _ALLOWED = {
     ExecutionPhase.PREPARING: {ExecutionPhase.CODEX_RUNNING, ExecutionPhase.FAILED},
-    ExecutionPhase.CODEX_RUNNING: {ExecutionPhase.TESTING, ExecutionPhase.FAILED},
+    ExecutionPhase.CODEX_RUNNING: {
+        ExecutionPhase.TESTING, ExecutionPhase.WAITING_CODEX_QUOTA, ExecutionPhase.FAILED,
+    },
     ExecutionPhase.TESTING: {
         ExecutionPhase.COMMIT_PENDING,
         ExecutionPhase.PUBLISHING,
@@ -53,6 +57,7 @@ _ALLOWED = {
     },
     ExecutionPhase.WAITING_CI: {ExecutionPhase.GEMINI_REVIEWING, ExecutionPhase.FAILED},
     ExecutionPhase.GEMINI_REVIEWING: {
+        ExecutionPhase.WAITING_GEMINI_QUOTA,
         ExecutionPhase.NEEDS_CHANGES,
         ExecutionPhase.MERGE_PENDING,
         ExecutionPhase.MERGING,
@@ -63,6 +68,12 @@ _ALLOWED = {
         ExecutionPhase.CODEX_RUNNING,
         ExecutionPhase.TESTING,
         ExecutionPhase.FAILED,
+    },
+    ExecutionPhase.WAITING_CODEX_QUOTA: {
+        ExecutionPhase.CODEX_RUNNING, ExecutionPhase.FAILED,
+    },
+    ExecutionPhase.WAITING_GEMINI_QUOTA: {
+        ExecutionPhase.GEMINI_REVIEWING, ExecutionPhase.FAILED,
     },
     ExecutionPhase.MERGE_PENDING: {
         ExecutionPhase.PROJECT_DONE_PENDING,
@@ -106,6 +117,12 @@ class RunRecord:
     merged_head_sha: str | None = None
     project_status: str | None = None
     last_error: str | None = None
+    codex_model: str = "default"
+    gemini_model: str = "default"
+    quota_provider: str | None = None
+    quota_classification: str | None = None
+    quota_observed_at: datetime | None = None
+    quota_retry_at: datetime | None = None
 
 
 @dataclass(frozen=True)

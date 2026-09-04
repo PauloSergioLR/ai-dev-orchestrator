@@ -55,6 +55,7 @@ from ai_dev_orchestrator.services.merge import (
 )
 from ai_dev_orchestrator.domain.execution import ExecutionPhase, ExecutionStore
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
+from ai_dev_orchestrator.domain.provider import ProviderFailure, ProviderFailureKind
 
 
 class RunPipelineError(Exception):
@@ -238,13 +239,15 @@ class RunPipeline:
             GitHubProjectAdapter(config),
             GitHubProjectStatusAdapter(config),
             GitWorktreeAdapter(),
-            CodexAdapter(),
+            CodexAdapter(model=config.providers.codex_model),
             LocalValidationService(),
             GitPublicationAdapter(),
             pull_requests,
             GitHubCiAdapter(config),
             pull_requests,
-            AntigravityAdapter(config.review.timeout_seconds),
+            AntigravityAdapter(
+                config.review.timeout_seconds, model=config.providers.gemini_model
+            ),
             pull_requests,
             SqliteExecutionStore(config.state.database_path),
         )
@@ -254,6 +257,10 @@ class RunPipeline:
     ) -> RunResult:
         if issue_number <= 0:
             raise RunPipelineError("A Issue deve ser um inteiro positivo")
+        if branch in self.config.github.protected_branches:
+            raise RunPipelineError(
+                f"A branch de trabalho '{branch}' é protegida pela configuração"
+            )
         try:
             issue = self.issue_reader.get_issue(issue_number)
             if issue.state != "OPEN":
@@ -288,6 +295,8 @@ class RunPipeline:
                     branch=branch,
                     worktree_path=str(worktree_path),
                     base_ref=selected_base_ref,
+                    codex_model=self.config.providers.codex_model,
+                    gemini_model=self.config.providers.gemini_model,
                 )
                 self._execution_id = record.id
             except Exception as error:
@@ -332,6 +341,11 @@ class RunPipeline:
             execution = self.codex_executor.execute(
                 worktree.path, build_initial_prompt(issue)
             )
+        except ProviderFailure as error:
+            self._record_provider_wait(error, ExecutionPhase.WAITING_CODEX_QUOTA)
+            raise RunPipelineError(
+                "Limite do Codex observado; execução preservada para retomada"
+            ) from error
         except Exception as error:
             raise RunPipelineError(
                 f"Falha ao executar o Codex; o Status está em '{self.config.github.in_progress_status}' "
@@ -476,6 +490,16 @@ class RunPipeline:
                     execution.final_message,
                 )
             )
+        except ProviderFailure as error:
+            waiting_phase = (
+                ExecutionPhase.WAITING_CODEX_QUOTA
+                if error.provider == "codex"
+                else ExecutionPhase.WAITING_GEMINI_QUOTA
+            )
+            self._record_provider_wait(error, waiting_phase)
+            raise RunPipelineError(
+                f"Limite do provider {error.provider} observado; execução preservada para retomada"
+            ) from error
         except Exception as error:
             raise RunPipelineError(
                 f"Falha na revisão Gemini da Issue #{issue.number}, Pull Request #{pull_request.number} em {pull_request.url}; "
@@ -583,7 +607,9 @@ class RunPipeline:
                 f"Pull Request #{pull_request.number} já foi merged ({merge.merge_commit_sha}), mas falhou ao persistir confirmação para reconciliação: {error}"
             ) from error
         try:
-            self.status_writer.set_status(result.project_item_id, "Done")
+            self.status_writer.set_status(
+                result.project_item_id, self.config.github.done_status
+            )
         except Exception as error:
             raise RunPipelineError(
                 f"Pull Request #{pull_request.number} já foi merged ({merge.merge_commit_sha}), mas falhou ao atualizar o Status para 'Done': {error}"
@@ -592,7 +618,7 @@ class RunPipeline:
             self._transition(
                 ExecutionPhase.COMPLETED,
                 "Merge e Project Done confirmados",
-                project_status="Done",
+                project_status=self.config.github.done_status,
                 merge_commit_sha=merge.merge_commit_sha,
                 merged_head_sha=merge.merged_head_sha,
             )
@@ -604,7 +630,7 @@ class RunPipeline:
         return RunResult(
             **{
                 **result.__dict__,
-                "project_status": "Done",
+                "project_status": self.config.github.done_status,
                 "merge_status": "SUCCESS",
                 "merged": True,
                 "merge_commit_sha": merge.merge_commit_sha,
@@ -913,3 +939,33 @@ class RunPipeline:
             )
         except Exception as error:
             raise RunPipelineError(f"Falha ao persistir checkpoint: {error}") from error
+
+    def _record_provider_wait(
+        self, failure: ProviderFailure, phase: ExecutionPhase
+    ) -> None:
+        """Persiste somente metadados seguros e fornecidos pelo provider."""
+        if failure.classification not in {
+            ProviderFailureKind.TRANSIENT_RATE_LIMIT,
+            ProviderFailureKind.TERMINAL_QUOTA,
+        }:
+            if self.execution_store is not None and self._execution_id is not None:
+                self.execution_store.transition(
+                    self._execution_id,
+                    ExecutionPhase.FAILED,
+                    summary="Falha terminal do provider",
+                    quota_provider=failure.provider,
+                    quota_classification=failure.classification.value,
+                    quota_observed_at=failure.observed_at.isoformat(),
+                    last_error=str(failure),
+                )
+            raise RunPipelineError(str(failure)) from failure
+        updates: dict[str, object] = {
+            "quota_provider": failure.provider,
+            "quota_classification": failure.classification.value,
+            "quota_observed_at": failure.observed_at.isoformat(),
+            "quota_retry_at": failure.retry_at.isoformat() if failure.retry_at else None,
+            "last_error": str(failure),
+        }
+        if failure.session_id:
+            updates["codex_session_id"] = failure.session_id
+        self._transition(phase, "Provider indisponível por limite de uso", **updates)
