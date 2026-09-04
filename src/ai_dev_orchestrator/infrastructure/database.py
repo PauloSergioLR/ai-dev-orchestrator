@@ -127,6 +127,20 @@ class SqliteExecutionStore:
             (issue_number,),
         )
 
+    def list_active(self) -> tuple[RunRecord, ...]:
+        """Lista execuções não terminais para coordenação sequencial."""
+        try:
+            with self._connection() as c:
+                rows = c.execute(
+                    "SELECT * FROM executions WHERE terminal = 0 "
+                    "ORDER BY created_at, id"
+                ).fetchall()
+            return tuple(_record(row) for row in rows)
+        except sqlite3.Error as error:
+            raise ExecutionStoreError(
+                f"Não foi possível consultar execuções ativas: {error}"
+            ) from error
+
     def get_latest_for_issue(self, issue_number: int) -> RunRecord | None:
         return self._fetch_one(
             "SELECT * FROM executions WHERE issue_number = ? ORDER BY created_at DESC LIMIT 1",

@@ -1,8 +1,12 @@
 # Fluxo
 
-O final implementado do fluxo é:
+O fluxo principal é iniciado por `orch work` e está implementado assim:
 
 ```text
+retoma execução ativa ou seleciona a próxima Issue Ready
+    ↓
+sincroniza base remota e cria branch/worktree
+    ↓
 Codex
     ↓
 gates locais
@@ -17,9 +21,15 @@ AI Review
     ↓
 aguarda CI do HEAD exato
     ↓
-CI verde: pronto para futura etapa de review
+Gemini
+    ↓
+REJECTED: findings → mesma sessão Codex → gates → push → CI → Gemini
+    ↓
+APPROVED: auto-merge quando habilitado
+    ↓
+Project Done
 ```
 
-Ainda não há revisão Gemini, feedback, merge, limpeza ou automação da próxima
-Issue. Se a CI falhar, expirar ou o HEAD mudar, PR, branch, commit e worktree são
-preservados e o Status continua em `AI Review`.
+Se houver divergência, colisão de branch ou falha de sincronização, o comando
+falha fechado. PR, branch, commit, worktree, sessão Codex e checkpoints já
+existentes são preservados para retomada segura.

@@ -186,3 +186,35 @@ def test_reports_refused_removal_without_destroying_work(tmp_path: Path) -> None
         GitWorktreeAdapter(runner).remove_worktree(repository, tmp_path / "isolated")
 
     assert runner.arguments[-1][3:] == ["worktree", "remove", str(tmp_path / "isolated")]
+
+
+def test_prepares_remote_base_and_checks_remote_branch(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    runner = FakeRunner([
+        repository_result(repository), CommandResult(0), CommandResult(1),
+        CommandResult(0), CommandResult(0, "commit-id\n"), CommandResult(2),
+    ])
+
+    base = GitWorktreeAdapter(runner).prepare_remote_base(
+        repository, "origin", "origin/main", "work/nova",
+    )
+
+    assert base == "refs/remotes/origin/main"
+    assert runner.arguments[3][-2:] == [
+        "origin", "refs/heads/main:refs/remotes/origin/main",
+    ]
+    assert runner.arguments[-1][-2:] == ["origin", "refs/heads/work/nova"]
+    assert all("--force" not in command for command in runner.arguments)
+
+
+def test_remote_branch_collision_fails_closed(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    runner = FakeRunner([
+        repository_result(repository), CommandResult(0), CommandResult(1),
+        CommandResult(0), CommandResult(0, "commit-id\n"), CommandResult(0, "sha\tref\n"),
+    ])
+
+    with pytest.raises(GitWorktreeError, match="branch remota já existe"):
+        GitWorktreeAdapter(runner).prepare_remote_base(
+            repository, "origin", "main", "work/existente",
+        )

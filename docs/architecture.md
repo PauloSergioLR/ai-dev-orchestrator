@@ -1,6 +1,6 @@
 # Arquitetura
 
-As execuções futuras serão isoladas em Git worktrees próprios. A remoção de um worktree não removerá automaticamente a branch correspondente.
+As execuções são isoladas em Git worktrees próprios. A remoção de um worktree não remove automaticamente a branch correspondente.
 
 O AI Dev Orchestrator começa com uma arquitetura pequena e local-first. A interface de linha de comando é a interface principal, mantendo o trabalho próximo ao repositório e às ferramentas da pessoa desenvolvedora.
 
@@ -10,4 +10,4 @@ Cada issue ativa usa exatamente uma sessão Codex. A execução inicial cria a s
 
 Os itens do Project são convertidos para um modelo de domínio antes do consumo. Um item é elegível apenas se for uma Issue do repositório configurado e seu status for exatamente igual a `github.ready_status`; essa regra não escolhe nem ordena issues.
 
-A execução futura deve ser isolada e as transições de estado devem ser explícitas. O sistema também deve considerar o uso de tokens e os custos. As versões iniciais não devem realizar merge automático; uma pessoa continua responsável pela decisão final de merge.
+A execução é isolada e as transições de estado são explícitas. O merge automático permanece desabilitado por padrão e só ocorre quando configurado, depois de CI e review aprovados para o HEAD exato.

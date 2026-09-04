@@ -46,6 +46,16 @@ def test_refuses_two_active_executions_and_keeps_ordered_journal(
         store.transition(run.id, ExecutionPhase.MERGING, summary="salto")
 
 
+def test_lists_all_active_executions_deterministically(tmp_path: Path) -> None:
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    first = store.create(35)
+    second = store.create(36)
+    completed = store.create(37)
+    store.fail(completed.id, "fim")
+
+    assert [run.id for run in store.list_active()] == [first.id, second.id]
+
+
 def test_preserves_session_and_sanitizes_limited_error(tmp_path: Path) -> None:
     store = SqliteExecutionStore(tmp_path / "state.db")
     run = store.create(35)

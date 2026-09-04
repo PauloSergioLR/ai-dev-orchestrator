@@ -249,11 +249,17 @@ class RunPipeline:
             SqliteExecutionStore(config.state.database_path),
         )
 
-    def run(self, issue_number: int, branch: str) -> RunResult:
+    def run(
+        self, issue_number: int, branch: str, *, base_ref: str | None = None
+    ) -> RunResult:
         if issue_number <= 0:
             raise RunPipelineError("A Issue deve ser um inteiro positivo")
         try:
             issue = self.issue_reader.get_issue(issue_number)
+            if issue.state != "OPEN":
+                raise RunPipelineError(
+                    f"A etapa de validar elegibilidade falhou: a Issue #{issue_number} não está OPEN"
+                )
             item = self._find_project_item(issue_number)
             if not is_eligible_for_execution(
                 item,
@@ -264,6 +270,7 @@ class RunPipeline:
                     f"A etapa de validar elegibilidade falhou: a Issue #{issue_number} não está em "
                     f"'{self.config.github.ready_status}' no repositório configurado"
                 )
+            selected_base_ref = base_ref or self.config.workspace.base_ref
             worktree_path = derive_worktree_path(
                 self.config.workspace.worktrees_dir, branch
             )
@@ -280,7 +287,7 @@ class RunPipeline:
                     project_item_id=item.id,
                     branch=branch,
                     worktree_path=str(worktree_path),
-                    base_ref=self.config.workspace.base_ref,
+                    base_ref=selected_base_ref,
                 )
                 self._execution_id = record.id
             except Exception as error:
@@ -292,7 +299,7 @@ class RunPipeline:
                 self.config.workspace.repository_path,
                 branch,
                 worktree_path,
-                self.config.workspace.base_ref,
+                selected_base_ref,
             )
         except Exception as error:
             raise RunPipelineError(
