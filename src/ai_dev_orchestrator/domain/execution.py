@@ -45,7 +45,12 @@ _ALLOWED = {
     ExecutionPhase.COMMIT_PENDING: {ExecutionPhase.PUSH_PENDING, ExecutionPhase.FAILED},
     ExecutionPhase.PUSH_PENDING: {ExecutionPhase.PR_PENDING, ExecutionPhase.FAILED},
     ExecutionPhase.PR_PENDING: {ExecutionPhase.WAITING_CI, ExecutionPhase.FAILED},
-    ExecutionPhase.PUBLISHING: {ExecutionPhase.WAITING_CI, ExecutionPhase.FAILED},
+    ExecutionPhase.PUBLISHING: {
+        ExecutionPhase.PUSH_PENDING,
+        ExecutionPhase.PR_PENDING,
+        ExecutionPhase.WAITING_CI,
+        ExecutionPhase.FAILED,
+    },
     ExecutionPhase.WAITING_CI: {ExecutionPhase.GEMINI_REVIEWING, ExecutionPhase.FAILED},
     ExecutionPhase.GEMINI_REVIEWING: {
         ExecutionPhase.NEEDS_CHANGES,
@@ -64,7 +69,11 @@ _ALLOWED = {
         ExecutionPhase.FAILED,
     },
     ExecutionPhase.PROJECT_DONE_PENDING: {ExecutionPhase.COMPLETED, ExecutionPhase.FAILED},
-    ExecutionPhase.MERGING: {ExecutionPhase.COMPLETED, ExecutionPhase.FAILED},
+    ExecutionPhase.MERGING: {
+        ExecutionPhase.PROJECT_DONE_PENDING,
+        ExecutionPhase.COMPLETED,
+        ExecutionPhase.FAILED,
+    },
 }
 
 

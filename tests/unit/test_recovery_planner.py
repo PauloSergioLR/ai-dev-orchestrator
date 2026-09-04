@@ -70,6 +70,49 @@ def plan(record: RunRecord, snapshot: RecoveryObservation, *, auto_merge: bool =
     return RecoveryPlanner(policy).plan(record, snapshot)
 
 
+@pytest.mark.parametrize(
+    ("snapshot", "action"),
+    [
+        (observed(has_worktree_changes=True), RecoveryAction.CREATE_COMMIT),
+        (
+            observed(
+                local_head_sha=OTHER,
+                local_head_parent_sha=HEAD,
+                has_worktree_changes=False,
+            ),
+            RecoveryAction.RECORD_EXISTING_COMMIT,
+        ),
+        (observed(remote_head_sha=None), RecoveryAction.PUSH_BRANCH),
+        (observed(remote_head_sha=HEAD), RecoveryAction.RECORD_EXISTING_PUSH),
+    ],
+)
+def test_legacy_publishing_reconciles_only_proven_boundaries(
+    snapshot: RecoveryObservation, action: RecoveryAction
+) -> None:
+    assert plan(run(ExecutionPhase.PUBLISHING), snapshot).action == action
+
+
+def test_legacy_publishing_blocks_ambiguous_history() -> None:
+    snapshot = observed(local_head_sha=OTHER, local_head_parent_sha=THIRD)
+
+    assert plan(run(ExecutionPhase.PUBLISHING), snapshot).action == RecoveryAction.BLOCK
+
+
+def test_legacy_merging_reuses_exact_merge_proof() -> None:
+    record = published_run(
+        ExecutionPhase.MERGING,
+        reviewed_head_sha=HEAD,
+        review_verdict="APPROVED",
+    )
+    snapshot = observed(
+        pull_requests=(pull_request(state=PullRequestState.MERGED),),
+        ci=CiObservation(CiState.SUCCESS, HEAD),
+        merge=MergeObservation(MergeState.MERGED, HEAD, OTHER),
+    )
+
+    assert plan(record, snapshot).action == RecoveryAction.RECORD_EXISTING_MERGE
+
+
 @pytest.mark.parametrize("field", ["branch", "worktree_path", "base_ref"])
 def test_preparing_requires_complete_worktree_identity(field: str) -> None:
     decision = plan(run(ExecutionPhase.PREPARING, **{field: None}), observed(worktree_state=WorktreeState.ABSENT))
@@ -223,7 +266,14 @@ def test_needs_changes_blocks_at_correction_limit() -> None:
         (with_pr(ci=CiObservation(CiState.SUCCESS, OTHER), merge=MergeObservation(MergeState.OPEN)), RecoveryAction.BLOCK),
         (with_pr(local_head_sha=OTHER, ci=CiObservation(CiState.SUCCESS, HEAD), merge=MergeObservation(MergeState.OPEN)), RecoveryAction.BLOCK),
         (with_pr(merge=MergeObservation(MergeState.UNKNOWN)), RecoveryAction.BLOCK),
-        (with_pr(merge=MergeObservation(MergeState.MERGED, HEAD, OTHER)), RecoveryAction.RECORD_EXISTING_MERGE),
+        (
+            observed(
+                pull_requests=(pull_request(state=PullRequestState.MERGED),),
+                merge=MergeObservation(MergeState.MERGED, HEAD, OTHER),
+            ),
+            RecoveryAction.RECORD_EXISTING_MERGE,
+        ),
+        (with_pr(merge=MergeObservation(MergeState.MERGED, HEAD, OTHER)), RecoveryAction.BLOCK),
         (with_pr(ci=CiObservation(CiState.SUCCESS, HEAD), merge=MergeObservation(MergeState.OPEN)), RecoveryAction.MERGE_PULL_REQUEST),
     ],
 )

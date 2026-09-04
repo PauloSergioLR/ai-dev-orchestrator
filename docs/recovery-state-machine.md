@@ -9,12 +9,12 @@ do projeto. A política contém configuração e invariantes esperadas:
 repositório, base do Pull Request e autorização de auto-merge.
 
 O `RecoveryPlanner` é puro: recebe essas entradas e devolve uma
-`RecoveryDecision`. Um futuro executor realizará no máximo a ação decidida,
-registrará checkpoint e observará novamente. Assim, decisão e efeito externo
-não se misturam.
+`RecoveryDecision`. O `RecoveryExecutor` realiza no máximo a ação decidida,
+registra checkpoint e o serviço observa novamente. Assim, decisão e efeito
+externo não se misturam.
 
-O `RecoveryExecutor` futuro desta camada aplica apenas uma decisão recebida e
-delega I/O a `RecoveryEffects`; adapters reais serão conectados depois. Cada
+O `RecoveryExecutor` aplica apenas uma decisão recebida e delega I/O a
+`RecoveryEffects`, conectado aos adapters existentes. Cada
 efeito bem-sucedido recebe checkpoint no mesmo execution_id. Uma queda entre o
 efeito e o checkpoint será reconciliada pela próxima observação e planejamento.
 Antes de qualquer efeito, o executor recarrega o record, confere que ele não
@@ -28,7 +28,10 @@ somente para compatibilidade histórica.
 
 ## Fases e ações
 
-As fases legadas `PUBLISHING` e `MERGING` permanecem por compatibilidade.
+As fases legadas `PUBLISHING` e `MERGING` permanecem por compatibilidade. Na
+retomada, `PUBLISHING` só migra para checkpoints granulares quando a relação
+direta do commit e o HEAD remoto permitem provar o próximo passo; `MERGING`
+reutiliza as mesmas provas de PR, CI, review e merge de `MERGE_PENDING`.
 As novas fases explicitam cada efeito: `COMMIT_PENDING`, `PUSH_PENDING`,
 `PR_PENDING`, `MERGE_PENDING` e `PROJECT_DONE_PENDING`.
 
@@ -63,21 +66,21 @@ um commit já existente só é aceito quando o pai imediato do HEAD local é o
 checkpoint; um push pendente só é permitido para remoto ausente ou SHA igual ao
 pai imediato do HEAD local. Relações ancestrais arbitrárias não bastam. O fato
 de o worktree estar dirty inclui arquivos novos: a validação de conteúdo cabe
-aos gates do futuro executor, não ao planner.
+aos gates do executor, não ao planner.
 
 `PROJECT_DONE_PENDING` somente pode marcar o projeto depois de merge comprovado
 no record: item de projeto, SHA revisado, SHA merged igual ao revisado e commit
 de merge precisam estar presentes. Isso impede marcar Done após uma observação
 incompleta ou após merge não persistido.
 
-O resultado do Gemini só é recuperável depois que executor futuro persistir
+O resultado do Gemini só é recuperável depois que o executor persistir
 veredito, SHA revisado e findings no store. Se o processo cair após a chamada
 ao Gemini e antes desse checkpoint, a fase `GEMINI_REVIEWING` não tem review
-persistida e planeja `REVIEW_HEAD` novamente. Findings estruturados futuros
-serão associados ao SHA rejeitado para provar que a correção responde à revisão.
+persistida e planeja `REVIEW_HEAD` novamente. Findings estruturados são
+associados ao SHA rejeitado para provar que a correção responde à revisão.
 Os findings vivem no mesmo SQLite da execução e a persistência do review é
 atômica com o evento de journal. A tentativa de correção é incrementada antes
 da chamada ao Codex, preservando auditoria mesmo se o provider falhar.
 
-A cobertura futura terá três níveis: planner puro, executor com doubles dos
-adapters e integração com persistência e serviços externos controlados.
+A cobertura tem três níveis: planner puro, executor com doubles dos adapters e
+integração controlada do observer, effects, serviço de retomada e CLI.

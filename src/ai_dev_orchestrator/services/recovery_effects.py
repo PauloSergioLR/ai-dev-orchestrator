@@ -69,7 +69,20 @@ class RecoveryEffects:
         issue = self.issues.get_issue(run.issue_number)
         gates = self.validation.validate(run.worktree_path or "")
         created = self.pull_requests.create(issue, run.branch or "", gates)
-        return PullRequestObservation(created.number, created.url, self.config.github.repository_full_name, created.base, created.head, self.publication.current_head(run.worktree_path or ""), PullRequestState.OPEN)
+        current = self.pull_requests.get_merge_snapshot(created.number)
+        try:
+            state = PullRequestState(current.state)
+        except ValueError as error:
+            raise ValueError("GitHub retornou estado desconhecido para o Pull Request") from error
+        return PullRequestObservation(
+            current.number,
+            current.url,
+            self.config.github.repository_full_name,
+            current.base,
+            current.head_branch,
+            current.head_sha,
+            state,
+        )
 
     def wait_for_ci(self, run: RunRecord) -> CiObservation:
         result = self._wait_ci_result(run)

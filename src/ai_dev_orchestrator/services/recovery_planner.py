@@ -38,9 +38,17 @@ class RecoveryPlanner:
     def _same_head(sha: str | None, expected: str | None) -> bool:
         return sha is not None and expected is not None and sha == expected
 
-    def _valid_pull_request(self, run: RunRecord, pull_request: PullRequestObservation, head: str) -> bool:
+    def _valid_pull_request(
+        self,
+        run: RunRecord,
+        pull_request: PullRequestObservation,
+        head: str,
+        *,
+        allow_merged: bool = False,
+    ) -> bool:
         return (
-            pull_request.state == PullRequestState.OPEN
+            pull_request.state
+            in ({PullRequestState.OPEN, PullRequestState.MERGED} if allow_merged else {PullRequestState.OPEN})
             and pull_request.repository_full_name == self.policy.repository_full_name
             and pull_request.base == self.policy.pull_request_base
             and pull_request.head_branch == run.branch
@@ -49,11 +57,20 @@ class RecoveryPlanner:
             and (run.pull_request_url is None or pull_request.url == run.pull_request_url)
         )
 
-    def _single_valid_pull_request(self, run: RunRecord, observed: RecoveryObservation, head: str) -> PullRequestObservation | None:
+    def _single_valid_pull_request(
+        self,
+        run: RunRecord,
+        observed: RecoveryObservation,
+        head: str,
+        *,
+        allow_merged: bool = False,
+    ) -> PullRequestObservation | None:
         if len(observed.pull_requests) != 1:
             return None
         pull_request = observed.pull_requests[0]
-        return pull_request if self._valid_pull_request(run, pull_request, head) else None
+        return pull_request if self._valid_pull_request(
+            run, pull_request, head, allow_merged=allow_merged
+        ) else None
 
     @staticmethod
     def _has_worktree_identity(run: RunRecord) -> bool:
@@ -63,12 +80,16 @@ class RecoveryPlanner:
     def _has_complete_pr_identity(run: RunRecord) -> bool:
         return (run.pull_request_number is None) == (run.pull_request_url is None)
 
-    def _has_convergent_persisted_pr(self, run: RunRecord, observed: RecoveryObservation) -> bool:
+    def _has_convergent_persisted_pr(
+        self, run: RunRecord, observed: RecoveryObservation, *, allow_merged: bool = False
+    ) -> bool:
         return (
             run.pull_request_number is not None
             and run.pull_request_url is not None
             and run.current_head_sha is not None
-            and self._single_valid_pull_request(run, observed, run.current_head_sha)
+            and self._single_valid_pull_request(
+                run, observed, run.current_head_sha, allow_merged=allow_merged
+            )
             is not None
         )
 
@@ -95,6 +116,7 @@ class RecoveryPlanner:
             ExecutionPhase.GEMINI_REVIEWING,
             ExecutionPhase.NEEDS_CHANGES,
             ExecutionPhase.MERGE_PENDING,
+            ExecutionPhase.MERGING,
         }
         if phase in published_phases and (
             run.current_head_sha is None or observed.local_head_sha != run.current_head_sha
@@ -105,8 +127,13 @@ class RecoveryPlanner:
             ExecutionPhase.GEMINI_REVIEWING,
             ExecutionPhase.NEEDS_CHANGES,
             ExecutionPhase.MERGE_PENDING,
+            ExecutionPhase.MERGING,
         }
-        if phase in pr_required_phases and not self._has_convergent_persisted_pr(run, observed):
+        if phase in pr_required_phases and not self._has_convergent_persisted_pr(
+            run,
+            observed,
+            allow_merged=phase in {ExecutionPhase.MERGE_PENDING, ExecutionPhase.MERGING},
+        ):
             return self._block("Pull Request persistido não converge com a observação.")
         if phase == ExecutionPhase.CODEX_RUNNING:
             return self._decision(RecoveryAction.RESUME_CODEX, "Sessão Codex persistida.") if run.codex_session_id else self._decision(RecoveryAction.START_CODEX, "Primeira sessão Codex ainda não foi persistida.")
@@ -114,6 +141,8 @@ class RecoveryPlanner:
             return self._decision(RecoveryAction.RUN_LOCAL_GATES, "Gates locais pendentes.")
         if phase == ExecutionPhase.COMMIT_PENDING:
             return self._commit(run, observed)
+        if phase == ExecutionPhase.PUBLISHING:
+            return self._legacy_publishing(run, observed)
         if phase == ExecutionPhase.PUSH_PENDING:
             return self._push(run, observed)
         if phase == ExecutionPhase.PR_PENDING:
@@ -124,11 +153,21 @@ class RecoveryPlanner:
             return self._review(run, observed)
         if phase == ExecutionPhase.NEEDS_CHANGES:
             return self._needs_changes(run, observed)
-        if phase == ExecutionPhase.MERGE_PENDING:
+        if phase in {ExecutionPhase.MERGE_PENDING, ExecutionPhase.MERGING}:
             return self._merge(run, observed)
         if phase == ExecutionPhase.PROJECT_DONE_PENDING:
             return self._project_done(run, observed)
         return self._block("Fase legada ou terminal não é planejável nesta rodada.")
+
+    def _legacy_publishing(
+        self, run: RunRecord, observed: RecoveryObservation
+    ) -> RecoveryDecision:
+        """Migra um checkpoint legado somente a partir de evidência inequívoca."""
+        if run.current_head_sha is None or observed.local_head_sha is None:
+            return self._block("PUBLISHING legado sem HEAD suficiente para reconciliação.")
+        if observed.has_worktree_changes or observed.local_head_sha != run.current_head_sha:
+            return self._commit(run, observed)
+        return self._push(run, observed)
 
     def _commit(self, run: RunRecord, observed: RecoveryObservation) -> RecoveryDecision:
         checkpoint = run.current_head_sha
@@ -214,7 +253,15 @@ class RecoveryPlanner:
         if observed.merge.state == MergeState.UNKNOWN:
             return self._block("Estado de merge desconhecido.")
         if observed.merge.state == MergeState.MERGED:
-            if observed.merge.merged_head_sha != approved or not observed.merge.merge_commit_sha:
+            pull_request = self._single_valid_pull_request(
+                run, observed, approved, allow_merged=True
+            )
+            if (
+                pull_request is None
+                or pull_request.state != PullRequestState.MERGED
+                or observed.merge.merged_head_sha != approved
+                or not observed.merge.merge_commit_sha
+            ):
                 return self._block("Merge observado não corresponde ao HEAD aprovado.")
             return self._decision(RecoveryAction.RECORD_EXISTING_MERGE, "Merge já confirmado para o HEAD aprovado.", ExecutionPhase.PROJECT_DONE_PENDING)
         if observed.merge.state != MergeState.OPEN:

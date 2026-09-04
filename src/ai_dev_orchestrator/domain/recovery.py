@@ -110,7 +110,7 @@ class MergeObservation:
 
 @dataclass(frozen=True)
 class RecoveryObservation:
-    """Snapshot normalizado; adapters futuros serão os únicos a coletá-lo."""
+    """Snapshot normalizado coletado exclusivamente pelos adapters de observação."""
 
     worktree_state: WorktreeState
     local_head_sha: str | None = None

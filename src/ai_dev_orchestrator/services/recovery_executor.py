@@ -156,18 +156,30 @@ class RecoveryExecutor:
             RecoveryAction.START_CODEX: {ExecutionPhase.CODEX_RUNNING},
             RecoveryAction.RESUME_CODEX: {ExecutionPhase.CODEX_RUNNING},
             RecoveryAction.RUN_LOCAL_GATES: {ExecutionPhase.TESTING},
-            RecoveryAction.CREATE_COMMIT: {ExecutionPhase.COMMIT_PENDING},
-            RecoveryAction.RECORD_EXISTING_COMMIT: {ExecutionPhase.COMMIT_PENDING},
-            RecoveryAction.PUSH_BRANCH: {ExecutionPhase.PUSH_PENDING},
-            RecoveryAction.RECORD_EXISTING_PUSH: {ExecutionPhase.PUSH_PENDING},
+            RecoveryAction.CREATE_COMMIT: {
+                ExecutionPhase.COMMIT_PENDING, ExecutionPhase.PUBLISHING,
+            },
+            RecoveryAction.RECORD_EXISTING_COMMIT: {
+                ExecutionPhase.COMMIT_PENDING, ExecutionPhase.PUBLISHING,
+            },
+            RecoveryAction.PUSH_BRANCH: {
+                ExecutionPhase.PUSH_PENDING, ExecutionPhase.PUBLISHING,
+            },
+            RecoveryAction.RECORD_EXISTING_PUSH: {
+                ExecutionPhase.PUSH_PENDING, ExecutionPhase.PUBLISHING,
+            },
             RecoveryAction.CREATE_PULL_REQUEST: {ExecutionPhase.PR_PENDING},
             RecoveryAction.ADOPT_PULL_REQUEST: {ExecutionPhase.PR_PENDING},
             RecoveryAction.WAIT_FOR_CI: {ExecutionPhase.WAITING_CI},
             RecoveryAction.RECORD_CI_SUCCESS: {ExecutionPhase.WAITING_CI},
             RecoveryAction.REVIEW_HEAD: {ExecutionPhase.GEMINI_REVIEWING},
             RecoveryAction.RESUME_CORRECTION: {ExecutionPhase.NEEDS_CHANGES},
-            RecoveryAction.MERGE_PULL_REQUEST: {ExecutionPhase.MERGE_PENDING},
-            RecoveryAction.RECORD_EXISTING_MERGE: {ExecutionPhase.MERGE_PENDING},
+            RecoveryAction.MERGE_PULL_REQUEST: {
+                ExecutionPhase.MERGE_PENDING, ExecutionPhase.MERGING,
+            },
+            RecoveryAction.RECORD_EXISTING_MERGE: {
+                ExecutionPhase.MERGE_PENDING, ExecutionPhase.MERGING,
+            },
             RecoveryAction.MARK_PROJECT_DONE: {ExecutionPhase.PROJECT_DONE_PENDING},
             RecoveryAction.COMPLETE: {ExecutionPhase.PROJECT_DONE_PENDING},
         }
