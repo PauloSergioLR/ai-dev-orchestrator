@@ -5,14 +5,20 @@ project_number = 1
 ready_status = "Ready"
 in_progress_status = "In Progress"
 ai_review_status = "AI Review"
-pull_request_base = "main"
+done_status = "Done"
+pull_request_target = "main"
+protected_branches = ["main"]
 status_field_name = "Status"
 
 [workspace]
 repository_path = "C:/caminho/para/repositorio"
 worktrees_dir = "C:/caminho/para/worktrees"
-base_ref = "main"
+base_branch = "main"
 remote_name = "origin"
+
+[providers]
+codex_model = "default"
+gemini_model = "default"
 
 [execution]
 max_attempts = 2
@@ -37,3 +43,9 @@ provider = "antigravity"
 timeout_seconds = 900
 max_correction_attempts = 3
 blocking_severities = ["CRITICAL", "HIGH", "MEDIUM"]
+
+[supervisor]
+poll_interval_seconds = 60
+max_sleep_seconds = 300
+# Defina apenas se sua política aceitar retries sem horário informado pelo provider.
+# retry_without_reset_seconds = 1800

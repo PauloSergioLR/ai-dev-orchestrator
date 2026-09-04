@@ -94,6 +94,7 @@ def test_antigravity_uses_stdin_schema_and_explicit_worktree(tmp_path):
     assert "--output-format" in arguments and "--json-schema" in arguments
     assert "-p" not in arguments and arguments[arguments.index("--input-format") + 1] == "text"
     assert arguments[arguments.index("--print-timeout") + 1] == "900s"
+    assert "--sandbox" in arguments and "--dangerously-skip-permissions" not in arguments
 
 @pytest.mark.parametrize("envelope", ["bad", json.dumps({"status":"ERROR"}), json.dumps({"status":"SUCCESS"}), json.dumps({"status":"SUCCESS", "structured_output": []})])
 def test_antigravity_rejects_invalid_envelopes(tmp_path, envelope):

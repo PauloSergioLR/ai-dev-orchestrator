@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
 from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner
+from ai_dev_orchestrator.domain.provider import (
+    ProviderFailure, ProviderFailureKind, classify_provider_text,
+)
 
 
 CODEX_TIMEOUT_SECONDS = 30 * 60
@@ -44,15 +48,18 @@ class CodexAdapter:
         self,
         runner: ProcessRunner | None = None,
         timeout: float = CODEX_TIMEOUT_SECONDS,
+        model: str = "default",
     ) -> None:
         self.runner = runner if runner is not None else CommandRunner(timeout=timeout)
+        self.model = model
 
     def execute(self, worktree: str | Path, prompt: str) -> CodexExecution:
         """Inicia uma sessão persistida do Codex no worktree explicitamente informado."""
         path = self._validate_worktree(worktree)
-        result = self._run(
-            ["codex", "exec", "-C", str(path), "--json", "-"], prompt, "executar"
-        )
+        arguments = ["codex", "exec", "-C", str(path), "--json"]
+        if self.model != "default":
+            arguments.extend(["--model", self.model])
+        result = self._run([*arguments, "-"], prompt, "executar")
         session_id, final_message = self._parse_jsonl(result.stdout, require_session=True)
         assert session_id is not None
         return CodexExecution(
@@ -70,8 +77,11 @@ class CodexAdapter:
         if not session_id.strip():
             raise CodexError("O identificador da sessão Codex é obrigatório para retomar")
         path = self._validate_worktree(worktree)
+        arguments = ["codex", "exec", "-C", str(path), "--json"]
+        if self.model != "default":
+            arguments.extend(["--model", self.model])
         result = self._run(
-            ["codex", "exec", "-C", str(path), "--json", "resume", session_id, "-"],
+            [*arguments, "resume", session_id, "-"],
             prompt,
             "retomar a sessão",
         )
@@ -105,11 +115,65 @@ class CodexAdapter:
             raise CodexError(f"Não foi possível executar Codex ao {operation}: {result.error}")
         if not result.succeeded:
             detail = result.stderr.strip() or result.stdout.strip()
+            structured = self._structured_failure(result.stdout)
+            kind = structured[0] if structured else classify_provider_text(detail)
+            retry_at = structured[1] if structured else None
+            if kind is not ProviderFailureKind.UNKNOWN:
+                raise ProviderFailure(
+                    "codex", kind, "Falha reportada pela CLI", datetime.now(timezone.utc), retry_at,
+                    self._partial_session(result.stdout),
+                )
             message = f"Codex retornou código {result.returncode} ao {operation}"
             if detail:
                 message = f"{message}: {detail}"
             raise CodexError(message)
         return result
+
+    @staticmethod
+    def _partial_session(stdout: str) -> str | None:
+        for line in stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and event.get("type") == "thread.started":
+                value = event.get("thread_id")
+                return value if isinstance(value, str) and value else None
+        return None
+
+    @staticmethod
+    def _structured_failure(stdout: str) -> tuple[ProviderFailureKind, datetime | None] | None:
+        mapping = {
+            "rate_limit": ProviderFailureKind.TRANSIENT_RATE_LIMIT,
+            "quota_exceeded": ProviderFailureKind.TERMINAL_QUOTA,
+            "authentication": ProviderFailureKind.AUTH_ERROR,
+            "network": ProviderFailureKind.NETWORK_ERROR,
+            "model_unavailable": ProviderFailureKind.MODEL_UNAVAILABLE,
+        }
+        for line in stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            error = event.get("error")
+            if not isinstance(error, dict):
+                continue
+            code = str(error.get("code", "")).casefold()
+            if code not in mapping:
+                continue
+            retry_at = None
+            raw_retry = error.get("retry_at")
+            if isinstance(raw_retry, str):
+                try:
+                    retry_at = datetime.fromisoformat(raw_retry.replace("Z", "+00:00"))
+                    if retry_at.tzinfo is None:
+                        retry_at = None
+                except ValueError:
+                    retry_at = None
+            return mapping[code], retry_at
+        return None
 
     @classmethod
     def _parse_jsonl(cls, stdout: str, require_session: bool) -> tuple[str | None, str]:

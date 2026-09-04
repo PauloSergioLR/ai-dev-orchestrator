@@ -1,10 +1,10 @@
 # Configuração
 
 O AI Dev Orchestrator lê sua configuração local do arquivo `orchestrator.toml`
-no diretório atual. Para começar, copie o exemplo versionado:
+no diretório atual. Para começar ou reconfigurar, execute o assistente:
 
 ```powershell
-Copy-Item orchestrator.example.toml orchestrator.toml
+orch init
 ```
 
 O arquivo real é ignorado pelo Git e não deve ser compartilhado como parte do
@@ -21,13 +21,19 @@ ready_status = "Ready"
 in_progress_status = "In Progress"
 status_field_name = "Status"
 ai_review_status = "AI Review"
-pull_request_base = "main"
+done_status = "Done"
+pull_request_target = "main"
+protected_branches = ["main"]
 
 [workspace]
 repository_path = "C:/caminho/para/repositorio"
 worktrees_dir = "C:/caminho/para/worktrees"
-base_ref = "main"
+base_branch = "main"
 remote_name = "origin"
+
+[providers]
+codex_model = "default"
+gemini_model = "default"
 
 [execution]
 max_attempts = 2
@@ -49,6 +55,10 @@ timeout_seconds = 30
 
 [review]
 max_correction_attempts = 3
+
+[supervisor]
+poll_interval_seconds = 60
+max_sleep_seconds = 300
 ```
 
 Em `[github]`, `owner`, `repository` e `ready_status` devem ser textos não
@@ -66,7 +76,9 @@ erros de digitação não passem despercebidos.
 
 Em `[workspace]`, `repository_path` é a raiz explícita e absoluta do repositório
 de origem, `worktrees_dir` é a raiz explícita e absoluta dos worktrees e
-`base_ref` é a referência Git usada sem `fetch` ou `pull` automático. Paths
+`base_branch` é a branch da qual nascem os trabalhos. `pull_request_target`
+é o destino dos Pull Requests e `protected_branches` impede automação direta
+nesses nomes. Os três papéis são independentes. Paths
 relativos são rejeitados para que a execução não dependa do diretório atual. Em
 `[github]`, `in_progress_status` tem como padrão `In Progress`.
 
@@ -90,6 +102,14 @@ diretório pai é criado quando necessário. Se omitido, o caminho determinísti
 O banco contém apenas checkpoints resumidos; prompts, diffs e credenciais não
 são persistidos.
 
+Em `[providers]`, `default` (ou `auto`) preserva a seleção feita pela CLI.
+Identificadores explícitos são encaminhados ao início e à retomada. Os modelos
+usados ficam registrados no run e não podem ser trocados silenciosamente.
+
+`orch watch` usa `[supervisor]` para polling conservador. Nenhum horário de reset
+é inferido. `retry_without_reset_seconds` é opcional e somente deve ser definido
+quando o projeto possuir uma política segura de retry sem horário do provider.
+
 ## Variáveis de ambiente
 
 Variáveis com prefixo `ORCH_` podem sobrescrever o arquivo. Para campos
@@ -102,10 +122,12 @@ ORCH_GITHUB__PROJECT_NUMBER
 ORCH_GITHUB__READY_STATUS
 ORCH_GITHUB__IN_PROGRESS_STATUS
 ORCH_GITHUB__AI_REVIEW_STATUS
-ORCH_GITHUB__PULL_REQUEST_BASE
+ORCH_GITHUB__DONE_STATUS
+ORCH_GITHUB__PULL_REQUEST_TARGET
+ORCH_GITHUB__PROTECTED_BRANCHES
 ORCH_WORKSPACE__REPOSITORY_PATH
 ORCH_WORKSPACE__WORKTREES_DIR
-ORCH_WORKSPACE__BASE_REF
+ORCH_WORKSPACE__BASE_BRANCH
 ORCH_WORKSPACE__REMOTE_NAME
 ORCH_EXECUTION__MAX_ATTEMPTS
 ORCH_EXECUTION__MAX_PARALLEL_RUNS
@@ -118,6 +140,11 @@ ORCH_CONVERGENCE__POLL_INTERVAL_SECONDS
 ORCH_CONVERGENCE__TIMEOUT_SECONDS
 ORCH_REVIEW__MAX_CORRECTION_ATTEMPTS
 ORCH_STATE__DATABASE_PATH
+ORCH_PROVIDERS__CODEX_MODEL
+ORCH_PROVIDERS__GEMINI_MODEL
+ORCH_SUPERVISOR__POLL_INTERVAL_SECONDS
+ORCH_SUPERVISOR__MAX_SLEEP_SECONDS
+ORCH_SUPERVISOR__RETRY_WITHOUT_RESET_SECONDS
 ```
 
 Por exemplo, `ORCH_EXECUTION__MAX_ATTEMPTS=3` substitui apenas esse valor. A

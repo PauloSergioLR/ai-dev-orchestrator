@@ -78,10 +78,13 @@ class RecoveryPolicy:
     pull_request_base: str
     auto_merge_enabled: bool
     max_correction_attempts: int
+    done_status: str = "Done"
 
     def __post_init__(self) -> None:
         if self.max_correction_attempts <= 0:
             raise ValueError("max_correction_attempts deve ser maior que zero")
+        if not self.done_status:
+            raise ValueError("done_status não pode ser vazio")
 
 
 @dataclass(frozen=True)

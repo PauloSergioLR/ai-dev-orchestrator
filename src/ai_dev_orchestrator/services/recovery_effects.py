@@ -38,13 +38,15 @@ class RecoveryEffects:
     def __init__(self, config: OrchestratorConfig) -> None:
         self.config = config
         self.worktrees = GitWorktreeAdapter()
-        self.codex = CodexAdapter()
+        self.codex = CodexAdapter(model=config.providers.codex_model)
         self.validation = LocalValidationService()
         self.publication = GitPublicationAdapter()
         self.issues = GitHubIssueAdapter(config)
         self.pull_requests = GitHubPullRequestAdapter(config)
         self.projects = GitHubProjectStatusAdapter(config)
-        self.reviewer = AntigravityAdapter(config.review.timeout_seconds)
+        self.reviewer = AntigravityAdapter(
+            config.review.timeout_seconds, model=config.providers.gemini_model
+        )
         self.convergence = ConvergencePoller(config.convergence)
 
     def prepare_worktree(self, run: RunRecord) -> str:
@@ -148,7 +150,7 @@ class RecoveryEffects:
         return MergeObservation(MergeState.MERGED, result.merged_head_sha, result.merge_commit_sha)
 
     def mark_project_done(self, run: RunRecord) -> None:
-        self.projects.set_status(run.project_item_id or "", "Done")
+        self.projects.set_status(run.project_item_id or "", self.config.github.done_status)
 
     def _poller(self) -> ConvergencePoller:
         """Mantém compatibilidade com instâncias construídas por testes sem __init__."""
