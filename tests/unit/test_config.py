@@ -172,7 +172,18 @@ def test_ci_defaults_and_environment_overrides(tmp_path: Path, monkeypatch: pyte
     assert config.ci.timeout_seconds == 900
 
 
+def test_convergence_environment_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ORCH_CONVERGENCE__POLL_INTERVAL_SECONDS", "0.5")
+    monkeypatch.setenv("ORCH_CONVERGENCE__TIMEOUT_SECONDS", "12")
+    config = load_config(write_config(tmp_path / "config.toml", valid_toml(tmp_path)))
+    assert config.convergence.poll_interval_seconds == 0.5
+    assert config.convergence.timeout_seconds == 12
+
+
 def test_review_correction_attempts_default_and_environment_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert load_config(write_config(tmp_path / "defaults.toml", valid_toml(tmp_path))).convergence.timeout_seconds == 30
     assert load_config(write_config(tmp_path / "default.toml", valid_toml(tmp_path))).review.max_correction_attempts == 3
     monkeypatch.setenv("ORCH_REVIEW__MAX_CORRECTION_ATTEMPTS", "4")
     assert load_config(write_config(tmp_path / "config.toml", valid_toml(tmp_path))).review.max_correction_attempts == 4
@@ -189,6 +200,15 @@ def test_rejects_invalid_review_correction_attempts(tmp_path: Path, value: str) 
 def test_rejects_invalid_ci_configuration(tmp_path: Path, ci: str) -> None:
     content = valid_toml(tmp_path) + f"\n[ci]\n{ci}\n"
     with pytest.raises(ConfigurationError, match="ci"):
+        load_config(write_config(tmp_path / "config.toml", content))
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_rejects_invalid_convergence_configuration(
+    tmp_path: Path, value: str
+) -> None:
+    content = valid_toml(tmp_path) + f"\n[convergence]\ntimeout_seconds = {value}\n"
+    with pytest.raises(ConfigurationError, match="convergence.timeout_seconds"):
         load_config(write_config(tmp_path / "config.toml", content))
 
 

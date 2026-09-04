@@ -17,6 +17,7 @@ from ai_dev_orchestrator.domain.project import ProjectItem
 from ai_dev_orchestrator.domain.worktree import GitWorktree
 from ai_dev_orchestrator.services.pipeline import RunPipeline, RunPipelineError
 from ai_dev_orchestrator.services.merge import MergePullRequestSnapshot, MergeResult
+from ai_dev_orchestrator.services.convergence import ConvergencePoller
 from ai_dev_orchestrator.services.review import REVIEW_PLAN_SCHEMA
 from ai_dev_orchestrator.services.validation import GateResult
 
@@ -45,6 +46,10 @@ class LoopFakes:
     correction_commits: int = 0
     events: list[str] = field(default_factory=list)
     resume_prompts: list[str] = field(default_factory=list)
+    stale_pr_reads_after_correction: int = 0
+    correction_was_pushed: bool = False
+    reviews_completed: int = 0
+    stale_merge_reads_after_merge: int = 0
 
     def get_issue(self, number: int) -> Issue:
         return Issue(number, "Título", "Critérios originais", "OPEN", "url", (), ())
@@ -97,6 +102,7 @@ class LoopFakes:
         self.events.append(f"push:{branch}")
         if self.correction_commits:
             self.head = self.local_head
+            self.correction_was_pushed = True
 
     def create(self, issue: Issue, branch: str, gates: tuple[GateResult, ...]) -> PullRequest:
         self.events.append("criar-pr")
@@ -119,14 +125,23 @@ class LoopFakes:
                 "commits": [remote_head], "files": ["src/example.py"], "diff": "diff --git a/x b/x\n+x"}
 
     def get_merge_snapshot(self, number: int) -> MergePullRequestSnapshot:
+        observed_head = self.head
+        if self.correction_was_pushed and self.stale_pr_reads_after_correction:
+            self.stale_pr_reads_after_correction -= 1
+            observed_head = SHA_A
+        observed_merged = self.merged
+        if self.merged and self.stale_merge_reads_after_merge:
+            self.stale_merge_reads_after_merge -= 1
+            observed_merged = False
         values: dict[str, object] = {
             "number": 32, "url": "https://github.com/acme/repo/pull/32",
-            "state": "MERGED" if self.merged else "OPEN", "is_draft": False,
-            "base": "main", "head_branch": "feat/review-loop", "head_sha": self.head,
-            "mergeable": "MERGEABLE", "merged": self.merged,
-            "merge_commit_sha": "d" * 40 if self.merged else "",
+            "state": "MERGED" if observed_merged else "OPEN", "is_draft": False,
+            "base": "main", "head_branch": "feat/review-loop", "head_sha": observed_head,
+            "mergeable": "MERGEABLE", "merged": observed_merged,
+            "merge_commit_sha": "d" * 40 if observed_merged else "",
         }
-        values.update(self.merge_snapshot_changes)
+        if self.reviews_completed:
+            values.update(self.merge_snapshot_changes)
         self.events.append(f"merge-snapshot:{values['state']}")
         return MergePullRequestSnapshot(**values)  # type: ignore[arg-type]
 
@@ -149,6 +164,7 @@ class LoopFakes:
             self.rejected_reviews -= 1
         findings = ([{"severity": "HIGH", "title": "Corrigir", "description": "Ajuste", "path": "src/example.py", "line": 4, "criterion": "Critério"}]
                     if verdict == "REJECTED" else [])
+        self.reviews_completed += 1
         return json.dumps({"verdict": verdict, "findings": findings, "reviewed_head_sha": self.head, "summary": "ok"})
 
 
@@ -159,7 +175,13 @@ def pipeline(tmp_path: Path, fakes: LoopFakes, maximum: int = 3, auto_merge: boo
         execution={"max_attempts": 1, "max_parallel_runs": 1, "auto_merge": auto_merge},
         review={"max_correction_attempts": maximum},
     )
-    return RunPipeline(config, fakes, fakes, fakes, fakes, fakes, fakes, fakes, fakes, fakes, fakes, fakes, fakes)
+    convergence = ConvergencePoller(
+        config.convergence, monotonic=lambda: 0, sleep=lambda _seconds: None
+    )
+    return RunPipeline(
+        config, fakes, fakes, fakes, fakes, fakes, fakes, fakes, fakes,
+        fakes, fakes, fakes, fakes, convergence=convergence,
+    )
 
 
 def test_rejected_review_resumes_same_session_then_approves(tmp_path: Path) -> None:
@@ -175,6 +197,21 @@ def test_rejected_review_resumes_same_session_then_approves(tmp_path: Path) -> N
     prompt = fakes.resume_prompts[0]
     for text in ("Critérios originais", SHA_A, "HIGH", "src/example.py", "Não crie Pull Request", "Não faça commit, push ou merge"):
         assert text in prompt
+
+
+def test_correction_waits_for_old_pr_head_and_keeps_same_session_and_pr(
+    tmp_path: Path,
+) -> None:
+    fakes = LoopFakes(stale_pr_reads_after_correction=2)
+
+    result = pipeline(tmp_path, fakes).run(31, "feat/review-loop")
+
+    assert result.session_id == "sessao-original"
+    assert result.pull_request_number == 32
+    assert result.final_reviewed_head_sha == SHA_B
+    assert fakes.events.count("criar-pr") == 1
+    assert fakes.events.count("push:feat/review-loop") == 2
+    assert fakes.events.count("merge-snapshot:OPEN") == 4
 
 
 def test_limit_stops_without_a_second_resume(tmp_path: Path) -> None:
@@ -245,6 +282,18 @@ def test_approved_review_merges_exact_reviewed_head_then_writes_done(tmp_path: P
     assert fakes.merge_calls == [(32, SHA_A)]
     assert result.merged and result.merge_commit_sha == "d" * 40
     assert fakes.events.index("merge") < fakes.events.index("status:Done")
+
+
+def test_merge_is_mutated_once_while_confirmation_still_looks_open(
+    tmp_path: Path,
+) -> None:
+    fakes = LoopFakes(rejected_reviews=0, stale_merge_reads_after_merge=2)
+
+    result = pipeline(tmp_path, fakes, auto_merge=True).run(31, "feat/review-loop")
+
+    assert result.merged is True
+    assert fakes.merge_calls == [(32, SHA_A)]
+    assert fakes.events.count("merge") == 1
 
 
 def test_merge_failure_never_writes_done(tmp_path: Path) -> None:

@@ -28,6 +28,10 @@ required_checks = ["test"]
 poll_interval_seconds = 5
 timeout_seconds = 900
 
+[convergence]
+poll_interval_seconds = 1
+timeout_seconds = 30
+
 [review]
 provider = "antigravity"
 timeout_seconds = 900

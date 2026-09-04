@@ -66,7 +66,12 @@ class CiGate:
         self.monotonic = monotonic
         self.sleep = sleep
 
-    def wait(self, pull_request_number: int, expected_head_sha: str) -> CiResult:
+    def wait(
+        self,
+        pull_request_number: int,
+        expected_head_sha: str,
+        stale_head_sha: str | None = None,
+    ) -> CiResult:
         started_at = self.monotonic()
         deadline = started_at + self.config.timeout_seconds
         first_query = True
@@ -82,6 +87,12 @@ class CiGate:
                 ) from error
             first_query = False
             if snapshot.head_sha != expected_head_sha:
+                if stale_head_sha is not None and snapshot.head_sha == stale_head_sha:
+                    remaining = deadline - self.monotonic()
+                    if remaining <= 0:
+                        raise self._timeout_error(started_at, expected_head_sha)
+                    self.sleep(min(self.config.poll_interval_seconds, remaining))
+                    continue
                 raise CiGateError(
                     f"O HEAD do Pull Request mudou de {expected_head_sha} para {snapshot.head_sha}"
                 )

@@ -25,6 +25,10 @@ from ai_dev_orchestrator.domain.project import ProjectItem, is_eligible_for_exec
 from ai_dev_orchestrator.domain.worktree import GitWorktree
 from ai_dev_orchestrator.services.validation import GateResult, LocalValidationService
 from ai_dev_orchestrator.services.ci_gate import CiGate, PullRequestCiReader
+from ai_dev_orchestrator.services.convergence import (
+    ConvergencePoller,
+    ObservationDecision,
+)
 from ai_dev_orchestrator.services.review import (
     CorrectionContextBuilder,
     ContextBuilder,
@@ -47,6 +51,7 @@ from ai_dev_orchestrator.services.merge import (
     MergeGateError,
     MergePullRequestSnapshot,
     MergeResult,
+    wait_for_merge_confirmation,
 )
 from ai_dev_orchestrator.domain.execution import ExecutionPhase, ExecutionStore
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
@@ -205,6 +210,7 @@ class RunPipeline:
         reviewer: AntigravityAdapter | None = None,
         pull_request_merger: PullRequestMerger | None = None,
         execution_store: ExecutionStore | None = None,
+        convergence: ConvergencePoller | None = None,
     ) -> None:
         self.config = config
         self.issue_reader = issue_reader
@@ -220,6 +226,7 @@ class RunPipeline:
         self.reviewer = reviewer
         self.pull_request_merger = pull_request_merger
         self.execution_store = execution_store
+        self.convergence = convergence or ConvergencePoller(config.convergence)
         self._execution_id: str | None = None
 
     @classmethod
@@ -369,6 +376,9 @@ class RunPipeline:
         try:
             pull_request = self.pull_request_creator.create(
                 issue, worktree.branch, gates
+            )
+            self._wait_for_pull_request_head(
+                pull_request, worktree.branch, commit_sha, stale_head_sha=None
             )
         except Exception as error:
             raise RunPipelineError(
@@ -536,14 +546,16 @@ class RunPipeline:
             merge = self.pull_request_merger.merge(
                 pull_request.number, review.reviewed_head_sha
             )
-            confirmed = self.pull_request_merger.get_merge_snapshot(pull_request.number)
-            if (
-                confirmed.state != "MERGED"
-                or not confirmed.merged
-                or confirmed.merge_commit_sha != merge.merge_commit_sha
-                or confirmed.head_sha != review.reviewed_head_sha
-            ):
-                raise MergeGateError("GitHub não confirmou o merge do HEAD aprovado")
+            wait_for_merge_confirmation(
+                self.convergence,
+                lambda: self.pull_request_merger.get_merge_snapshot(
+                    pull_request.number
+                ),
+                pull_request_number=pull_request.number,
+                pull_request_url=pull_request.url,
+                expected_head_sha=review.reviewed_head_sha,
+                expected_merge_commit_sha=merge.merge_commit_sha,
+            )
             self.pull_request_merger.verify_merge_commit(
                 merge.merge_commit_sha, merge.merged_head_sha
             )
@@ -720,7 +732,12 @@ class RunPipeline:
                 "Push da correção confirmado; Pull Request existente será revalidado",
                 current_head_sha=new_head,
             )
-            self._ensure_existing_pull_request(pull_request, worktree.branch, new_head)
+            self._wait_for_pull_request_head(
+                pull_request,
+                worktree.branch,
+                new_head,
+                stale_head_sha=ci_result.expected_head_sha,
+            )
             self._transition(
                 ExecutionPhase.WAITING_CI,
                 "Correção publicada; aguardando CI",
@@ -729,7 +746,9 @@ class RunPipeline:
                 correction_attempts=corrections,
             )
             ci_result = CiGate(self.ci_reader, self.config.ci).wait(
-                pull_request.number, new_head
+                pull_request.number,
+                new_head,
+                stale_head_sha=review.reviewed_head_sha,
             )
             self._transition(
                 ExecutionPhase.GEMINI_REVIEWING,
@@ -775,6 +794,66 @@ class RunPipeline:
             raise RunPipelineError(
                 "O Pull Request existente divergiu, foi fechado ou não aponta para o novo HEAD"
             )
+
+    def _wait_for_pull_request_head(
+        self,
+        pull_request: PullRequest,
+        branch: str,
+        expected_head_sha: str,
+        *,
+        stale_head_sha: str | None,
+    ) -> None:
+        """Aguarda apenas o HEAD anterior conhecido; demais divergências falham."""
+        if self.review_reader is None and self.pull_request_merger is None:
+            return
+
+        def classify(data) -> ObservationDecision:
+            if isinstance(data, MergePullRequestSnapshot):
+                if (
+                    data.number != pull_request.number
+                    or data.url != pull_request.url
+                    or data.head_branch != branch
+                    or data.state != "OPEN"
+                ):
+                    raise RunPipelineError(
+                        "O Pull Request existente divergiu, foi fechado ou trocou de identidade"
+                    )
+                observed_head = data.head_sha
+            else:
+                observed_head = data.get("headRefOid") if isinstance(data, dict) else None
+            if (
+                not isinstance(data, (dict, MergePullRequestSnapshot))
+                or (
+                    isinstance(data, dict)
+                    and (
+                        data.get("number") != pull_request.number
+                        or data.get("headRefName") != branch
+                        or data.get("state") not in {None, "OPEN"}
+                    )
+                )
+            ):
+                raise RunPipelineError(
+                    "O Pull Request existente divergiu, foi fechado ou trocou de identidade"
+                )
+            if observed_head == expected_head_sha:
+                return ObservationDecision.CONVERGED
+            if stale_head_sha is not None and observed_head == stale_head_sha:
+                return ObservationDecision.RETRY
+            raise RunPipelineError(
+                "O Pull Request existente aponta para um HEAD inesperado"
+            )
+
+        def read():
+            if self.pull_request_merger is not None:
+                return self.pull_request_merger.get_merge_snapshot(pull_request.number)
+            assert self.review_reader is not None
+            return self.review_reader.get_review_data(pull_request.number)
+
+        self.convergence.wait(
+            read,
+            classify,
+            f"HEAD {expected_head_sha} do Pull Request #{pull_request.number}",
+        )
 
     def _ensure_local_head_is_current(
         self, worktree: Path, expected_head_sha: str

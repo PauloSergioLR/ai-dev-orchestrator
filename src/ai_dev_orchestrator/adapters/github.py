@@ -200,21 +200,11 @@ class GitHubPullRequestAdapter:
             message = f"GitHub CLI retornou código {result.returncode} ao criar o Pull Request"
             raise GitHubPullRequestError(f"{message}: {detail}" if detail else message)
         url, number = self._parse_created_url(result.stdout)
-        view = self.runner.run(["gh", "pr", "view", url, "--repo", self.config.repository_full_name,
-                                "--json", "title,baseRefName,headRefName"])
-        if view.error or not view.succeeded:
-            detail = view.error or view.stderr.strip() or view.stdout.strip()
-            raise GitHubPullRequestError(
-                f"Pull Request #{number} já criado em {url}, mas não foi possível consultar seus dados: {detail}"
-            )
-        try:
-            payload = json.loads(view.stdout)
-            return PullRequest(number, url, self._required_string(payload, "title"),
-                               self._required_string(payload, "baseRefName"), self._required_string(payload, "headRefName"))
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
-            raise GitHubPullRequestError(
-                f"Pull Request #{number} já criado em {url}, mas o GitHub CLI retornou JSON inválido"
-            ) from error
+        # Os demais campos são os valores exatos enviados à mutação. A leitura remota
+        # de confirmação pertence ao serviço de convergência, que pode repeti-la.
+        return PullRequest(
+            number, url, issue.title, self.config.pull_request_base, branch
+        )
 
     def _parse_created_url(self, stdout: str) -> tuple[str, int]:
         lines = [line.strip() for line in stdout.splitlines() if line.strip()]
@@ -289,7 +279,7 @@ class GitHubPullRequestAdapter:
         return payload
 
     def get_merge_snapshot(self, pull_request_number: int) -> MergePullRequestSnapshot:
-        """Lê novamente o PR imediatamente antes/depois do merge."""
+        """Lê o estado atual do PR para validação ou polling."""
         result = self.runner.run([
             "gh", "pr", "view", str(pull_request_number), "--repo", self.config.repository_full_name,
             "--json", "number,url,state,isDraft,baseRefName,headRefName,headRefOid,mergeable,mergedAt,mergeCommit",

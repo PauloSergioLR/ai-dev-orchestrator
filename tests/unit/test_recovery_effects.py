@@ -12,6 +12,7 @@ from ai_dev_orchestrator.domain.issue import Issue
 from ai_dev_orchestrator.domain.review import FindingSeverity, ReviewFinding, ReviewVerdict, StructuredReview
 from ai_dev_orchestrator.services.merge import MergePullRequestSnapshot, MergeResult
 from ai_dev_orchestrator.services.recovery_effects import RecoveryEffects
+from ai_dev_orchestrator.services.convergence import ConvergencePoller
 
 HEAD = "a" * 40
 MERGE = "b" * 40
@@ -95,6 +96,34 @@ def test_create_pull_request_rereads_remote_identity(tmp_path: Path) -> None:
 
     assert observed.url == URL
     assert observed.head_sha == HEAD
+
+
+def test_push_waits_for_pr_head_without_repeating_remote_mutation(tmp_path: Path) -> None:
+    value = effects(tmp_path)
+    old = "c" * 40
+    reads: list[str] = []
+    pushes: list[str] = []
+    snapshots = iter((old, old, HEAD))
+    value.convergence = ConvergencePoller(
+        value.config.convergence, monotonic=lambda: 0, sleep=lambda _seconds: None
+    )
+    value.publication = SimpleNamespace(
+        push=lambda _path, _remote, _branch: pushes.append("push")
+    )
+
+    def snapshot(_number: int) -> MergePullRequestSnapshot:
+        head = next(snapshots)
+        reads.append(head)
+        return MergePullRequestSnapshot(
+            37, URL, "OPEN", False, "main", "feat/recovery", head, "MERGEABLE"
+        )
+
+    value.pull_requests = SimpleNamespace(get_merge_snapshot=snapshot)
+
+    value.push_branch(run(tmp_path))
+
+    assert pushes == ["push"]
+    assert reads == [old, old, HEAD]
 
 
 def test_wait_for_ci_preserves_real_status_and_head(tmp_path: Path) -> None:

@@ -43,6 +43,10 @@ required_checks = ["test"]
 poll_interval_seconds = 5
 timeout_seconds = 900
 
+[convergence]
+poll_interval_seconds = 1
+timeout_seconds = 30
+
 [review]
 max_correction_attempts = 3
 ```
@@ -57,7 +61,7 @@ depois de review aprovado, CI verde e revalidação final do PR e do HEAD local.
 `merge_timeout_seconds` define o limite positivo, em segundos, da chamada de
 merge ao GitHub.
 
-Campos fora desses três grupos ou com nomes incorretos são rejeitados, para que
+Campos fora dos grupos documentados ou com nomes incorretos são rejeitados, para que
 erros de digitação não passem despercebidos.
 
 Em `[workspace]`, `repository_path` é a raiz explícita e absoluta do repositório
@@ -70,6 +74,11 @@ Em `[ci]`, `required_checks` define os checks que devem existir e terminar com
 `SUCCESS` para liberar o fluxo. O padrão é `["test"]`; a lista não pode ser
 vazia. `poll_interval_seconds` (padrão `5`) e `timeout_seconds` (padrão `900`)
 devem ser positivos. Checks fora da lista não bloqueiam o gate.
+
+Em `[convergence]`, `poll_interval_seconds` (padrão `1`) controla o intervalo
+entre leituras do GitHub após uma mutação remota, e `timeout_seconds` (padrão
+`30`) limita a espera total. O polling repete somente consultas e nunca repete
+push, criação de Pull Request, merge ou alteração de Project.
 
 Em `[review]`, `max_correction_attempts` define quantas correções após um
 `REJECTED` podem ocorrer na mesma sessão Codex. O padrão é `3` e o valor deve
@@ -105,6 +114,8 @@ ORCH_EXECUTION__MERGE_TIMEOUT_SECONDS
 ORCH_CI__REQUIRED_CHECKS
 ORCH_CI__POLL_INTERVAL_SECONDS
 ORCH_CI__TIMEOUT_SECONDS
+ORCH_CONVERGENCE__POLL_INTERVAL_SECONDS
+ORCH_CONVERGENCE__TIMEOUT_SECONDS
 ORCH_REVIEW__MAX_CORRECTION_ATTEMPTS
 ORCH_STATE__DATABASE_PATH
 ```
