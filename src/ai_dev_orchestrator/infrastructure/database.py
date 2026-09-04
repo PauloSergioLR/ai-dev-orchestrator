@@ -392,15 +392,19 @@ def _parse_time(value: str) -> datetime:
 
 
 def _sanitize(value: str) -> str:
+    return _redact_secrets(value)[:_SUMMARY_LIMIT]
+
+
+def _redact_secrets(value: str) -> str:
     return re.sub(
         r"(?i)(token|authorization|password|secret)\s*[:=]\s*\S+",
         r"\1=[redigido]",
         value.replace("\n", " "),
-    )[:_SUMMARY_LIMIT]
+    )
 
 
 def _sanitize_finding(value: str, limit: int) -> str:
-    return _sanitize(value)[:limit]
+    return _redact_secrets(value)[:limit]
 
 
 def _record(row: sqlite3.Row) -> RunRecord:

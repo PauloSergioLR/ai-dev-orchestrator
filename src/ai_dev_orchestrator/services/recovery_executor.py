@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from ai_dev_orchestrator.domain.execution import ExecutionPhase, RunRecord
+from ai_dev_orchestrator.domain.execution import ExecutionPhase, RunRecord, validate_transition
 from ai_dev_orchestrator.domain.recovery import (
     CiState, MergeObservation, MergeState, PullRequestObservation, PullRequestState,
     RecoveryAction, RecoveryDecision, RecoveryObservation, RecoveryPolicy,
@@ -49,6 +49,7 @@ class RecoveryExecutor:
             raise RecoveryExecutionError("Execução mudou desde o planejamento")
         if decision.action == RecoveryAction.BLOCK:
             raise RecoveryExecutionError(decision.reason)
+        self._validate_action_phase(run, decision)
         action = decision.action
         if action == RecoveryAction.PREPARE_WORKTREE:
             head = self.effects.prepare_worktree(run)
@@ -82,11 +83,17 @@ class RecoveryExecutor:
                 raise RecoveryExecutionError("Commit não prova relação direta com o checkpoint")
             return self.store.transition(run.id, ExecutionPhase.PUSH_PENDING, summary=decision.reason, current_head_sha=result.new_head_sha, ci_head_sha=None, reviewed_head_sha=None, review_verdict=None, merge_commit_sha=None, merged_head_sha=None, head_sha=result.new_head_sha)
         if action == RecoveryAction.PUSH_BRANCH:
+            if observation.remote_head_sha == run.current_head_sha:
+                raise RecoveryExecutionError("Push já está comprovado pela observação")
             self.effects.push_branch(run)
             return self.store.transition(run.id, ExecutionPhase.PR_PENDING, summary=decision.reason)
         if action == RecoveryAction.RECORD_EXISTING_PUSH:
             return self.store.transition(run.id, ExecutionPhase.PR_PENDING, summary=decision.reason)
         if action in {RecoveryAction.CREATE_PULL_REQUEST, RecoveryAction.ADOPT_PULL_REQUEST}:
+            if action == RecoveryAction.CREATE_PULL_REQUEST and (
+                run.pull_request_number is not None or run.pull_request_url is not None
+            ):
+                raise RecoveryExecutionError("Pull Request já possui identidade persistida")
             pr = self.effects.create_pull_request(run) if action == RecoveryAction.CREATE_PULL_REQUEST else self._observed_pr(run, observation)
             self._validate_pr(run, pr)
             return self.store.transition(run.id, ExecutionPhase.WAITING_CI, summary=decision.reason, pull_request_number=pr.number, pull_request_url=pr.url)
@@ -113,11 +120,24 @@ class RecoveryExecutor:
                 raise RecoveryExecutionError("Provider retornou sessão Codex divergente")
             return self.store.transition(run.id, ExecutionPhase.TESTING, summary=decision.reason)
         if action in {RecoveryAction.MERGE_PULL_REQUEST, RecoveryAction.RECORD_EXISTING_MERGE}:
+            if action == RecoveryAction.MERGE_PULL_REQUEST and (
+                run.review_verdict != "APPROVED"
+                or not run.reviewed_head_sha
+                or run.reviewed_head_sha != run.current_head_sha
+            ):
+                raise RecoveryExecutionError("Merge exige review aprovada do HEAD atual")
             merge = self.effects.merge_pull_request(run) if action == RecoveryAction.MERGE_PULL_REQUEST else observation.merge
             if merge.state != MergeState.MERGED or merge.merged_head_sha != run.reviewed_head_sha or not merge.merge_commit_sha:
                 raise RecoveryExecutionError("Merge não foi comprovado para o HEAD aprovado")
             return self.store.transition(run.id, ExecutionPhase.PROJECT_DONE_PENDING, summary=decision.reason, merged_head_sha=merge.merged_head_sha, merge_commit_sha=merge.merge_commit_sha)
         if action == RecoveryAction.MARK_PROJECT_DONE:
+            if (
+                not run.project_item_id
+                or not run.reviewed_head_sha
+                or run.merged_head_sha != run.reviewed_head_sha
+                or not run.merge_commit_sha
+            ):
+                raise RecoveryExecutionError("Projeto exige merge persistido e comprovado")
             self.effects.mark_project_done(run)
             return self.store.transition(run.id, ExecutionPhase.COMPLETED, summary=decision.reason, project_status="Done")
         if action == RecoveryAction.COMPLETE:
@@ -128,6 +148,39 @@ class RecoveryExecutor:
     def _required(value: str | None, name: str) -> None:
         if not value:
             raise RecoveryExecutionError(f"{name} ausente")
+
+    @staticmethod
+    def _validate_action_phase(run: RunRecord, decision: RecoveryDecision) -> None:
+        allowed = {
+            RecoveryAction.PREPARE_WORKTREE: {ExecutionPhase.PREPARING},
+            RecoveryAction.START_CODEX: {ExecutionPhase.CODEX_RUNNING},
+            RecoveryAction.RESUME_CODEX: {ExecutionPhase.CODEX_RUNNING},
+            RecoveryAction.RUN_LOCAL_GATES: {ExecutionPhase.TESTING},
+            RecoveryAction.CREATE_COMMIT: {ExecutionPhase.COMMIT_PENDING},
+            RecoveryAction.RECORD_EXISTING_COMMIT: {ExecutionPhase.COMMIT_PENDING},
+            RecoveryAction.PUSH_BRANCH: {ExecutionPhase.PUSH_PENDING},
+            RecoveryAction.RECORD_EXISTING_PUSH: {ExecutionPhase.PUSH_PENDING},
+            RecoveryAction.CREATE_PULL_REQUEST: {ExecutionPhase.PR_PENDING},
+            RecoveryAction.ADOPT_PULL_REQUEST: {ExecutionPhase.PR_PENDING},
+            RecoveryAction.WAIT_FOR_CI: {ExecutionPhase.WAITING_CI},
+            RecoveryAction.RECORD_CI_SUCCESS: {ExecutionPhase.WAITING_CI},
+            RecoveryAction.REVIEW_HEAD: {ExecutionPhase.GEMINI_REVIEWING},
+            RecoveryAction.RESUME_CORRECTION: {ExecutionPhase.NEEDS_CHANGES},
+            RecoveryAction.MERGE_PULL_REQUEST: {ExecutionPhase.MERGE_PENDING},
+            RecoveryAction.RECORD_EXISTING_MERGE: {ExecutionPhase.MERGE_PENDING},
+            RecoveryAction.MARK_PROJECT_DONE: {ExecutionPhase.PROJECT_DONE_PENDING},
+            RecoveryAction.COMPLETE: {ExecutionPhase.PROJECT_DONE_PENDING},
+        }
+        if decision.action == RecoveryAction.ADVANCE_PHASE:
+            if decision.next_phase is None:
+                raise RecoveryExecutionError("ADVANCE_PHASE exige próxima fase")
+            try:
+                validate_transition(run.phase, decision.next_phase)
+            except ValueError as error:
+                raise RecoveryExecutionError(str(error)) from error
+            return
+        if run.phase not in allowed.get(decision.action, set()):
+            raise RecoveryExecutionError("Ação incompatível com a fase persistida")
 
     def _validate_pr(self, run: RunRecord, pr: PullRequestObservation) -> None:
         if pr.state != PullRequestState.OPEN or pr.repository_full_name != self.policy.repository_full_name or pr.base != self.policy.pull_request_base or pr.head_branch != run.branch or pr.head_sha != run.current_head_sha:

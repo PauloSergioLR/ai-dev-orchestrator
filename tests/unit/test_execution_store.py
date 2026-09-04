@@ -87,3 +87,38 @@ def test_records_structured_review_atomically_and_redacts_findings(tmp_path: Pat
     assert recorded.review_verdict == "REJECTED"
     assert findings[0].title.endswith("[redigido]")
     assert "abc" not in findings[0].description
+
+
+def test_finding_description_uses_its_own_limit(tmp_path: Path) -> None:
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    run = store.create(37)
+    code = store.transition(run.id, ExecutionPhase.CODEX_RUNNING, summary="x")
+    testing = store.transition(code.id, ExecutionPhase.TESTING, summary="x", codex_session_id="same")
+    commit = store.transition(testing.id, ExecutionPhase.COMMIT_PENDING, summary="x", current_head_sha="a" * 40)
+    push = store.transition(commit.id, ExecutionPhase.PUSH_PENDING, summary="x")
+    pr = store.transition(push.id, ExecutionPhase.PR_PENDING, summary="x")
+    ci = store.transition(pr.id, ExecutionPhase.WAITING_CI, summary="x")
+    reviewing = store.transition(ci.id, ExecutionPhase.GEMINI_REVIEWING, summary="x")
+    description = "d" * 900
+    review = StructuredReview(ReviewVerdict.REJECTED, (ReviewFinding(FindingSeverity.LOW, "título", description),), "a" * 40, "x")
+    store.record_review(reviewing.id, review, "x")
+    assert len(store.review_findings(reviewing.id)[0].description) == 900
+
+
+def test_migrates_schema_v1_preserving_execution_and_journal(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.db"
+    execution_id = "legacy-run"
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+        connection.execute("INSERT INTO schema_version VALUES (1)")
+        connection.execute("CREATE TABLE executions (id TEXT PRIMARY KEY, issue_number INTEGER NOT NULL, project_item_id TEXT, phase TEXT NOT NULL, branch TEXT, worktree_path TEXT, base_ref TEXT, codex_session_id TEXT, pull_request_number INTEGER, pull_request_url TEXT, current_head_sha TEXT, ci_head_sha TEXT, reviewed_head_sha TEXT, review_verdict TEXT, correction_attempts INTEGER NOT NULL DEFAULT 0, merge_commit_sha TEXT, merged_head_sha TEXT, project_status TEXT, last_error TEXT, terminal INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
+        connection.execute("CREATE TABLE execution_events (execution_id TEXT NOT NULL REFERENCES executions(id), sequence INTEGER NOT NULL, previous_phase TEXT, phase TEXT NOT NULL, created_at TEXT NOT NULL, summary TEXT NOT NULL, head_sha TEXT, PRIMARY KEY(execution_id, sequence))")
+        connection.execute("INSERT INTO executions VALUES (?, 37, 'item', 'TESTING', 'feat/x', 'C:/worktree', 'main', 'session', NULL, NULL, ?, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, 0, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')", (execution_id, "a" * 40))
+        connection.execute("INSERT INTO execution_events VALUES (?, 1, NULL, 'PREPARING', '2026-01-01T00:00:00+00:00', 'criada', NULL)", (execution_id,))
+        connection.execute("INSERT INTO execution_events VALUES (?, 2, 'PREPARING', 'TESTING', '2026-01-01T00:01:00+00:00', 'gates', ?)", (execution_id, "a" * 40))
+    store = SqliteExecutionStore(path)
+    assert store.get_active_for_issue(37).id == execution_id
+    assert [event.sequence for event in store.events(execution_id)] == [1, 2]
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 2
+        assert connection.execute("SELECT name FROM sqlite_master WHERE name = 'review_findings'").fetchone()

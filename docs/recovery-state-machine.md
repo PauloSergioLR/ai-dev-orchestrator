@@ -17,6 +17,8 @@ O `RecoveryExecutor` futuro desta camada aplica apenas uma decisão recebida e
 delega I/O a `RecoveryEffects`; adapters reais serão conectados depois. Cada
 efeito bem-sucedido recebe checkpoint no mesmo execution_id. Uma queda entre o
 efeito e o checkpoint será reconciliada pela próxima observação e planejamento.
+Antes de qualquer efeito, o executor recarrega o record, confere que ele não
+mudou desde o planejamento e valida que a ação é compatível com a fase atual.
 
 ## Fases e ações
 

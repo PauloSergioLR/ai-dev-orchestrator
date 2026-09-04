@@ -93,6 +93,13 @@ def test_block_has_zero_effects(tmp_path: Path) -> None:
     assert effects.calls == {}
 
 
+def test_action_in_wrong_phase_has_zero_effects(tmp_path: Path) -> None:
+    _, run, effects, executor, observation = setup(tmp_path)
+    with pytest.raises(RecoveryExecutionError):
+        executor.execute(run, RecoveryDecision(RecoveryAction.PUSH_BRANCH, "push"), observation)
+    assert effects.calls == {}
+
+
 def test_prepare_start_gates_and_commit_preserve_execution(tmp_path: Path) -> None:
     store, run, effects, executor, observation = setup(tmp_path)
     prepared = executor.execute(run, RecoveryDecision(RecoveryAction.PREPARE_WORKTREE, "preparar"), observation)
