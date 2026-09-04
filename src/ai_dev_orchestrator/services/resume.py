@@ -82,6 +82,9 @@ class ResumeService:
                 raise ResumeError(decision.reason)
             try:
                 run = self.executor.execute(run, decision, observation)
+            except KeyboardInterrupt:
+                self.store.checkpoint(run.id, summary="Retomada interrompida")
+                raise
             except Exception as error:
                 raise ResumeError(f"Retomada interrompida em {run.phase}: {error}") from error
             if run.phase in TERMINAL_PHASES:

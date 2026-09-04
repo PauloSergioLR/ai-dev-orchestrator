@@ -5,7 +5,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ai_dev_orchestrator.adapters.github import GitHubCiAdapter, GitHubProjectAdapter
+from ai_dev_orchestrator.adapters.github import (
+    GitHubCiAdapter,
+    GitHubProjectAdapter,
+    GitHubPullRequestAdapter,
+)
 from ai_dev_orchestrator.config import OrchestratorConfig
 from ai_dev_orchestrator.domain.execution import RunRecord
 from ai_dev_orchestrator.domain.recovery import (
@@ -30,6 +34,7 @@ class RecoveryObserver:
         self.runner = runner or CommandRunner(timeout=30)
         self.ci_reader = GitHubCiAdapter(config, self.runner)
         self.projects = GitHubProjectAdapter(config, self.runner)
+        self.pull_requests = GitHubPullRequestAdapter(config, self.runner)
 
     def observe(self, run: RunRecord) -> RecoveryObservation:
         worktree, head, parent, dirty = self._worktree(run)
@@ -131,16 +136,26 @@ class RecoveryObserver:
             return MergeObservation(MergeState.OPEN)
         if prs[0].state != PullRequestState.MERGED:
             return MergeObservation(MergeState.CLOSED)
-        result = self.runner.run(["gh", "pr", "view", str(prs[0].number), "--repo",
-                                  self.config.github.repository_full_name, "--json", "headRefOid,mergeCommit,mergedAt"])
         try:
-            value = json.loads(result.stdout)
-            commit = value.get("mergeCommit") or {}
-            sha = commit.get("oid")
-            if result.succeeded and value.get("mergedAt") and sha and value.get("headRefOid"):
-                return MergeObservation(MergeState.MERGED, value["headRefOid"], sha)
-        except (TypeError, KeyError, json.JSONDecodeError):
-            pass
+            snapshot = self.pull_requests.get_merge_snapshot(prs[0].number)
+            if (
+                snapshot.merged
+                and snapshot.state == "MERGED"
+                and snapshot.number == prs[0].number
+                and snapshot.url == prs[0].url
+                and snapshot.base == self.config.github.pull_request_base
+                and snapshot.head_branch == run.branch
+                and snapshot.head_sha == prs[0].head_sha
+                and snapshot.merge_commit_sha
+            ):
+                self.pull_requests.verify_merge_commit(
+                    snapshot.merge_commit_sha, snapshot.head_sha
+                )
+                return MergeObservation(
+                    MergeState.MERGED, snapshot.head_sha, snapshot.merge_commit_sha
+                )
+        except Exception as error:
+            raise RecoveryObservationError("Não foi possível comprovar merge") from error
         return MergeObservation(MergeState.UNKNOWN)
 
     def _project(self, run: RunRecord) -> ProjectState:
