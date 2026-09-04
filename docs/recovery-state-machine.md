@@ -1,29 +1,54 @@
 # Máquina de estados de retomada segura
 
-## Motivo da arquitetura
+## Separação de responsabilidades
 
-Uma tentativa anterior de retomada misturava a decisão sobre o estado com a execução de comandos e chamadas externas. Esse desenho não oferece uma fonte determinística para explicar o que já ocorreu depois de uma interrupção. A arquitetura atual parte de uma `RunRecord` persistida e de uma observação externa normalizada, sem depender daquela tentativa.
+A retomada segura parte de três entradas distintas: a `RunRecord` persistida,
+uma `RecoveryObservation` e uma `RecoveryPolicy`. A observação contém somente
+fatos coletados no momento da retomada: worktree, HEADs, PRs, CI, merge e estado
+do projeto. A política contém configuração e invariantes esperadas:
+repositório, base do Pull Request e autorização de auto-merge.
 
-O `RecoveryPlanner` é puro: recebe fatos e devolve uma `RecoveryDecision`. Um futuro `RecoveryExecutor` executará somente a ação escolhida, registrará um checkpoint e fará uma nova observação antes de planejar de novo.
+O `RecoveryPlanner` é puro: recebe essas entradas e devolve uma
+`RecoveryDecision`. Um futuro executor realizará no máximo a ação decidida,
+registrará checkpoint e observará novamente. Assim, decisão e efeito externo
+não se misturam.
 
-## Fases novas
+## Fases e ações
 
-As fases legadas `PUBLISHING` e `MERGING` permanecem por compatibilidade. As novas fases explicitam cada efeito: `COMMIT_PENDING`, `PUSH_PENDING`, `PR_PENDING`, `MERGE_PENDING` e `PROJECT_DONE_PENDING`.
+As fases legadas `PUBLISHING` e `MERGING` permanecem por compatibilidade.
+As novas fases explicitam cada efeito: `COMMIT_PENDING`, `PUSH_PENDING`,
+`PR_PENDING`, `MERGE_PENDING` e `PROJECT_DONE_PENDING`.
 
-| Fase | Observação determinante | Ação |
+| Fase | Fato exigido | Ação |
 | --- | --- | --- |
-| `PREPARING` | worktree ausente/convergente | preparar/avançar fase |
-| `CODEX_RUNNING` | sessão persistida | retomar Codex |
+| `PREPARING` | worktree ausente ou convergente | preparar ou avançar |
+| `CODEX_RUNNING` | sessão Codex persistida | retomar Codex |
 | `TESTING` | gates pendentes | executar gates locais |
-| `COMMIT_PENDING` | alterações ou commit já observado | criar/registrar commit |
-| `PUSH_PENDING` | remoto anterior ou igual ao local | push/registrar push |
-| `PR_PENDING` | nenhum PR ou um PR convergente | criar/adotar PR |
-| `WAITING_CI` | CI pendente ou verde para HEAD exato | aguardar/registrar CI |
-| `GEMINI_REVIEWING` | review ausente, rejeitada ou aprovada | revisar/avançar fase |
-| `NEEDS_CHANGES` | sessão e findings do mesmo HEAD | retomar correção |
-| `MERGE_PENDING` | merge existente ou PR aprovado e verde | registrar/executar merge |
-| `PROJECT_DONE_PENDING` | item Done ou não Done | completar/marcar Done |
+| `COMMIT_PENDING` | alteração rastreada ou commit direto comprovado | criar ou registrar commit |
+| `PUSH_PENDING` | remoto ausente, pai direto ou igual ao local | push ou registrar push |
+| `PR_PENDING` | identidade completa do PR convergente | criar ou adotar PR |
+| `WAITING_CI` | CI do HEAD exato | aguardar ou registrar sucesso |
+| `GEMINI_REVIEWING` | review persistida no record | revisar ou avançar |
+| `NEEDS_CHANGES` | sessão, review rejeitada e findings do mesmo HEAD | retomar correção |
+| `MERGE_PENDING` | PR, CI, HEAD local e merge convergentes | merge ou registrar merge |
+| `PROJECT_DONE_PENDING` | estado explícito do projeto | marcar Done ou completar |
 
-Cada decisão representa no máximo uma mutação externa. Checkpoints que só avançam a fase também são explícitos. Qualquer ambiguidade, contradição ou SHA diferente bloqueia o fluxo: não há repetição cega de efeitos externos.
+O planner falha fechado: contradição, ambiguidade, SHA divergente ou estado
+`UNKNOWN` produz `BLOCK`. Em especial, `UNKNOWN` nunca é interpretado como
+false ou `NOT_DONE`.
 
-No futuro, findings estruturados serão persistidos com o SHA revisado, permitindo provar que uma correção responde exatamente à rejeição recebida. A cobertura será dividida em três níveis: testes unitários do planner puro, testes do executor com doubles de adapters e testes de integração com persistência e serviços externos controlados.
+## Provas de histórico e review
+
+Para não aceitar divergências silenciosas, commit e push usam relações diretas:
+um commit já existente só é aceito quando o pai imediato do HEAD local é o
+checkpoint; um push pendente só é permitido para remoto ausente ou pai direto
+do HEAD local. Relações ancestrais arbitrárias não bastam.
+
+O resultado do Gemini só é recuperável depois que executor futuro persistir
+veredito, SHA revisado e findings no store. Se o processo cair após a chamada
+ao Gemini e antes desse checkpoint, a fase `GEMINI_REVIEWING` não tem review
+persistida e planeja `REVIEW_HEAD` novamente. Findings estruturados futuros
+serão associados ao SHA rejeitado para provar que a correção responde à revisão.
+
+A cobertura futura terá três níveis: planner puro, executor com doubles dos
+adapters e integração com persistência e serviços externos controlados.

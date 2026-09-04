@@ -1,4 +1,4 @@
-"""Fatos observados e decisões puras para a retomada segura."""
+"""Fatos observados, política e decisões puras para a retomada segura."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ class WorktreeState(StrEnum):
 
 class PullRequestState(StrEnum):
     OPEN = "OPEN"
+    CLOSED = "CLOSED"
     MERGED = "MERGED"
 
 
@@ -27,14 +28,21 @@ class CiState(StrEnum):
 
 
 class ReviewState(StrEnum):
-    ABSENT = "ABSENT"
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
 
 
 class MergeState(StrEnum):
+    UNKNOWN = "UNKNOWN"
     OPEN = "OPEN"
+    CLOSED = "CLOSED"
     MERGED = "MERGED"
+
+
+class ProjectState(StrEnum):
+    UNKNOWN = "UNKNOWN"
+    NOT_DONE = "NOT_DONE"
+    DONE = "DONE"
 
 
 class RecoveryAction(StrEnum):
@@ -62,10 +70,23 @@ class RecoveryAction(StrEnum):
 
 
 @dataclass(frozen=True)
+class RecoveryPolicy:
+    """Configuração e invariantes esperadas, distintas dos fatos observados."""
+
+    repository_full_name: str
+    pull_request_base: str
+    auto_merge_enabled: bool
+
+
+@dataclass(frozen=True)
 class PullRequestObservation:
     number: int
+    url: str
+    repository_full_name: str
+    base: str
+    head_branch: str
     head_sha: str
-    state: PullRequestState = PullRequestState.OPEN
+    state: PullRequestState
 
 
 @dataclass(frozen=True)
@@ -75,36 +96,28 @@ class CiObservation:
 
 
 @dataclass(frozen=True)
-class ReviewObservation:
-    state: ReviewState = ReviewState.ABSENT
-    head_sha: str | None = None
-
-
-@dataclass(frozen=True)
 class MergeObservation:
-    state: MergeState = MergeState.OPEN
+    state: MergeState = MergeState.UNKNOWN
     merged_head_sha: str | None = None
     merge_commit_sha: str | None = None
 
 
 @dataclass(frozen=True)
 class RecoveryObservation:
-    """Snapshot normalizado; a coleta desses fatos pertence aos adapters futuros."""
+    """Snapshot normalizado; adapters futuros serão os únicos a coletá-lo."""
 
     worktree_state: WorktreeState
     local_head_sha: str | None = None
-    local_head_descends_from_checkpoint: bool = False
+    local_head_parent_sha: str | None = None
     has_local_changes: bool = False
     has_untracked_files: bool = False
     remote_head_sha: str | None = None
-    remote_head_is_ancestor_of_local: bool = False
+    remote_head_is_direct_parent_of_local: bool = False
     pull_requests: tuple[PullRequestObservation, ...] = ()
     ci: CiObservation = field(default_factory=CiObservation)
-    review: ReviewObservation = field(default_factory=ReviewObservation)
     findings_head_sha: str | None = None
     merge: MergeObservation = field(default_factory=MergeObservation)
-    project_done: bool = False
-    auto_merge_enabled: bool = False
+    project_state: ProjectState = ProjectState.UNKNOWN
 
 
 @dataclass(frozen=True)
