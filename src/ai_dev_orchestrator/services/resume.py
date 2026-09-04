@@ -88,6 +88,12 @@ class ResumeService:
             except Exception as error:
                 raise ResumeError(f"Retomada interrompida em {run.phase}: {error}") from error
             if run.phase in TERMINAL_PHASES:
-                return ResumeResult(run.issue_number, run.id, run.phase.value, run.branch,
-                                    run.codex_session_id, run.pull_request_number,
-                                    run.current_head_sha, run.correction_attempts)
+                return self._result(run)
+            if decision.action.value == "WAIT_FOR_CI" and run.phase.value == "WAITING_CI":
+                return self._result(run)
+
+    @staticmethod
+    def _result(run: RunRecord) -> ResumeResult:
+        return ResumeResult(run.issue_number, run.id, run.phase.value, run.branch,
+                            run.codex_session_id, run.pull_request_number,
+                            run.current_head_sha, run.correction_attempts)

@@ -86,7 +86,7 @@ class RecoveryPlanner:
             if observed.local_head_sha is None:
                 return self._block("Worktree convergente sem HEAD local observado.")
             return self._decision(RecoveryAction.ADVANCE_PHASE, "Worktree já está convergente.", ExecutionPhase.CODEX_RUNNING)
-        if observed.worktree_state != WorktreeState.CONVERGENT:
+        if phase != ExecutionPhase.PROJECT_DONE_PENDING and observed.worktree_state != WorktreeState.CONVERGENT:
             return self._block("Worktree não está convergente para esta fase.")
         published_phases = {
             ExecutionPhase.PUSH_PENDING,

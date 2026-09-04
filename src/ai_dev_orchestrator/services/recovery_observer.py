@@ -88,7 +88,10 @@ class RecoveryObserver:
     def _remote_head(self, run: RunRecord) -> str | None:
         if not run.branch:
             raise RecoveryObservationError("Branch persistida ausente")
-        result = self.runner.run(["git", "ls-remote", "--heads", self.config.workspace.remote_name, f"refs/heads/{run.branch}"])
+        result = self.runner.run([
+            "git", "-C", str(self.config.workspace.repository_path), "ls-remote",
+            "--heads", self.config.workspace.remote_name, f"refs/heads/{run.branch}",
+        ])
         if result.error or not result.succeeded:
             raise RecoveryObservationError("Não foi possível consultar o HEAD remoto")
         lines = [line.split() for line in result.stdout.splitlines() if line.strip()]
