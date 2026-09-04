@@ -49,6 +49,7 @@ class RecoveryAction(StrEnum):
     """Uma única ação, ou um único checkpoint determinístico, por decisão."""
 
     PREPARE_WORKTREE = "PREPARE_WORKTREE"
+    START_CODEX = "START_CODEX"
     RESUME_CODEX = "RESUME_CODEX"
     RUN_LOCAL_GATES = "RUN_LOCAL_GATES"
     CREATE_COMMIT = "CREATE_COMMIT"
@@ -76,6 +77,11 @@ class RecoveryPolicy:
     repository_full_name: str
     pull_request_base: str
     auto_merge_enabled: bool
+    max_correction_attempts: int
+
+    def __post_init__(self) -> None:
+        if self.max_correction_attempts <= 0:
+            raise ValueError("max_correction_attempts deve ser maior que zero")
 
 
 @dataclass(frozen=True)

@@ -83,6 +83,8 @@ class RecoveryPlanner:
                 return self._block("Worktree divergente do estado persistido.")
             if observed.worktree_state == WorktreeState.ABSENT:
                 return self._decision(RecoveryAction.PREPARE_WORKTREE, "Worktree ainda não existe.")
+            if observed.local_head_sha is None:
+                return self._block("Worktree convergente sem HEAD local observado.")
             return self._decision(RecoveryAction.ADVANCE_PHASE, "Worktree já está convergente.", ExecutionPhase.CODEX_RUNNING)
         if observed.worktree_state != WorktreeState.CONVERGENT:
             return self._block("Worktree não está convergente para esta fase.")
@@ -107,7 +109,7 @@ class RecoveryPlanner:
         if phase in pr_required_phases and not self._has_convergent_persisted_pr(run, observed):
             return self._block("Pull Request persistido não converge com a observação.")
         if phase == ExecutionPhase.CODEX_RUNNING:
-            return self._decision(RecoveryAction.RESUME_CODEX, "Sessão Codex persistida.") if run.codex_session_id else self._block("Sessão Codex ausente para retomada.")
+            return self._decision(RecoveryAction.RESUME_CODEX, "Sessão Codex persistida.") if run.codex_session_id else self._decision(RecoveryAction.START_CODEX, "Primeira sessão Codex ainda não foi persistida.")
         if phase == ExecutionPhase.TESTING:
             return self._decision(RecoveryAction.RUN_LOCAL_GATES, "Gates locais pendentes.")
         if phase == ExecutionPhase.COMMIT_PENDING:
@@ -197,6 +199,8 @@ class RecoveryPlanner:
 
     def _needs_changes(self, run: RunRecord, observed: RecoveryObservation) -> RecoveryDecision:
         head = run.current_head_sha
+        if run.correction_attempts >= self.policy.max_correction_attempts:
+            return self._block("Limite de tentativas de correção atingido.")
         if not run.codex_session_id or run.review_verdict != ReviewState.REJECTED.value or run.reviewed_head_sha != head or observed.findings_head_sha != head:
             return self._block("Sessão, review e findings devem corresponder ao HEAD atual.")
         return self._decision(RecoveryAction.RESUME_CORRECTION, "Findings e sessão Codex correspondem ao HEAD atual.")

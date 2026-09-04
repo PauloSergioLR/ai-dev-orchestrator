@@ -13,6 +13,11 @@ O `RecoveryPlanner` é puro: recebe essas entradas e devolve uma
 registrará checkpoint e observará novamente. Assim, decisão e efeito externo
 não se misturam.
 
+O `RecoveryExecutor` futuro desta camada aplica apenas uma decisão recebida e
+delega I/O a `RecoveryEffects`; adapters reais serão conectados depois. Cada
+efeito bem-sucedido recebe checkpoint no mesmo execution_id. Uma queda entre o
+efeito e o checkpoint será reconciliada pela próxima observação e planejamento.
+
 ## Fases e ações
 
 As fases legadas `PUBLISHING` e `MERGING` permanecem por compatibilidade.
@@ -62,6 +67,9 @@ veredito, SHA revisado e findings no store. Se o processo cair após a chamada
 ao Gemini e antes desse checkpoint, a fase `GEMINI_REVIEWING` não tem review
 persistida e planeja `REVIEW_HEAD` novamente. Findings estruturados futuros
 serão associados ao SHA rejeitado para provar que a correção responde à revisão.
+Os findings vivem no mesmo SQLite da execução e a persistência do review é
+atômica com o evento de journal. A tentativa de correção é incrementada antes
+da chamada ao Codex, preservando auditoria mesmo se o provider falhar.
 
 A cobertura futura terá três níveis: planner puro, executor com doubles dos
 adapters e integração com persistência e serviços externos controlados.

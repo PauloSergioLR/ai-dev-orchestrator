@@ -25,7 +25,7 @@ OTHER = "b" * 40
 THIRD = "c" * 40
 BRANCH = "feat/recovery"
 PR_URL = "https://github.com/owner/repository/pull/37"
-POLICY = RecoveryPolicy("owner/repository", "main", True)
+POLICY = RecoveryPolicy("owner/repository", "main", True, 3)
 
 
 def run(phase: ExecutionPhase, **changes: object) -> RunRecord:
@@ -66,7 +66,7 @@ def with_pr(**changes: object) -> RecoveryObservation:
 
 
 def plan(record: RunRecord, snapshot: RecoveryObservation, *, auto_merge: bool = True):
-    policy = RecoveryPolicy(POLICY.repository_full_name, POLICY.pull_request_base, auto_merge)
+    policy = RecoveryPolicy(POLICY.repository_full_name, POLICY.pull_request_base, auto_merge, 3)
     return RecoveryPlanner(policy).plan(record, snapshot)
 
 
@@ -86,6 +86,14 @@ def test_preparing_requires_complete_worktree_identity(field: str) -> None:
 def test_preparing_uses_observed_worktree(snapshot: RecoveryObservation, action: RecoveryAction, next_phase: ExecutionPhase | None) -> None:
     decision = plan(run(ExecutionPhase.PREPARING), snapshot)
     assert (decision.action, decision.next_phase) == (action, next_phase)
+
+
+@pytest.mark.parametrize(
+    "session, action",
+    [(None, RecoveryAction.START_CODEX), ("session", RecoveryAction.RESUME_CODEX)],
+)
+def test_codex_phase_starts_only_when_session_is_absent(session: str | None, action: RecoveryAction) -> None:
+    assert plan(run(ExecutionPhase.CODEX_RUNNING, codex_session_id=session), observed()).action == action
 
 
 def test_commit_accepts_dirty_worktree_including_new_files() -> None:
@@ -202,6 +210,11 @@ def test_review_uses_persisted_result(record_changes: dict[str, object], snapsho
 def test_needs_changes_resumes_only_with_all_persisted_evidence() -> None:
     record = published_run(ExecutionPhase.NEEDS_CHANGES, codex_session_id="session", review_verdict="REJECTED", reviewed_head_sha=HEAD)
     assert plan(record, with_pr(findings_head_sha=HEAD)).action == RecoveryAction.RESUME_CORRECTION
+
+
+def test_needs_changes_blocks_at_correction_limit() -> None:
+    record = published_run(ExecutionPhase.NEEDS_CHANGES, codex_session_id="session", review_verdict="REJECTED", reviewed_head_sha=HEAD, correction_attempts=3)
+    assert plan(record, with_pr(findings_head_sha=HEAD)).action == RecoveryAction.BLOCK
 
 
 @pytest.mark.parametrize(

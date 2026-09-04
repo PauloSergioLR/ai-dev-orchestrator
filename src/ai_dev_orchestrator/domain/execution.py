@@ -54,7 +54,11 @@ _ALLOWED = {
         ExecutionPhase.APPROVED_AWAITING_ACTION,
         ExecutionPhase.FAILED,
     },
-    ExecutionPhase.NEEDS_CHANGES: {ExecutionPhase.CODEX_RUNNING, ExecutionPhase.FAILED},
+    ExecutionPhase.NEEDS_CHANGES: {
+        ExecutionPhase.CODEX_RUNNING,
+        ExecutionPhase.TESTING,
+        ExecutionPhase.FAILED,
+    },
     ExecutionPhase.MERGE_PENDING: {
         ExecutionPhase.PROJECT_DONE_PENDING,
         ExecutionPhase.FAILED,
