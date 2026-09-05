@@ -11,6 +11,7 @@ from ai_dev_orchestrator.adapters.github import (
     GitHubPullRequestAdapter,
 )
 from ai_dev_orchestrator.config import OrchestratorConfig
+from ai_dev_orchestrator.domain.base_ref import base_refs_equivalent
 from ai_dev_orchestrator.domain.execution import RunRecord
 from ai_dev_orchestrator.domain.recovery import (
     CiObservation, CiState, MergeObservation, MergeState, ProjectState,
@@ -54,7 +55,12 @@ class RecoveryObserver:
     def _worktree(self, run: RunRecord) -> tuple[WorktreeState, str | None, str | None, bool]:
         if not run.worktree_path or not Path(run.worktree_path).is_dir():
             return WorktreeState.ABSENT, None, None, False
-        if run.base_ref != self.config.workspace.base_ref:
+        if not run.base_ref or not base_refs_equivalent(
+            run.base_ref,
+            self.config.workspace.base_ref,
+            remote_name=self.config.workspace.remote_name,
+            base_branch=self.config.workspace.base_branch,
+        ):
             return WorktreeState.DIVERGENT, None, None, False
         branch = self._git_required(run, ["branch", "--show-current"])
         root = self._git_required(run, ["rev-parse", "--show-toplevel"])
