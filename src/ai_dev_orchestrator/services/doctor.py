@@ -47,7 +47,7 @@ class DoctorService:
             self._check_command("Git", ["git", "--version"]),
             self._check_github_cli(),
             self._check_command("Codex CLI", ["codex", "--version"]),
-            self._check_command("Antigravity CLI", ["agy", "--version"]),
+            self._check_antigravity_cli(),
             self._check_repository(),
             self._check_configuration(),
         ]
@@ -77,6 +77,41 @@ class DoctorService:
         if not result.succeeded:
             return DoctorCheck("GitHub CLI", CheckStatus.ERROR, "gh não está autenticado")
         return DoctorCheck("GitHub CLI", CheckStatus.OK, "autenticado")
+
+    def _check_antigravity_cli(self) -> DoctorCheck:
+        """Confirma localmente o contrato de CLI usado pelo reviewer estruturado."""
+        version = self.runner.run(["agy", "--version"])
+        if version.error:
+            return DoctorCheck("Antigravity CLI", CheckStatus.ERROR, version.error)
+        if not version.succeeded:
+            return DoctorCheck(
+                "Antigravity CLI", CheckStatus.ERROR, self._command_failure(version)
+            )
+        help_result = self.runner.run(["agy", "--help"])
+        if help_result.error:
+            return DoctorCheck("Antigravity CLI", CheckStatus.ERROR, help_result.error)
+        if not help_result.succeeded:
+            return DoctorCheck(
+                "Antigravity CLI", CheckStatus.ERROR, self._command_failure(help_result)
+            )
+        required = {
+            "--input-format",
+            "--sandbox",
+            "--disable-slash-commands",
+            "--output-format",
+            "--json-schema",
+        }
+        missing = sorted(flag for flag in required if flag not in help_result.stdout)
+        if missing:
+            return DoctorCheck(
+                "Antigravity CLI",
+                CheckStatus.ERROR,
+                "CLI incompatível com review estruturado; flags ausentes: "
+                + ", ".join(missing),
+            )
+        return DoctorCheck(
+            "Antigravity CLI", CheckStatus.OK, version.stdout.strip() or "disponível"
+        )
 
     def _check_repository(self) -> DoctorCheck:
         repository = self.runner.run(["git", "rev-parse", "--is-inside-work-tree"])

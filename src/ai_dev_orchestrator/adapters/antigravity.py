@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ai_dev_orchestrator.infrastructure.process import CommandRunner
 from ai_dev_orchestrator.domain.provider import ProviderFailure, ProviderFailureKind, classify_provider_text
+from ai_dev_orchestrator.infrastructure.process import CommandRunner
 
 
 class AntigravityError(Exception):
@@ -24,10 +24,20 @@ class AntigravityAdapter:
         self.model = model
 
     def invoke(self, prompt: str, cwd: str | Path, schema: dict[str, Any]) -> str:
+        # `--mode plan` altera o contrato da execução headless e pode encerrar a
+        # chamada com SUCCESS sem materializar o resultado imposto por --json-schema.
+        # O sandbox mantém o reviewer contido sem trocar o modo de resposta.
         arguments = [
-            "agy", "--input-format", "text", "--sandbox", "--mode", "plan",
-            "--disable-slash-commands", "--print-timeout",
-            f"{int(self.timeout_seconds)}s", "--output-format", "json", "--json-schema",
+            "agy",
+            "--input-format",
+            "text",
+            "--sandbox",
+            "--disable-slash-commands",
+            "--print-timeout",
+            f"{int(self.timeout_seconds)}s",
+            "--output-format",
+            "json",
+            "--json-schema",
             json.dumps(schema, separators=(",", ":")),
         ]
         if self.model != "default":
@@ -41,11 +51,13 @@ class AntigravityAdapter:
                 )
             raise AntigravityError(f"Falha ao executar Antigravity: {result.error}")
         if not result.succeeded:
-            detail = result.stderr.strip() or result.stdout.strip()
+            detail = "\n".join((result.stderr, result.stdout))
             kind = classify_provider_text(detail)
             if kind is not ProviderFailureKind.UNKNOWN:
                 raise ProviderFailure("gemini", kind, "Falha reportada pela CLI", datetime.now(timezone.utc))
-            raise AntigravityError(f"Antigravity retornou código {result.returncode}: {detail}")
+            raise AntigravityError(
+                f"Antigravity retornou código {result.returncode}; saída omitida"
+            )
         try:
             envelope = json.loads(result.stdout)
         except json.JSONDecodeError as error:
@@ -68,5 +80,8 @@ class AntigravityAdapter:
             raise AntigravityError("Antigravity não retornou status SUCCESS")
         structured_output = envelope.get("structured_output")
         if not isinstance(structured_output, dict):
-            raise AntigravityError("Antigravity não retornou structured_output compatível")
+            raise AntigravityError(
+                "Falha do contrato estruturado do reviewer: Antigravity retornou "
+                "SUCCESS sem structured_output compatível"
+            )
         return json.dumps(structured_output)

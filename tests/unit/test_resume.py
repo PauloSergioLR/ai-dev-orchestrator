@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from ai_dev_orchestrator.adapters.antigravity import AntigravityError
 from ai_dev_orchestrator.domain.execution import ExecutionPhase, RunRecord
 from ai_dev_orchestrator.domain.recovery import (
     CiObservation, CiState, MergeObservation, MergeState, ProjectState,
@@ -238,6 +239,60 @@ def test_pending_ci_returns_recoverable_result_without_false_cycle(tmp_path: Pat
 
     assert result.phase == ExecutionPhase.WAITING_CI.value
     assert effects.calls == {"ci": 1}
+
+
+def test_protocol_failure_in_review_retries_only_same_head(tmp_path: Path) -> None:
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    run = advance(store, ExecutionPhase.WAITING_CI)
+    original = store.transition(
+        run.id,
+        ExecutionPhase.GEMINI_REVIEWING,
+        summary="ci",
+        ci_head_sha=HEAD,
+    )
+    snapshot = RecoveryObservation(
+        WorktreeState.CONVERGENT,
+        local_head_sha=HEAD,
+        remote_head_sha=HEAD,
+        pull_requests=(pr(),),
+        ci=CiObservation(CiState.SUCCESS, HEAD),
+    )
+
+    class ProtocolFailureEffects(Effects):
+        def review_head(self, run, prior_findings):
+            self.called("review")
+            raise AntigravityError(
+                "Falha do contrato estruturado do reviewer: SUCCESS sem structured_output"
+            )
+
+    failed_effects = ProtocolFailureEffects()
+    with pytest.raises(ResumeError, match="contrato estruturado"):
+        service(store, Observer(lambda _run: snapshot), failed_effects).resume(37)
+
+    preserved = store.get(original.id)
+    assert preserved.id == original.id
+    assert preserved.phase is ExecutionPhase.GEMINI_REVIEWING
+    assert preserved.branch == original.branch
+    assert preserved.codex_session_id == original.codex_session_id
+    assert preserved.pull_request_number == original.pull_request_number
+    assert preserved.current_head_sha == HEAD
+    assert failed_effects.calls == {"review": 1}
+
+    recovered_effects = Effects()
+    review_only_policy = RecoveryPolicy("owner/repo", "main", False, 3)
+    result = ResumeService(
+        store,
+        Observer(lambda _run: snapshot),
+        RecoveryPlanner(review_only_policy),
+        RecoveryExecutor(review_only_policy, store, recovered_effects),
+    ).resume(37)
+
+    assert result.execution_id == original.id
+    assert result.phase == ExecutionPhase.APPROVED_AWAITING_ACTION.value
+    assert result.current_head_sha == HEAD
+    assert result.pull_request_number == original.pull_request_number
+    assert result.codex_session_id == original.codex_session_id
+    assert recovered_effects.calls == {"review": 1}
 
 
 def test_legacy_merging_reconciles_existing_merge_without_mutation(tmp_path: Path) -> None:
