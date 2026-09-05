@@ -101,7 +101,12 @@ class DoctorService:
             "--output-format",
             "--json-schema",
         }
-        missing = sorted(flag for flag in required if flag not in help_result.stdout)
+        declared_capabilities = "\n".join(
+            (help_result.stdout, help_result.stderr)
+        )
+        missing = sorted(
+            flag for flag in required if flag not in declared_capabilities
+        )
         if missing:
             return DoctorCheck(
                 "Antigravity CLI",
