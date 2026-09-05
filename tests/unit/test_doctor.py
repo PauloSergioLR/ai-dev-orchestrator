@@ -37,6 +37,13 @@ def successful_results() -> dict[tuple[str, ...], CommandResult]:
         ("gh", "auth", "status"): CommandResult(0),
         ("codex", "--version"): CommandResult(0, "codex 1.0\n"),
         ("agy", "--version"): CommandResult(0, "agy 1.0\n"),
+        ("agy", "--help"): CommandResult(
+            0,
+            stderr=(
+                "--input-format --sandbox --disable-slash-commands "
+                "--output-format --json-schema\n"
+            ),
+        ),
         ("git", "rev-parse", "--is-inside-work-tree"): CommandResult(0, "true\n"),
         ("git", "remote"): CommandResult(0, "origin\n"),
     }
@@ -284,6 +291,41 @@ def test_reports_unauthenticated_github_cli() -> None:
 
     assert check.status is CheckStatus.ERROR
     assert "não está autenticado" in check.message
+
+
+def test_reports_antigravity_without_structured_output_capability() -> None:
+    runner = FakeRunner(
+        {
+            ("agy", "--version"): CommandResult(0, "agy antigo"),
+            ("agy", "--help"): CommandResult(0, "--input-format --sandbox"),
+        }
+    )
+
+    check = DoctorService(runner)._check_antigravity_cli()
+
+    assert check.status is CheckStatus.ERROR
+    assert "--json-schema" in check.message
+    assert "--output-format" in check.message
+
+
+def test_accepts_antigravity_help_capabilities_from_stderr() -> None:
+    runner = FakeRunner(
+        {
+            ("agy", "--version"): CommandResult(0, "agy 1.1.26"),
+            ("agy", "--help"): CommandResult(
+                0,
+                stderr=(
+                    "--input-format --sandbox --disable-slash-commands "
+                    "--output-format --json-schema"
+                ),
+            ),
+        }
+    )
+
+    check = DoctorService(runner)._check_antigravity_cli()
+
+    assert check.status is CheckStatus.OK
+    assert check.message == "agy 1.1.26"
 
 
 def test_reports_non_git_directory() -> None:

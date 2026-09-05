@@ -8,6 +8,7 @@ from ai_dev_orchestrator.adapters.antigravity import AntigravityAdapter, Antigra
 from ai_dev_orchestrator.config import ReviewConfig
 from ai_dev_orchestrator.domain.ci import CiResult, CiStatus, StatusCheck
 from ai_dev_orchestrator.domain.issue import Issue
+from ai_dev_orchestrator.domain.provider import ProviderFailure, ProviderFailureKind
 from ai_dev_orchestrator.domain.review import ReviewVerdict
 from ai_dev_orchestrator.domain.review import FindingSeverity, ReviewFinding, StructuredReview
 from ai_dev_orchestrator.infrastructure.process import CommandResult
@@ -95,11 +96,120 @@ def test_antigravity_uses_stdin_schema_and_explicit_worktree(tmp_path):
     assert "-p" not in arguments and arguments[arguments.index("--input-format") + 1] == "text"
     assert arguments[arguments.index("--print-timeout") + 1] == "900s"
     assert "--sandbox" in arguments and "--dangerously-skip-permissions" not in arguments
+    assert "--disable-slash-commands" in arguments
+    assert "--mode" not in arguments and "plan" not in arguments
+
+
+def test_antigravity_regression_probe_isolates_headless_plan_mode(tmp_path):
+    """Reproduz deterministicamente o envelope observado após a Issue #44."""
+
+    class RegressionProbeRunner(Runner):
+        def __init__(self):
+            super().__init__("")
+
+        def run(self, arguments, cwd=None, input_text=None):
+            self.calls.append((arguments, cwd, input_text))
+            if "--mode" in arguments and arguments[arguments.index("--mode") + 1] == "plan":
+                envelope = {"status": "SUCCESS", "response": "Plano concluído"}
+            else:
+                envelope = {
+                    "status": "SUCCESS",
+                    "structured_output": json.loads(plan()),
+                }
+            return CommandResult(0, json.dumps(envelope))
+
+    runner = RegressionProbeRunner()
+
+    output = AntigravityAdapter(10, runner).invoke(
+        "revise", tmp_path, REVIEW_PLAN_SCHEMA
+    )
+
+    assert json.loads(output) == json.loads(plan())
+    assert "--sandbox" in runner.calls[0][0]
+    assert "--disable-slash-commands" in runner.calls[0][0]
+    assert "--mode" not in runner.calls[0][0]
+
+    corrected = list(runner.calls[0][0])
+    historical = [
+        argument
+        for argument in corrected
+        if argument not in {"--sandbox", "--disable-slash-commands"}
+    ]
+    historical.insert(historical.index("--print-timeout"), "--dangerously-skip-permissions")
+    sandbox_only = [
+        argument for argument in corrected if argument != "--disable-slash-commands"
+    ]
+    slash_disabled_only = [argument for argument in corrected if argument != "--sandbox"]
+    regressed = list(corrected)
+    regressed[regressed.index("--sandbox") + 1:regressed.index("--sandbox") + 1] = [
+        "--mode",
+        "plan",
+    ]
+
+    def has_structured_output(arguments):
+        result = runner.run(arguments, cwd=tmp_path, input_text="revise")
+        return isinstance(json.loads(result.stdout).get("structured_output"), dict)
+
+    assert has_structured_output(historical)
+    assert has_structured_output(sandbox_only)
+    assert has_structured_output(slash_disabled_only)
+    assert has_structured_output(corrected)
+    assert not has_structured_output(regressed)
 
 @pytest.mark.parametrize("envelope", ["bad", json.dumps({"status":"ERROR"}), json.dumps({"status":"SUCCESS"}), json.dumps({"status":"SUCCESS", "structured_output": []})])
 def test_antigravity_rejects_invalid_envelopes(tmp_path, envelope):
     with pytest.raises(AntigravityError):
         AntigravityAdapter(1, Runner(envelope)).invoke("p", tmp_path, STRUCTURED_REVIEW_SCHEMA)
+
+
+def test_antigravity_does_not_expose_stdout_on_protocol_or_process_failure(tmp_path):
+    secret = "stdout-completo-nao-pode-ser-persistido"
+    with pytest.raises(AntigravityError, match="contrato estruturado") as protocol:
+        AntigravityAdapter(
+            1, Runner(json.dumps({"status": "SUCCESS", "response": secret}))
+        ).invoke("p", tmp_path, STRUCTURED_REVIEW_SCHEMA)
+    assert secret not in str(protocol.value)
+
+    class FailedRunner(Runner):
+        def run(self, arguments, cwd=None, input_text=None):
+            return CommandResult(2, stdout=secret)
+
+    with pytest.raises(AntigravityError, match="saída omitida") as process:
+        AntigravityAdapter(1, FailedRunner("")).invoke(
+            "p", tmp_path, STRUCTURED_REVIEW_SCHEMA
+        )
+    assert secret not in str(process.value)
+
+
+def test_antigravity_preserves_structured_quota_classification(tmp_path):
+    envelope = json.dumps(
+        {
+            "status": "ERROR",
+            "error": {
+                "code": "QUOTA_EXCEEDED",
+                "retry_at": "2026-09-06T10:30:00Z",
+            },
+        }
+    )
+
+    with pytest.raises(ProviderFailure) as failure:
+        AntigravityAdapter(1, Runner(envelope)).invoke(
+            "p", tmp_path, STRUCTURED_REVIEW_SCHEMA
+        )
+
+    assert failure.value.classification is ProviderFailureKind.TERMINAL_QUOTA
+    assert failure.value.retry_at is not None
+
+
+def test_free_response_cannot_become_approval(tmp_path):
+    envelope = json.dumps(
+        {"status": "SUCCESS", "response": "APPROVED sem findings"}
+    )
+
+    with pytest.raises(AntigravityError, match="contrato estruturado"):
+        AntigravityAdapter(1, Runner(envelope)).invoke(
+            "p", tmp_path, STRUCTURED_REVIEW_SCHEMA
+        )
 
 def test_review_config_rejects_invalid_provider_and_accepts_low_blocking():
     assert ReviewConfig(blocking_severities=("LOW",)).blocking_severities == ("LOW",)
