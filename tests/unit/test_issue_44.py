@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import time
 
 import pytest
 from typer.testing import CliRunner
@@ -481,6 +482,55 @@ def test_supervisor_paralelo_inicia_issues_distintas_ate_o_limite(tmp_path: Path
         ).watch()
 
     assert work.calls == [3, 7]
+
+
+def test_supervisor_com_limite_um_mantem_uma_unica_unidade_de_trabalho(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = SqliteExecutionStore(config.state.database_path)
+
+    class Work:
+        calls = 0
+
+        def work(self):
+            self.calls += 1
+            return None
+
+    work = Work()
+    SupervisorService(config, work, store).watch()
+
+    assert work.calls == 1
+
+
+def test_issue_inelegivel_nao_e_reenviada_em_polls_seguinte(tmp_path: Path) -> None:
+    config = _config(tmp_path, max_parallel_runs=2)
+    store = SqliteExecutionStore(config.state.database_path)
+
+    class Work:
+        calls: list[int] = []
+
+        def eligible_issue_numbers(self, excluded):
+            return tuple(issue for issue in (3,) if issue not in excluded)
+
+        def work_issue(self, issue):
+            self.calls.append(issue)
+            return None
+
+    work = Work()
+    sleeps = 0
+
+    def poll(_: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 1:
+            time.sleep(0.02)
+            return
+        raise KeyboardInterrupt
+
+    SupervisorService(
+        config, work, store, poll, work_service_factory=lambda: work
+    ).watch()
+
+    assert work.calls == [3]
 
 
 def test_falha_paralela_e_terminal_nao_fica_ativa(tmp_path: Path) -> None:

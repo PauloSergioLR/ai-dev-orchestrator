@@ -11,7 +11,12 @@ from ai_dev_orchestrator.domain.issue import Issue
 from ai_dev_orchestrator.domain.project import ProjectItem
 from ai_dev_orchestrator.services.pipeline import RunResult
 from ai_dev_orchestrator.services.resume import ResumeResult
-from ai_dev_orchestrator.services.work import WorkError, WorkService, branch_from_title
+from ai_dev_orchestrator.services.work import (
+    WorkError,
+    WorkService,
+    _repository_lock,
+    branch_from_title,
+)
 
 
 def config(tmp_path: Path) -> OrchestratorConfig:
@@ -188,6 +193,33 @@ def test_work_issue_falha_fechado_quando_lock_da_issue_ja_existe(tmp_path: Path)
         work.work_issue(4)
 
     assert pipeline.calls == []
+
+
+def test_work_tambem_respeita_lock_da_issue(tmp_path: Path) -> None:
+    work, _, _, pipeline, _, _ = service(tmp_path, (item(4),))
+    (tmp_path / "issue-4.lock").write_text(str(__import__("os").getpid()), encoding="ascii")
+
+    with pytest.raises(WorkError, match="exclusividade"):
+        work.work()
+
+    assert pipeline.calls == []
+
+
+def test_work_issue_recupera_lock_orfao_com_pid_inexistente(tmp_path: Path) -> None:
+    work, _, _, pipeline, _, _ = service(tmp_path, (item(4),))
+    (tmp_path / "issue-4.lock").write_text("999999999", encoding="ascii")
+
+    work.work_issue(4)
+
+    assert pipeline.calls[0][0] == 4
+
+
+def test_lock_de_repositorio_serializa_preparo_de_base(tmp_path: Path) -> None:
+    lock = tmp_path / "repository-base.lock"
+    with _repository_lock(lock):
+        with pytest.raises(WorkError, match="repositório"):
+            with _repository_lock(lock):
+                pass
 
 
 def test_candidatas_ready_nao_consultam_cada_issue(tmp_path: Path) -> None:

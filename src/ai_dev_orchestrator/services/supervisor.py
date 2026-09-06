@@ -148,8 +148,10 @@ class SupervisorService:
                         self._handle_task_failure(issue, error)
                         blocked_issues.add(issue)
                         continue
-                    if result is not None:
-                        self._show_completion(result)
+                    if result is None:
+                        blocked_issues.add(issue)
+                        continue
+                    self._show_completion(result)
 
                 active = self.store.list_active()
                 active_by_issue = {run.issue_number: run for run in active}

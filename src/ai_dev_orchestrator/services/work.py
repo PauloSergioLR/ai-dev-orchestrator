@@ -121,10 +121,7 @@ class WorkService:
             issues = ", ".join(f"#{run.issue_number}" for run in active)
             raise WorkError(f"Execuções ativas ambíguas: {issues}")
         if active:
-            return WorkResult(
-                resumed=True,
-                resume=self.resume_service.resume(active[0].issue_number),
-            )
+            return self._work_issue(active[0].issue_number, parallel_branch=False)
 
         try:
             selected = self._select_issue()
@@ -132,20 +129,9 @@ class WorkService:
             raise WorkError(f"Falha ao selecionar a próxima Issue: {error}") from error
         if selected is None:
             return None
-        item, issue = selected
-        branch = branch_from_title(issue.title, issue.number)
-        try:
-            remote_base = self.base_synchronizer.prepare_remote_base(
-                self.config.workspace.repository_path,
-                self.config.workspace.remote_name,
-                self.config.workspace.base_ref,
-                branch,
-            )
-        except Exception as error:
-            raise WorkError(f"Falha ao sincronizar a base remota: {error}") from error
-        # O pipeline relê e revalida a Issue e o item imediatamente antes da mutação.
-        result = self.pipeline.run(item.issue_number or issue.number, branch, base_ref=remote_base)
-        return WorkResult(resumed=False, run=result)
+        return self._work_issue(
+            selected[1].number, parallel_branch=False, selected=selected
+        )
 
     def work_issue(self, issue_number: int) -> WorkResult | None:
         """Processa somente uma Issue, sem assumir exclusividade global.
@@ -154,6 +140,15 @@ class WorkService:
         separadas. A criação do registro no SQLite continua sendo a barreira
         durável contra duas execuções da mesma Issue.
         """
+        return self._work_issue(issue_number, parallel_branch=True)
+
+    def _work_issue(
+        self,
+        issue_number: int,
+        *,
+        parallel_branch: bool,
+        selected: tuple[ProjectItem, Issue] | None = None,
+    ) -> WorkResult | None:
         lock = self.config.state.database_path.with_name(f"issue-{issue_number}.lock")
         with _issue_lock(lock, issue_number):
             active = tuple(
@@ -166,21 +161,29 @@ class WorkService:
                     resumed=True, resume=self.resume_service.resume(issue_number)
                 )
 
-            try:
-                selected = self._select_issue(issue_number)
-            except Exception as error:
-                raise WorkError(f"Falha ao selecionar a Issue #{issue_number}: {error}") from error
             if selected is None:
-                return None
+                try:
+                    selected = self._select_issue(issue_number)
+                except Exception as error:
+                    raise WorkError(f"Falha ao selecionar a Issue #{issue_number}: {error}") from error
+                if selected is None:
+                    return None
             item, issue = selected
-            branch = _parallel_branch_from_title(issue.title, issue.number)
+            branch = (
+                _parallel_branch_from_title(issue.title, issue.number)
+                if parallel_branch
+                else branch_from_title(issue.title, issue.number)
+            )
             try:
-                remote_base = self.base_synchronizer.prepare_remote_base(
-                    self.config.workspace.repository_path,
-                    self.config.workspace.remote_name,
-                    self.config.workspace.base_ref,
-                    branch,
-                )
+                with _repository_lock(
+                    self.config.state.database_path.with_name("repository-base.lock")
+                ):
+                    remote_base = self.base_synchronizer.prepare_remote_base(
+                        self.config.workspace.repository_path,
+                        self.config.workspace.remote_name,
+                        self.config.workspace.base_ref,
+                        branch,
+                    )
             except Exception as error:
                 raise WorkError(f"Falha ao sincronizar a base remota: {error}") from error
             return WorkResult(
@@ -234,12 +237,84 @@ def _issue_lock(path: Path, issue_number: int) -> Iterator[None]:
     try:
         descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError as error:
-        raise WorkError(
-            f"Não foi possível provar exclusividade para a Issue #{issue_number}"
-        ) from error
+        if not _remove_orphan_lock(path):
+            raise WorkError(
+                f"Não foi possível provar exclusividade para a Issue #{issue_number}"
+            ) from error
+        try:
+            descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError as retry_error:
+            raise WorkError(
+                f"Não foi possível provar exclusividade para a Issue #{issue_number}"
+            ) from retry_error
     try:
         os.write(descriptor, str(os.getpid()).encode("ascii"))
         yield
     finally:
         os.close(descriptor)
         path.unlink(missing_ok=True)
+
+
+@contextmanager
+def _repository_lock(path: Path) -> Iterator[None]:
+    """Serializa mutações da base Git compartilhada entre worktrees."""
+    with _file_lock(path, "repositório"):
+        yield
+
+
+@contextmanager
+def _file_lock(path: Path, resource: str) -> Iterator[None]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError as error:
+        if not _remove_orphan_lock(path):
+            raise WorkError(f"Não foi possível provar exclusividade para {resource}") from error
+        try:
+            descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError as retry_error:
+            raise WorkError(f"Não foi possível provar exclusividade para {resource}") from retry_error
+    try:
+        os.write(descriptor, str(os.getpid()).encode("ascii"))
+        yield
+    finally:
+        os.close(descriptor)
+        path.unlink(missing_ok=True)
+
+
+def _remove_orphan_lock(path: Path) -> bool:
+    """Remove somente locks cujo PID não existe mais; dúvida permanece bloqueada."""
+    try:
+        pid = int(path.read_text(encoding="ascii").strip())
+    except (OSError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return False
+        # ERROR_INVALID_PARAMETER prova que o PID não existe; acesso negado
+        # ou qualquer outro erro continua fail-closed.
+        if ctypes.get_last_error() != 87:
+            return False
+        try:
+            path.unlink()
+        except OSError:
+            return False
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        try:
+            path.unlink()
+        except OSError:
+            return False
+        return True
+    except PermissionError:
+        return False
+    return False
