@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 from typing import Sequence
 
+from ai_dev_orchestrator.adapters.antigravity import AntigravityAdapter, AntigravityError
 from ai_dev_orchestrator.config import ConfigurationError, load_config
 from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner
 
@@ -79,43 +80,19 @@ class DoctorService:
         return DoctorCheck("GitHub CLI", CheckStatus.OK, "autenticado")
 
     def _check_antigravity_cli(self) -> DoctorCheck:
-        """Confirma localmente o contrato de CLI usado pelo reviewer estruturado."""
-        version = self.runner.run(["agy", "--version"])
-        if version.error:
-            return DoctorCheck("Antigravity CLI", CheckStatus.ERROR, version.error)
-        if not version.succeeded:
-            return DoctorCheck(
-                "Antigravity CLI", CheckStatus.ERROR, self._command_failure(version)
-            )
-        help_result = self.runner.run(["agy", "--help"])
-        if help_result.error:
-            return DoctorCheck("Antigravity CLI", CheckStatus.ERROR, help_result.error)
-        if not help_result.succeeded:
-            return DoctorCheck(
-                "Antigravity CLI", CheckStatus.ERROR, self._command_failure(help_result)
-            )
-        required = {
-            "--input-format",
-            "--sandbox",
-            "--disable-slash-commands",
-            "--output-format",
-            "--json-schema",
-        }
-        declared_capabilities = "\n".join(
-            (help_result.stdout, help_result.stderr)
-        )
-        missing = sorted(
-            flag for flag in required if flag not in declared_capabilities
-        )
-        if missing:
-            return DoctorCheck(
-                "Antigravity CLI",
-                CheckStatus.ERROR,
-                "CLI incompatível com review estruturado; flags ausentes: "
-                + ", ".join(missing),
-            )
+        """Usa a mesma configuração e o mesmo preflight do runtime."""
+        try:
+            config = load_config(self.config_path)
+            version = AntigravityAdapter(
+                config.review.timeout_seconds, runner=self.runner,
+                model=config.providers.gemini_model,
+                executable=config.review.executable,
+            ).check_available()
+        except (ConfigurationError, AntigravityError) as error:
+            return DoctorCheck("Antigravity CLI", CheckStatus.ERROR, str(error))
         return DoctorCheck(
-            "Antigravity CLI", CheckStatus.OK, version.stdout.strip() or "disponível"
+            "Antigravity CLI", CheckStatus.OK,
+            version + "; contrato local validado (não consulta o modelo)",
         )
 
     def _check_repository(self) -> DoctorCheck:

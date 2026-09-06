@@ -241,7 +241,13 @@ def test_pending_ci_returns_recoverable_result_without_false_cycle(tmp_path: Pat
     assert effects.calls == {"ci": 1}
 
 
-def test_protocol_failure_in_review_retries_only_same_head(tmp_path: Path) -> None:
+@pytest.mark.parametrize("failure_message", [
+    "Falha do contrato estruturado do reviewer: SUCCESS sem structured_output",
+    "Falha ao executar Antigravity: Comando excedeu o timeout de 1s",
+    "Antigravity indisponível: Executável não encontrado: agy",
+    "CLI incompatível com review estruturado; flags ausentes: --json-schema",
+])
+def test_protocol_failure_in_review_retries_only_same_head(tmp_path: Path, failure_message) -> None:
     store = SqliteExecutionStore(tmp_path / "state.db")
     run = advance(store, ExecutionPhase.WAITING_CI)
     original = store.transition(
@@ -261,12 +267,10 @@ def test_protocol_failure_in_review_retries_only_same_head(tmp_path: Path) -> No
     class ProtocolFailureEffects(Effects):
         def review_head(self, run, prior_findings):
             self.called("review")
-            raise AntigravityError(
-                "Falha do contrato estruturado do reviewer: SUCCESS sem structured_output"
-            )
+            raise AntigravityError(failure_message)
 
     failed_effects = ProtocolFailureEffects()
-    with pytest.raises(ResumeError, match="contrato estruturado"):
+    with pytest.raises(ResumeError, match="Retomada interrompida em GEMINI_REVIEWING"):
         service(store, Observer(lambda _run: snapshot), failed_effects).resume(37)
 
     preserved = store.get(original.id)

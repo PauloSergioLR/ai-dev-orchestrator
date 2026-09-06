@@ -83,13 +83,26 @@ class Runner:
     def __init__(self, output): self.output, self.calls = output, []
     def run(self, arguments, cwd=None, input_text=None):
         self.calls.append((arguments, cwd, input_text))
+        if arguments[-1] == "--version":
+            return CommandResult(0, "1.1.27")
+        if arguments[-1] == "--help":
+            return CommandResult(0, (Path(__file__).parents[1] / "fixtures/antigravity/help-1.1.27.txt").read_text(encoding="utf-8"))
         return CommandResult(0, self.output)
+
+def test_replays_observed_cli_review_envelope(tmp_path):
+    envelope = (Path(__file__).parents[1] / "fixtures/antigravity/review-1.1.27.json").read_text(encoding="utf-8")
+    result = AntigravityAdapter(60, Runner(envelope)).invoke("p", tmp_path, STRUCTURED_REVIEW_SCHEMA)
+    parsed = parse_structured_review(result, SHA, ("HIGH",))
+    assert parsed.verdict is ReviewVerdict.REJECTED
+    assert parsed.summary == "teste"
+    assert "toolAction" not in json.loads(result)
+
 
 def test_antigravity_uses_stdin_schema_and_explicit_worktree(tmp_path):
     runner = Runner(json.dumps({"status":"SUCCESS", "structured_output": json.loads(plan())}))
     prompt = "á\n" + "x" * 100001
     result = AntigravityAdapter(900, runner).invoke(prompt, tmp_path, REVIEW_PLAN_SCHEMA)
-    arguments, cwd, input_text = runner.calls[0]
+    arguments, cwd, input_text = runner.calls[-1]
     assert json.loads(result)["risks"] == ["evidência"]
     assert cwd == tmp_path and input_text == prompt and prompt not in arguments
     assert "--output-format" in arguments and "--json-schema" in arguments
@@ -100,63 +113,7 @@ def test_antigravity_uses_stdin_schema_and_explicit_worktree(tmp_path):
     assert "--mode" not in arguments and "plan" not in arguments
 
 
-def test_antigravity_regression_probe_isolates_headless_plan_mode(tmp_path):
-    """Reproduz deterministicamente o envelope observado após a Issue #44."""
-
-    class RegressionProbeRunner(Runner):
-        def __init__(self):
-            super().__init__("")
-
-        def run(self, arguments, cwd=None, input_text=None):
-            self.calls.append((arguments, cwd, input_text))
-            if "--mode" in arguments and arguments[arguments.index("--mode") + 1] == "plan":
-                envelope = {"status": "SUCCESS", "response": "Plano concluído"}
-            else:
-                envelope = {
-                    "status": "SUCCESS",
-                    "structured_output": json.loads(plan()),
-                }
-            return CommandResult(0, json.dumps(envelope))
-
-    runner = RegressionProbeRunner()
-
-    output = AntigravityAdapter(10, runner).invoke(
-        "revise", tmp_path, REVIEW_PLAN_SCHEMA
-    )
-
-    assert json.loads(output) == json.loads(plan())
-    assert "--sandbox" in runner.calls[0][0]
-    assert "--disable-slash-commands" in runner.calls[0][0]
-    assert "--mode" not in runner.calls[0][0]
-
-    corrected = list(runner.calls[0][0])
-    historical = [
-        argument
-        for argument in corrected
-        if argument not in {"--sandbox", "--disable-slash-commands"}
-    ]
-    historical.insert(historical.index("--print-timeout"), "--dangerously-skip-permissions")
-    sandbox_only = [
-        argument for argument in corrected if argument != "--disable-slash-commands"
-    ]
-    slash_disabled_only = [argument for argument in corrected if argument != "--sandbox"]
-    regressed = list(corrected)
-    regressed[regressed.index("--sandbox") + 1:regressed.index("--sandbox") + 1] = [
-        "--mode",
-        "plan",
-    ]
-
-    def has_structured_output(arguments):
-        result = runner.run(arguments, cwd=tmp_path, input_text="revise")
-        return isinstance(json.loads(result.stdout).get("structured_output"), dict)
-
-    assert has_structured_output(historical)
-    assert has_structured_output(sandbox_only)
-    assert has_structured_output(slash_disabled_only)
-    assert has_structured_output(corrected)
-    assert not has_structured_output(regressed)
-
-@pytest.mark.parametrize("envelope", ["bad", json.dumps({"status":"ERROR"}), json.dumps({"status":"SUCCESS"}), json.dumps({"status":"SUCCESS", "structured_output": []})])
+@pytest.mark.parametrize("envelope", ["bad", "[]", json.dumps({"status":"ERROR"}), json.dumps({"status":"SUCCESS"}), json.dumps({"status":"SUCCESS", "structured_output": []}), json.dumps({"status":"SUCCESS", "structured_output": {}, "error": "falhou"})])
 def test_antigravity_rejects_invalid_envelopes(tmp_path, envelope):
     with pytest.raises(AntigravityError):
         AntigravityAdapter(1, Runner(envelope)).invoke("p", tmp_path, STRUCTURED_REVIEW_SCHEMA)
@@ -172,6 +129,8 @@ def test_antigravity_does_not_expose_stdout_on_protocol_or_process_failure(tmp_p
 
     class FailedRunner(Runner):
         def run(self, arguments, cwd=None, input_text=None):
+            if arguments[-1] in {"--help", "--version"}:
+                return super().run(arguments, cwd, input_text)
             return CommandResult(2, stdout=secret)
 
     with pytest.raises(AntigravityError, match="saída omitida") as process:
@@ -215,6 +174,58 @@ def test_review_config_rejects_invalid_provider_and_accepts_low_blocking():
     assert ReviewConfig(blocking_severities=("LOW",)).blocking_severities == ("LOW",)
     with pytest.raises(ValueError):
         ReviewConfig(provider="other")
+
+
+@pytest.mark.parametrize("missing", ["--json-schema", "--print-timeout", "--model"])
+def test_runtime_blocks_missing_capability_before_prompt(tmp_path, missing):
+    class IncompatibleRunner(Runner):
+        def run(self, arguments, cwd=None, input_text=None):
+            result = super().run(arguments, cwd, input_text)
+            if arguments[-1] == "--help":
+                return CommandResult(0, result.stdout.replace(missing, "--unsupported"))
+            return result
+
+    runner = IncompatibleRunner("APPROVED")
+    with pytest.raises(AntigravityError, match=missing):
+        AntigravityAdapter(10, runner, model="explicit").invoke("p", tmp_path, {})
+    assert len(runner.calls) == 2
+    assert all(call[2] is None for call in runner.calls)
+
+
+@pytest.mark.parametrize("detail", ["Comando excedeu o timeout de 1s", "erro de processo"])
+def test_runtime_preserves_invocation_errors(tmp_path, detail):
+    class FailedRunner(Runner):
+        def run(self, arguments, cwd=None, input_text=None):
+            if input_text is not None:
+                return CommandResult(None, error=detail)
+            return super().run(arguments, cwd, input_text)
+
+    with pytest.raises(AntigravityError, match=detail):
+        AntigravityAdapter(1, FailedRunner("")).invoke("p", tmp_path, {})
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+@pytest.mark.parametrize("detail,kind", [
+    ("HTTP 429: rate limit", ProviderFailureKind.TRANSIENT_RATE_LIMIT),
+    ("quota exceeded", ProviderFailureKind.TERMINAL_QUOTA),
+])
+def test_runtime_classifies_real_string_error_envelope(tmp_path, detail, kind, exit_code):
+    class FailedRunner(Runner):
+        def run(self, arguments, cwd=None, input_text=None):
+            if input_text is not None:
+                return CommandResult(exit_code, json.dumps({"status": "ERROR", "error": detail}))
+            return super().run(arguments, cwd, input_text)
+
+    with pytest.raises(ProviderFailure) as failure:
+        AntigravityAdapter(1, FailedRunner("")).invoke("p", tmp_path, {})
+    assert failure.value.classification is kind
+
+
+def test_fractional_timeout_is_not_truncated_to_zero(tmp_path):
+    runner = Runner('{"status":"SUCCESS","structured_output":{}}')
+    AntigravityAdapter(0.5, runner).invoke("p", tmp_path, {})
+    args = runner.calls[-1][0]
+    assert args[args.index("--print-timeout") + 1] == "0.5s"
 
 
 def test_cli_uses_result_blocking_severities(capsys):

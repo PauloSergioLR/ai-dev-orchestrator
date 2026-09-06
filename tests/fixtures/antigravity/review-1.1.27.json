@@ -1,0 +1,12 @@
+{
+  "status": "SUCCESS",
+  "response": "{\"findings\":[],\"reviewed_head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"summary\":\"teste\",\"toolAction\":\"Finalizando teste de transporte\",\"toolSummary\":\"Teste de transporte\",\"verdict\":\"REJECTED\"}\n",
+  "duration_seconds": 4.2159468,
+  "num_turns": 1,
+  "structured_output": {
+    "findings": [],
+    "reviewed_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "summary": "teste",
+    "verdict": "REJECTED"
+  }
+}

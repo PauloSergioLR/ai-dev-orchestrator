@@ -13,6 +13,11 @@ orch doctor
 O comando apenas informa o estado de Python, CLIs, repositório Git e configuração.
 O Antigravity CLI é o executável local usado para a revisão com Gemini.
 Ele não corrige problemas, instala ferramentas, altera autenticação ou envia prompts para IAs.
+Doctor e runtime validam as mesmas flags da CLI configurada em `review.executable`
+(padrão `agy`, confirmado na CLI oficial). No Windows, um PATH desatualizado
+pode ser contornado com o caminho absoluto em `ORCH_REVIEW__EXECUTABLE`.
+O diagnóstico local não garante autenticação, quota nem resposta do modelo;
+cada review exige um `structured_output` válido. Veja [revisão Gemini](docs/review.md).
 
 ## Configuração inicial e uso diário
 

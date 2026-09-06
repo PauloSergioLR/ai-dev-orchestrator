@@ -54,6 +54,7 @@ poll_interval_seconds = 1
 timeout_seconds = 30
 
 [review]
+executable = "agy"
 max_correction_attempts = 3
 
 [supervisor]
@@ -92,7 +93,12 @@ entre leituras do GitHub após uma mutação remota, e `timeout_seconds` (padrã
 `30`) limita a espera total. O polling repete somente consultas e nunca repete
 push, criação de Pull Request, merge ou alteração de Project.
 
-Em `[review]`, `max_correction_attempts` define quantas correções após um
+Em `[review]`, `executable` define o nome no PATH ou caminho absoluto da CLI
+Antigravity; o padrão oficial é `agy`. `ORCH_REVIEW__EXECUTABLE` sobrescreve
+esse campo. Doctor, pipeline e recovery usam a mesma configuração; não há
+troca automática para Gemini CLI ou para o aplicativo gráfico Antigravity.
+Consulte o [contrato validado do reviewer](review.md).
+`max_correction_attempts` define quantas correções após um
 `REJECTED` podem ocorrer na mesma sessão Codex. O padrão é `3` e o valor deve
 ser um inteiro positivo.
 

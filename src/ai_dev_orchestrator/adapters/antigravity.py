@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -18,23 +19,54 @@ class AntigravityError(Exception):
 class AntigravityAdapter:
     """Cada chamada inicia um processo novo, com prompt exclusivamente no stdin."""
 
-    def __init__(self, timeout_seconds: float, runner: CommandRunner | None = None, model: str = "default") -> None:
+    def __init__(self, timeout_seconds: float, runner: CommandRunner | None = None, model: str = "default", executable: str = "agy") -> None:
         self.timeout_seconds = timeout_seconds
         self.runner = runner or CommandRunner(timeout=timeout_seconds)
         self.model = model
+        self.executable = executable
+
+    def check_available(self) -> str:
+        """Mesmo preflight local no doctor e antes de cada chamada headless."""
+        outputs = []
+        for flag in ("--version", "--help"):
+            result = self.runner.run([self.executable, flag])
+            if result.error:
+                raise AntigravityError(
+                    f"Antigravity indisponível: {result.error}. "
+                    "Configure review.executable (ORCH_REVIEW__EXECUTABLE) com o "
+                    "caminho da CLI ou ajuste o PATH do processo."
+                )
+            if not result.succeeded:
+                raise AntigravityError(
+                    f"Antigravity {flag} retornou código {result.returncode}; saída omitida"
+                )
+            outputs.append("\n".join((result.stdout, result.stderr)))
+        required = {
+            "--input-format", "--sandbox", "--disable-slash-commands",
+            "--print-timeout", "--output-format", "--json-schema",
+        }
+        if self.model != "default":
+            required.add("--model")
+        declared = set(re.findall(r"(?<![\w-])--[a-z][a-z-]*(?![\w-])", outputs[1]))
+        missing = sorted(required - declared)
+        if missing:
+            raise AntigravityError(
+                "CLI incompatível com review estruturado; flags ausentes: "
+                + ", ".join(missing)
+            )
+        return outputs[0].strip() or "disponível"
 
     def invoke(self, prompt: str, cwd: str | Path, schema: dict[str, Any]) -> str:
-        # `--mode plan` altera o contrato da execução headless e pode encerrar a
-        # chamada com SUCCESS sem materializar o resultado imposto por --json-schema.
-        # O sandbox mantém o reviewer contido sem trocar o modo de resposta.
+        self.check_available()
+        # stdin text foi validado na CLI 1.1.27; evita o limite de argv do Windows.
         arguments = [
-            "agy",
+            self.executable,
             "--input-format",
             "text",
             "--sandbox",
             "--disable-slash-commands",
             "--print-timeout",
-            f"{int(self.timeout_seconds)}s",
+            f"{self.timeout_seconds:g}s",
             "--output-format",
             "json",
             "--json-schema",
@@ -44,11 +76,8 @@ class AntigravityAdapter:
             arguments.extend(["--model", self.model])
         result = self.runner.run(arguments, cwd=cwd, input_text=prompt)
         if result.error:
-            kind = classify_provider_text(result.error)
-            if kind is not ProviderFailureKind.UNKNOWN:
-                raise ProviderFailure(
-                    "gemini", kind, "Falha ao invocar a CLI", datetime.now(timezone.utc)
-                )
+            # Erros locais do runner (timeout, resolução, UTF-8) não são um
+            # diagnóstico remoto do provider e devem permitir nova retomada.
             raise AntigravityError(f"Falha ao executar Antigravity: {result.error}")
         if not result.succeeded:
             detail = "\n".join((result.stderr, result.stdout))
@@ -64,6 +93,12 @@ class AntigravityAdapter:
             raise AntigravityError("Antigravity retornou envelope JSON inválido") from error
         if isinstance(envelope, dict) and envelope.get("status") != "SUCCESS":
             failure = envelope.get("error")
+            if isinstance(failure, str):
+                kind = classify_provider_text(failure)
+                if kind is not ProviderFailureKind.UNKNOWN:
+                    raise ProviderFailure(
+                        "gemini", kind, "Falha reportada pela CLI", datetime.now(timezone.utc)
+                    )
             if isinstance(failure, dict):
                 mapping = {"RATE_LIMIT": ProviderFailureKind.TRANSIENT_RATE_LIMIT, "QUOTA_EXCEEDED": ProviderFailureKind.TERMINAL_QUOTA, "AUTH_ERROR": ProviderFailureKind.AUTH_ERROR, "NETWORK_ERROR": ProviderFailureKind.NETWORK_ERROR, "MODEL_UNAVAILABLE": ProviderFailureKind.MODEL_UNAVAILABLE}
                 kind = mapping.get(str(failure.get("code", "")).upper(), ProviderFailureKind.UNKNOWN)
@@ -78,6 +113,8 @@ class AntigravityAdapter:
                 raise ProviderFailure("gemini", kind, "Falha reportada pela CLI", datetime.now(timezone.utc), retry_at)
         if not isinstance(envelope, dict) or envelope.get("status") != "SUCCESS":
             raise AntigravityError("Antigravity não retornou status SUCCESS")
+        if envelope.get("error"):
+            raise AntigravityError("Antigravity retornou SUCCESS com erro; saída omitida")
         structured_output = envelope.get("structured_output")
         if not isinstance(structured_output, dict):
             raise AntigravityError(
