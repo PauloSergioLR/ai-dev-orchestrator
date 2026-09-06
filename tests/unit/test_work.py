@@ -179,6 +179,24 @@ def test_work_issue_usa_branch_distinta_para_titulos_iguais(tmp_path: Path) -> N
     assert pipeline.calls[0][1] != pipeline.calls[1][1]
 
 
+def test_work_issue_falha_fechado_quando_lock_da_issue_ja_existe(tmp_path: Path) -> None:
+    work, _, _, pipeline, _, _ = service(tmp_path, (item(4),))
+    lock = tmp_path / "issue-4.lock"
+    lock.write_text("outro supervisor", encoding="ascii")
+
+    with pytest.raises(WorkError, match="exclusividade"):
+        work.work_issue(4)
+
+    assert pipeline.calls == []
+
+
+def test_candidatas_ready_nao_consultam_cada_issue(tmp_path: Path) -> None:
+    work, _, issues, _, _, _ = service(tmp_path, (item(4), item(7)))
+
+    assert work.eligible_issue_numbers() == (4, 7)
+    assert issues.calls == []
+
+
 def test_multiple_active_executions_fail_closed(tmp_path: Path) -> None:
     active = (SimpleNamespace(issue_number=1), SimpleNamespace(issue_number=2))
     work, projects, _, pipeline, resumer, _ = service(tmp_path, (), active=active)

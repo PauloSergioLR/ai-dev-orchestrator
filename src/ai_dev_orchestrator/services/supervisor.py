@@ -131,8 +131,10 @@ class SupervisorService:
     def _watch_parallel(self) -> None:
         """Agenda cada Issue uma vez por ciclo, até o limite configurado."""
         futures: dict[int, Future[WorkResult | None]] = {}
+        blocked_issues: set[int] = set()
         limit = self.config.execution.max_parallel_runs
-        with ThreadPoolExecutor(max_workers=limit, thread_name_prefix="orch-run") as pool:
+        pool = ThreadPoolExecutor(max_workers=limit, thread_name_prefix="orch-run")
+        try:
             while True:
                 for issue, future in tuple(futures.items()):
                     if not future.done():
@@ -140,12 +142,11 @@ class SupervisorService:
                     del futures[issue]
                     try:
                         result = future.result()
-                    except RunPipelineError:
-                        # Quota já foi checkpointada pelo pipeline; as demais
-                        # Issues não devem ficar paradas por essa espera.
-                        continue
                     except Exception as error:
-                        print(f"#{issue} interrompida: {error}")
+                        if self._is_quota_wait(issue):
+                            continue
+                        self._handle_task_failure(issue, error)
+                        blocked_issues.add(issue)
                         continue
                     if result is not None:
                         self._show_completion(result)
@@ -160,14 +161,29 @@ class SupervisorService:
                     futures[issue] = pool.submit(self._work_issue, issue)
 
                 occupied = set(active_by_issue) | set(futures)
-                vacancies = limit - max(len(active_by_issue), len(futures))
+                vacancies = limit - len(occupied)
                 if vacancies > 0:
-                    for issue in self._eligible_issue_numbers(occupied)[:vacancies]:
+                    excluded = occupied | blocked_issues
+                    for issue in self._eligible_issue_numbers(excluded)[:vacancies]:
                         futures[issue] = pool.submit(self._work_issue, issue)
 
                 if not active_by_issue and not futures:
-                    return
+                    break
                 self.sleep(self.config.supervisor.poll_interval_seconds)
+        except KeyboardInterrupt:
+            for run in self.store.list_active():
+                self.store.checkpoint(
+                    run.id, summary="Supervisor paralelo interrompido; checkpoint preservado"
+                )
+            # Não espera subprocessos de provider. A execução persistida e o
+            # lock por Issue impedem que uma retomada concorrente a dispute.
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+        except BaseException:
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            pool.shutdown(wait=True)
 
     def _work_issue(self, issue: int) -> WorkResult | None:
         # WorkService/RunPipeline mantêm estado transitório da execução. Uma
@@ -212,6 +228,29 @@ class SupervisorService:
                 )
                 return False
         return retry_at > datetime.now(timezone.utc)
+
+    def _is_quota_wait(self, issue: int) -> bool:
+        run = self.store.get_active_for_issue(issue)
+        return bool(
+            run
+            and run.phase
+            in {
+                ExecutionPhase.WAITING_CODEX_QUOTA,
+                ExecutionPhase.WAITING_GEMINI_QUOTA,
+            }
+        )
+
+    def _handle_task_failure(self, issue: int, error: Exception) -> None:
+        """Torna a falha terminal auditável e não repete a mesma tarefa."""
+        run = self.store.get_active_for_issue(issue)
+        if run is not None:
+            self.store.fail(run.id, error)
+        message = str(error)
+        if "AUTH_ERROR" in message or "MODEL_UNAVAILABLE" in message:
+            raise SupervisorError(
+                f"Falha global de provider; novos trabalhos foram interrompidos: {message}"
+            ) from error
+        print(f"#{issue} interrompida: {message}")
 
     def _show_completion(self, result: WorkResult) -> None:
         issue = result.run.issue_number if result.run else (result.resume.issue_number if result.resume else None)

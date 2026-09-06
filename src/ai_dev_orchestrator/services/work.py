@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
+import os
+from pathlib import Path
 import re
 import unicodedata
-from typing import Protocol
+from typing import Iterator, Protocol
 
 from ai_dev_orchestrator.adapters.git import GitWorktreeAdapter
 from ai_dev_orchestrator.adapters.github import GitHubIssueAdapter, GitHubProjectAdapter
@@ -151,44 +154,46 @@ class WorkService:
         separadas. A criação do registro no SQLite continua sendo a barreira
         durável contra duas execuções da mesma Issue.
         """
-        active = tuple(
-            run for run in self.store.list_active() if run.issue_number == issue_number
-        )
-        if len(active) > 1:
-            raise WorkError(f"Execuções ativas ambíguas para a Issue #{issue_number}")
-        if active:
-            return WorkResult(
-                resumed=True, resume=self.resume_service.resume(issue_number)
+        lock = self.config.state.database_path.with_name(f"issue-{issue_number}.lock")
+        with _issue_lock(lock, issue_number):
+            active = tuple(
+                run for run in self.store.list_active() if run.issue_number == issue_number
             )
+            if len(active) > 1:
+                raise WorkError(f"Execuções ativas ambíguas para a Issue #{issue_number}")
+            if active:
+                return WorkResult(
+                    resumed=True, resume=self.resume_service.resume(issue_number)
+                )
 
-        try:
-            selected = self._select_issue(issue_number)
-        except Exception as error:
-            raise WorkError(f"Falha ao selecionar a Issue #{issue_number}: {error}") from error
-        if selected is None:
-            return None
-        item, issue = selected
-        branch = _parallel_branch_from_title(issue.title, issue.number)
-        try:
-            remote_base = self.base_synchronizer.prepare_remote_base(
-                self.config.workspace.repository_path,
-                self.config.workspace.remote_name,
-                self.config.workspace.base_ref,
-                branch,
+            try:
+                selected = self._select_issue(issue_number)
+            except Exception as error:
+                raise WorkError(f"Falha ao selecionar a Issue #{issue_number}: {error}") from error
+            if selected is None:
+                return None
+            item, issue = selected
+            branch = _parallel_branch_from_title(issue.title, issue.number)
+            try:
+                remote_base = self.base_synchronizer.prepare_remote_base(
+                    self.config.workspace.repository_path,
+                    self.config.workspace.remote_name,
+                    self.config.workspace.base_ref,
+                    branch,
+                )
+            except Exception as error:
+                raise WorkError(f"Falha ao sincronizar a base remota: {error}") from error
+            return WorkResult(
+                resumed=False,
+                run=self.pipeline.run(item.issue_number or issue.number, branch, base_ref=remote_base),
             )
-        except Exception as error:
-            raise WorkError(f"Falha ao sincronizar a base remota: {error}") from error
-        return WorkResult(
-            resumed=False,
-            run=self.pipeline.run(item.issue_number or issue.number, branch, base_ref=remote_base),
-        )
 
     def eligible_issue_numbers(self, excluded: set[int] | None = None) -> tuple[int, ...]:
-        """Retorna Issues Ready em ordem estável para o scheduler."""
+        """Retorna candidatas Ready em ordem estável, sem consultas N+1."""
         excluded = excluded or set()
         return tuple(
             item.issue_number
-            for item, issue in self._eligible_issues()
+            for item in self._candidate_items()
             if item.issue_number is not None and item.issue_number not in excluded
         )
 
@@ -200,14 +205,6 @@ class WorkService:
             if issue.state == "OPEN":
                 return item, issue
         return None
-
-    def _eligible_issues(self) -> tuple[tuple[ProjectItem, Issue], ...]:
-        eligible: list[tuple[ProjectItem, Issue]] = []
-        for item in self._candidate_items():
-            issue = self.issue_reader.get_issue(item.issue_number or 0)
-            if issue.state == "OPEN":
-                eligible.append((item, issue))
-        return tuple(eligible)
 
     def _candidate_items(self) -> list[ProjectItem]:
         candidates = [
@@ -228,3 +225,21 @@ class WorkService:
             )
         )
         return candidates
+
+
+@contextmanager
+def _issue_lock(path: Path, issue_number: int) -> Iterator[None]:
+    """Reserva localmente uma Issue até o checkpoint que cria a execução."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError as error:
+        raise WorkError(
+            f"Não foi possível provar exclusividade para a Issue #{issue_number}"
+        ) from error
+    try:
+        os.write(descriptor, str(os.getpid()).encode("ascii"))
+        yield
+    finally:
+        os.close(descriptor)
+        path.unlink(missing_ok=True)

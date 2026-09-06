@@ -43,7 +43,7 @@ from ai_dev_orchestrator.services.recovery_executor import RecoveryExecutor
 from ai_dev_orchestrator.services.recovery_planner import RecoveryPlanner
 from ai_dev_orchestrator.services.resume import ResumeService
 from ai_dev_orchestrator.services.resume import ResumeError
-from ai_dev_orchestrator.services.supervisor import SupervisorService
+from ai_dev_orchestrator.services.supervisor import SupervisorError, SupervisorService
 
 
 def _config(tmp_path: Path, max_parallel_runs: int = 1, **providers: str) -> OrchestratorConfig:
@@ -481,7 +481,54 @@ def test_supervisor_paralelo_inicia_issues_distintas_ate_o_limite(tmp_path: Path
         ).watch()
 
     assert work.calls == [3, 7]
-    assert [run.issue_number for run in store.list_active()] == [3, 7]
+
+
+def test_falha_paralela_e_terminal_nao_fica_ativa(tmp_path: Path) -> None:
+    config = _config(tmp_path, max_parallel_runs=2)
+    store = SqliteExecutionStore(config.state.database_path)
+    run = store.create(44, branch="work/falha")
+    supervisor = SupervisorService(config, object(), store)
+
+    supervisor._handle_task_failure(44, RunPipelineError("falha local"))
+
+    assert store.get(run.id).phase == ExecutionPhase.FAILED
+
+
+def test_falha_global_de_provider_interrompe_novos_trabalhos(tmp_path: Path) -> None:
+    config = _config(tmp_path, max_parallel_runs=2)
+    store = SqliteExecutionStore(config.state.database_path)
+    supervisor = SupervisorService(config, object(), store)
+
+    with pytest.raises(SupervisorError, match="Falha global"):
+        supervisor._handle_task_failure(44, RunPipelineError("codex: AUTH_ERROR: login"))
+
+
+def test_ctrl_c_paralelo_preserva_checkpoint_de_todas_as_execucoes(tmp_path: Path) -> None:
+    config = _config(tmp_path, max_parallel_runs=2)
+    store = SqliteExecutionStore(config.state.database_path)
+    first = store.create(3, branch="work/first")
+    second = store.create(7, branch="work/second")
+
+    class Work:
+        def eligible_issue_numbers(self, excluded):
+            return ()
+
+        def work_issue(self, issue):
+            return None
+
+    with pytest.raises(KeyboardInterrupt):
+        SupervisorService(
+            config,
+            Work(),
+            store,
+            lambda _: (_ for _ in ()).throw(KeyboardInterrupt),
+            work_service_factory=Work,
+        ).watch()
+
+    assert all(
+        store.events(run.id)[-1].summary.endswith("checkpoint preservado")
+        for run in (first, second)
+    )
 
 
 @pytest.mark.parametrize(
