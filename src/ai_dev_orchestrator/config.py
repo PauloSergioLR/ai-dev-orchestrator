@@ -135,6 +135,7 @@ class ReviewConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     provider: str = Field(default="antigravity", min_length=1)
+    executable: str = Field(default="agy", min_length=1)
     timeout_seconds: float = Field(default=900, gt=0)
     max_correction_attempts: int = Field(default=3, gt=0)
     blocking_severities: tuple[str, ...] = ("CRITICAL", "HIGH", "MEDIUM")

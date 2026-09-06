@@ -246,7 +246,8 @@ class RunPipeline:
             GitHubCiAdapter(config),
             pull_requests,
             AntigravityAdapter(
-                config.review.timeout_seconds, model=config.providers.gemini_model
+                config.review.timeout_seconds, model=config.providers.gemini_model,
+                executable=config.review.executable,
             ),
             pull_requests,
             SqliteExecutionStore(config.state.database_path),
