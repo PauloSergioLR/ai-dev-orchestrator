@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Event, Thread
 from types import SimpleNamespace
 
 import pytest
@@ -220,6 +221,22 @@ def test_lock_de_repositorio_serializa_preparo_de_base(tmp_path: Path) -> None:
         with pytest.raises(WorkError, match="repositório"):
             with _repository_lock(lock):
                 pass
+
+
+def test_lock_de_repositorio_aguarda_contencao_legitima(tmp_path: Path) -> None:
+    lock = tmp_path / "repository-base.lock"
+    acquired = Event()
+
+    def contender() -> None:
+        with _repository_lock(lock, wait_seconds=1):
+            acquired.set()
+
+    with _repository_lock(lock):
+        thread = Thread(target=contender)
+        thread.start()
+        assert not acquired.wait(0.05)
+    assert acquired.wait(1)
+    thread.join()
 
 
 def test_candidatas_ready_nao_consultam_cada_issue(tmp_path: Path) -> None:

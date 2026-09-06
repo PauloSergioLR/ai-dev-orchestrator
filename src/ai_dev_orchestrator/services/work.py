@@ -8,6 +8,7 @@ from hashlib import sha256
 import os
 from pathlib import Path
 import re
+import time
 import unicodedata
 from typing import Iterator, Protocol
 
@@ -176,7 +177,8 @@ class WorkService:
             )
             try:
                 with _repository_lock(
-                    self.config.state.database_path.with_name("repository-base.lock")
+                    self.config.state.database_path.with_name("repository-base.lock"),
+                    self.config.supervisor.max_sleep_seconds,
                 ):
                     remote_base = self.base_synchronizer.prepare_remote_base(
                         self.config.workspace.repository_path,
@@ -256,24 +258,28 @@ def _issue_lock(path: Path, issue_number: int) -> Iterator[None]:
 
 
 @contextmanager
-def _repository_lock(path: Path) -> Iterator[None]:
+def _repository_lock(path: Path, wait_seconds: float = 0) -> Iterator[None]:
     """Serializa mutações da base Git compartilhada entre worktrees."""
-    with _file_lock(path, "repositório"):
+    with _file_lock(path, "repositório", wait_seconds):
         yield
 
 
 @contextmanager
-def _file_lock(path: Path, resource: str) -> Iterator[None]:
+def _file_lock(path: Path, resource: str, wait_seconds: float = 0) -> Iterator[None]:
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError as error:
-        if not _remove_orphan_lock(path):
-            raise WorkError(f"Não foi possível provar exclusividade para {resource}") from error
+    deadline = time.monotonic() + wait_seconds
+    while True:
         try:
             descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError as retry_error:
-            raise WorkError(f"Não foi possível provar exclusividade para {resource}") from retry_error
+            break
+        except FileExistsError as error:
+            if _remove_orphan_lock(path):
+                continue
+            if time.monotonic() >= deadline:
+                raise WorkError(
+                    f"Não foi possível provar exclusividade para {resource}"
+                ) from error
+            time.sleep(min(0.05, max(0, deadline - time.monotonic())))
     try:
         os.write(descriptor, str(os.getpid()).encode("ascii"))
         yield
