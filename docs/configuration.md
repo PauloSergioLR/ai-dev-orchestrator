@@ -60,6 +60,11 @@ max_correction_attempts = 3
 [supervisor]
 poll_interval_seconds = 60
 max_sleep_seconds = 300
+
+[cleanup]
+auto_cleanup = false
+remove_local_branch = false
+remove_remote_branch = false
 ```
 
 Em `[github]`, `owner`, `repository` e `ready_status` devem ser textos não
@@ -115,6 +120,11 @@ usados ficam registrados no run e não podem ser trocados silenciosamente.
 `orch watch` usa `[supervisor]` para polling conservador. Nenhum horário de reset
 é inferido. `retry_without_reset_seconds` é opcional e somente deve ser definido
 quando o projeto possuir uma política segura de retry sem horário do provider.
+
+Em `[cleanup]`, todas as opções começam desabilitadas. Mesmo quando habilitado,
+o cleanup só atua em `COMPLETED`, recusa worktree sujo, base/destino/branches
+protegidas e só remove referência remota após a confirmação persistida do merge
+do HEAD esperado. Uma falha é registrada como pendência e não muda a conclusão.
 
 ## Variáveis de ambiente
 

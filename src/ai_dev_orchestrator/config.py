@@ -208,6 +208,16 @@ class SupervisorConfig(BaseModel):
     retry_without_reset_seconds: float | None = Field(default=None, gt=0)
 
 
+class CleanupConfig(BaseModel):
+    """Política explícita e conservadora para artefatos já concluídos."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    auto_cleanup: StrictBool = False
+    remove_local_branch: StrictBool = False
+    remove_remote_branch: StrictBool = False
+
+
 class _EnvironmentSettingsSource(PydanticBaseSettingsSource):
     """Converte o booleano textual de ambiente sem relaxar o TOML."""
 
@@ -248,6 +258,7 @@ class OrchestratorConfig(BaseSettings):
     review: ReviewConfig = Field(default_factory=ReviewConfig)
     providers: ProviderConfig = Field(default_factory=ProviderConfig)
     supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
+    cleanup: CleanupConfig = Field(default_factory=CleanupConfig)
 
     @classmethod
     def settings_customise_sources(

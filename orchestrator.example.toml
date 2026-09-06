@@ -52,3 +52,9 @@ poll_interval_seconds = 60
 max_sleep_seconds = 300
 # Defina apenas se sua política aceitar retries sem horário informado pelo provider.
 # retry_without_reset_seconds = 1800
+
+[cleanup]
+# O padrão preserva branches; o cleanup automático também começa desabilitado.
+auto_cleanup = false
+remove_local_branch = false
+remove_remote_branch = false

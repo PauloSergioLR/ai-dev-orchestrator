@@ -104,6 +104,54 @@ class GitWorktreeAdapter:
             "remover o worktree",
         )
 
+    def worktree_is_clean(self, repository: str | Path, worktree_path: str | Path) -> bool:
+        """Só autoriza remoção quando Git confirma ausência de alterações locais."""
+        repository_root = self.validate_repository(repository)
+        path = self._path_from_repository(repository_root, worktree_path)
+        result = self._run(
+            ["git", "-C", str(path), "status", "--porcelain"],
+            "verificar alterações no worktree",
+        )
+        return not result.stdout.strip()
+
+    def delete_local_branch(self, repository: str | Path, branch: str) -> None:
+        """Remove apenas branch já integrada; ``-d`` recusa histórico não mergeado."""
+        repository_root = self.validate_repository(repository)
+        self._run(
+            ["git", "-C", str(repository_root), "branch", "-d", "--", branch],
+            "remover a branch local",
+        )
+
+    def local_branch_exists(self, repository: str | Path, branch: str) -> bool:
+        repository_root = self.validate_repository(repository)
+        result = self.runner.run(
+            ["git", "-C", str(repository_root), "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"]
+        )
+        if result.error:
+            raise GitWorktreeError(f"Não foi possível verificar a branch local: {result.error}")
+        if result.returncode not in {0, 1}:
+            self._raise_git_failure(result, "verificar a branch local")
+        return result.returncode == 0
+
+    def delete_remote_branch(self, repository: str | Path, remote_name: str, branch: str) -> None:
+        """Solicita remoção remota sem force; a elegibilidade é decidida no serviço."""
+        repository_root = self.validate_repository(repository)
+        self._run(
+            ["git", "-C", str(repository_root), "push", remote_name, "--delete", branch],
+            "remover a branch remota",
+        )
+
+    def remote_branch_exists(self, repository: str | Path, remote_name: str, branch: str) -> bool:
+        repository_root = self.validate_repository(repository)
+        result = self.runner.run(
+            ["git", "-C", str(repository_root), "ls-remote", "--exit-code", "--heads", "--", remote_name, f"refs/heads/{branch}"]
+        )
+        if result.error:
+            raise GitWorktreeError(f"Não foi possível verificar a branch remota: {result.error}")
+        if result.returncode not in {0, 2}:
+            self._raise_git_failure(result, "verificar a branch remota")
+        return result.returncode == 0
+
     def _validate_branch(self, repository_root: Path, branch: str) -> None:
         if not branch:
             raise GitWorktreeError("O nome da branch é inválido")

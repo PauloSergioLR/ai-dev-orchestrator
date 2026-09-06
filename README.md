@@ -70,6 +70,14 @@ continuam disponíveis para operação e diagnóstico explícitos.
 
 ## Configuração
 
+## Histórico e cleanup
+
+`orch history` (ou `orch history --issue N`) mostra o histórico local, duração,
+esperas de CI/quota, revisões, correções, modelos, merge, Project e cleanup sem
+expor logs dos providers. `orch cleanup --issue N` remove somente o worktree
+limpo de uma execução `COMPLETED`; a política pode permitir também branches.
+Por padrão, o cleanup automático e a remoção de branches permanecem desabilitados.
+
 Crie sua configuração local a partir do exemplo:
 
 ```powershell
