@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import timedelta
 
-from ai_dev_orchestrator.domain.execution import ExecutionEvent, ExecutionPhase, RunRecord
+from ai_dev_orchestrator.domain.execution import (
+    ExecutionEvent,
+    ExecutionPhase,
+    RunRecord,
+    TERMINAL_PHASES,
+)
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
 
 
@@ -27,14 +32,23 @@ class HistoryService:
 
     def metrics(self, run: RunRecord) -> ExecutionMetrics:
         events = self.store.events(run.id)
-        ci_wait = _time_in(events, {ExecutionPhase.WAITING_CI}, run.updated_at)
+        ended_at = _execution_end(events, run)
+        ci_wait = _time_in(events, {ExecutionPhase.WAITING_CI}, ended_at)
         quota_wait = _time_in(
             events,
             {ExecutionPhase.WAITING_CODEX_QUOTA, ExecutionPhase.WAITING_GEMINI_QUOTA},
-            run.updated_at,
+            ended_at,
         )
         reviews = sum(event.summary == "Review independente persistida" for event in events)
-        return ExecutionMetrics(run, run.updated_at - run.created_at, ci_wait, quota_wait, reviews)
+        return ExecutionMetrics(run, ended_at - run.created_at, ci_wait, quota_wait, reviews)
+
+
+def _execution_end(events: tuple[ExecutionEvent, ...], run: RunRecord):
+    """Usa a transição terminal original, não checkpoints operacionais posteriores."""
+    for event in events:
+        if event.phase in TERMINAL_PHASES and event.previous_phase != event.phase:
+            return event.created_at
+    return run.updated_at
 
 
 def _time_in(events: tuple[ExecutionEvent, ...], phases: set[ExecutionPhase], end) -> timedelta:
