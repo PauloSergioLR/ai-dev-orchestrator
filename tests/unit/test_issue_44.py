@@ -46,7 +46,7 @@ from ai_dev_orchestrator.services.resume import ResumeError
 from ai_dev_orchestrator.services.supervisor import SupervisorService
 
 
-def _config(tmp_path: Path, **providers: str) -> OrchestratorConfig:
+def _config(tmp_path: Path, max_parallel_runs: int = 1, **providers: str) -> OrchestratorConfig:
     return OrchestratorConfig(
         github={
             "owner": "acme",
@@ -62,7 +62,7 @@ def _config(tmp_path: Path, **providers: str) -> OrchestratorConfig:
             "base_branch": "develop",
         },
         providers=providers,
-        execution={"max_attempts": 1, "max_parallel_runs": 1, "auto_merge": False},
+        execution={"max_attempts": 1, "max_parallel_runs": max_parallel_runs, "auto_merge": False},
         state={"database_path": tmp_path / "state.db"},
     )
 
@@ -453,6 +453,35 @@ def test_supervisor_nao_converte_erro_sem_checkpoint_de_quota(tmp_path: Path) ->
 
     with pytest.raises(RunPipelineError, match="terminal"):
         SupervisorService(config, Work(), store, lambda _: None).watch()
+
+
+def test_supervisor_paralelo_inicia_issues_distintas_ate_o_limite(tmp_path: Path) -> None:
+    config = _config(tmp_path, max_parallel_runs=2)
+    store = SqliteExecutionStore(config.state.database_path)
+
+    class Work:
+        calls: list[int] = []
+
+        def eligible_issue_numbers(self, excluded):
+            return tuple(issue for issue in (3, 7, 9) if issue not in excluded)
+
+        def work_issue(self, issue):
+            self.calls.append(issue)
+            store.create(issue, branch=f"work/issue-{issue}")
+            return None
+
+    work = Work()
+
+    def interrupt(_: float) -> None:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        SupervisorService(
+            config, work, store, interrupt, work_service_factory=lambda: work
+        ).watch()
+
+    assert work.calls == [3, 7]
+    assert [run.issue_number for run in store.list_active()] == [3, 7]
 
 
 @pytest.mark.parametrize(

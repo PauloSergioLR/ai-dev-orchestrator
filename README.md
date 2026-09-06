@@ -47,11 +47,12 @@ confirma somente escolhas ambíguas e grava atomicamente o perfil humano em
 `orchestrator.toml`. `AGENTS.md` melhora as sugestões, mas não é obrigatório e
 seu texto nunca é executado como comando.
 
-`orch watch` usa o mesmo `WorkService` e recovery em modo sequencial. Quando um
-provider informa de forma confiável a próxima tentativa, aguarda sem busy-loop e
-retoma a mesma execução, sessão, worktree, branch, PR e HEAD. Sem esse horário (ou
-uma política local explícita), para de modo seguro e pede intervenção. `Ctrl+C`
-encerra o supervisor sem apagar checkpoints.
+`orch watch` é sequencial por padrão (`max_parallel_runs = 1`). Com valor maior,
+agenda Issues Ready em ordem determinística até o limite e mantém uma instância de
+trabalho, sessão, worktree, branch, PR e HEAD para cada execução. Esperas de quota
+permanecem checkpointadas sem bloquear as demais Issues. Sem um horário confiável
+de nova tentativa (ou uma política local explícita), para aquela execução de modo
+seguro e pede intervenção. `Ctrl+C` encerra o supervisor sem apagar checkpoints.
 
 ## Execução manual de Issue
 

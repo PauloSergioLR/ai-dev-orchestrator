@@ -169,6 +169,16 @@ def test_active_execution_resumes_without_reading_project(tmp_path: Path) -> Non
     assert pipeline.calls == sync.calls == []
 
 
+def test_work_issue_usa_branch_distinta_para_titulos_iguais(tmp_path: Path) -> None:
+    work, _, _, pipeline, _, _ = service(tmp_path, (item(4), item(7)))
+
+    work.work_issue(4)
+    work.work_issue(7)
+
+    assert [call[0] for call in pipeline.calls] == [4, 7]
+    assert pipeline.calls[0][1] != pipeline.calls[1][1]
+
+
 def test_multiple_active_executions_fail_closed(tmp_path: Path) -> None:
     active = (SimpleNamespace(issue_number=1), SimpleNamespace(issue_number=2))
     work, projects, _, pipeline, resumer, _ = service(tmp_path, (), active=active)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 import re
 import unicodedata
 from typing import Protocol
@@ -72,6 +73,12 @@ def branch_from_title(title: str, issue_number: int | None = None) -> str:
     return f"work/{slug}"
 
 
+def _parallel_branch_from_title(title: str, issue_number: int) -> str:
+    """Evita colisão de worktree para títulos iguais sem expor o número da Issue."""
+    suffix = sha256(str(issue_number).encode()).hexdigest()[:8]
+    return f"{branch_from_title(title, issue_number)}-{suffix}"
+
+
 class WorkService:
     """Retoma primeiro; na ausência de execução ativa, inicia a próxima Issue."""
 
@@ -137,7 +144,72 @@ class WorkService:
         result = self.pipeline.run(item.issue_number or issue.number, branch, base_ref=remote_base)
         return WorkResult(resumed=False, run=result)
 
-    def _select_issue(self) -> tuple[ProjectItem, Issue] | None:
+    def work_issue(self, issue_number: int) -> WorkResult | None:
+        """Processa somente uma Issue, sem assumir exclusividade global.
+
+        O supervisor usa esta entrada para manter as identidades das execuções
+        separadas. A criação do registro no SQLite continua sendo a barreira
+        durável contra duas execuções da mesma Issue.
+        """
+        active = tuple(
+            run for run in self.store.list_active() if run.issue_number == issue_number
+        )
+        if len(active) > 1:
+            raise WorkError(f"Execuções ativas ambíguas para a Issue #{issue_number}")
+        if active:
+            return WorkResult(
+                resumed=True, resume=self.resume_service.resume(issue_number)
+            )
+
+        try:
+            selected = self._select_issue(issue_number)
+        except Exception as error:
+            raise WorkError(f"Falha ao selecionar a Issue #{issue_number}: {error}") from error
+        if selected is None:
+            return None
+        item, issue = selected
+        branch = _parallel_branch_from_title(issue.title, issue.number)
+        try:
+            remote_base = self.base_synchronizer.prepare_remote_base(
+                self.config.workspace.repository_path,
+                self.config.workspace.remote_name,
+                self.config.workspace.base_ref,
+                branch,
+            )
+        except Exception as error:
+            raise WorkError(f"Falha ao sincronizar a base remota: {error}") from error
+        return WorkResult(
+            resumed=False,
+            run=self.pipeline.run(item.issue_number or issue.number, branch, base_ref=remote_base),
+        )
+
+    def eligible_issue_numbers(self, excluded: set[int] | None = None) -> tuple[int, ...]:
+        """Retorna Issues Ready em ordem estável para o scheduler."""
+        excluded = excluded or set()
+        return tuple(
+            item.issue_number
+            for item, issue in self._eligible_issues()
+            if item.issue_number is not None and item.issue_number not in excluded
+        )
+
+    def _select_issue(self, only_issue: int | None = None) -> tuple[ProjectItem, Issue] | None:
+        for item in self._candidate_items():
+            if only_issue is not None and item.issue_number != only_issue:
+                continue
+            issue = self.issue_reader.get_issue(item.issue_number or 0)
+            if issue.state == "OPEN":
+                return item, issue
+        return None
+
+    def _eligible_issues(self) -> tuple[tuple[ProjectItem, Issue], ...]:
+        eligible: list[tuple[ProjectItem, Issue]] = []
+        for item in self._candidate_items():
+            issue = self.issue_reader.get_issue(item.issue_number or 0)
+            if issue.state == "OPEN":
+                eligible.append((item, issue))
+        return tuple(eligible)
+
+    def _candidate_items(self) -> list[ProjectItem]:
         candidates = [
             item
             for item in self.project_reader.list_items()
@@ -155,8 +227,4 @@ class WorkService:
                 item.issue_number or 0,
             )
         )
-        for item in candidates:
-            issue = self.issue_reader.get_issue(item.issue_number or 0)
-            if issue.state == "OPEN":
-                return item, issue
-        return None
+        return candidates

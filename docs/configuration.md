@@ -75,7 +75,9 @@ maiores que zero. `auto_merge` deve ser estritamente `true` ou `false` e
 permanece `false` no exemplo. Quando habilitado, o merge commit só é executado
 depois de review aprovado, CI verde e revalidação final do PR e do HEAD local.
 `merge_timeout_seconds` define o limite positivo, em segundos, da chamada de
-merge ao GitHub.
+merge ao GitHub. `max_parallel_runs = 1` preserva o supervisor sequencial;
+valores maiores habilitam execuções independentes, até esse limite, em ordem de
+prioridade e número da Issue.
 
 Campos fora dos grupos documentados ou com nomes incorretos são rejeitados, para que
 erros de digitação não passem despercebidos.
