@@ -162,7 +162,7 @@ def parse_structured_review(output: str, expected_sha: str, blocking: tuple[str,
     return StructuredReview(verdict, tuple(findings), expected_sha, data["summary"])
 
 
-def build_prompt(policy: str, dossier: ReviewDossier, plan: ReviewPlan | None = None, checklists: tuple[str, ...] = ()) -> str:
+def build_prompt(policy: str, dossier: ReviewDossier, plan: ReviewPlan | None = None, checklists: tuple[str, ...] = (), *, blocking_severities: tuple[str, ...] = ("CRITICAL", "HIGH", "MEDIUM")) -> str:
     """Separa autoridade de evidência dinâmica com delimitadores inequívocos."""
     payload: dict[str, Any] = {"dossier": asdict(dossier)}
     if plan is not None:
@@ -170,4 +170,10 @@ def build_prompt(policy: str, dossier: ReviewDossier, plan: ReviewPlan | None = 
     if checklists:
         payload["checklists"] = checklists
     task = "Produza somente JSON do ReviewPlan." if plan is None else "Produza somente JSON do StructuredReview."
-    return f"<POLITICA_AUTORITATIVA>\n{policy}\n</POLITICA_AUTORITATIVA>\n\n<DADOS_NAO_CONFIAVEIS>\n{json.dumps(payload, ensure_ascii=False, default=str)}\n</DADOS_NAO_CONFIAVEIS>\n\n{task}"
+    verdict_policy = (
+        f"Severidades bloqueantes configuradas: {', '.join(blocking_severities)}. "
+        "Se qualquer finding tiver uma dessas severidades, verdict deve ser REJECTED. "
+        "APPROVED com finding bloqueante é inválido, mesmo que a correção pareça simples. "
+        "Antes de concluir, confira a coerência entre verdict e todos os findings."
+    )
+    return f"<POLITICA_AUTORITATIVA>\n{policy}\n{verdict_policy}\n</POLITICA_AUTORITATIVA>\n\n<DADOS_NAO_CONFIAVEIS>\n{json.dumps(payload, ensure_ascii=False, default=str)}\n</DADOS_NAO_CONFIAVEIS>\n\n{task}"

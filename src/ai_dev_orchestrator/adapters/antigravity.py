@@ -115,6 +115,14 @@ class AntigravityAdapter:
             raise AntigravityError("Antigravity não retornou status SUCCESS")
         if envelope.get("error"):
             raise AntigravityError("Antigravity retornou SUCCESS com erro; saída omitida")
+        if "denied_actions" in envelope and envelope["denied_actions"] != []:
+            # A CLI pode encerrar com SUCCESS após negar comandos em headless.
+            # Mesmo um objeto estruturado não prova que a revisão foi concluída.
+            raise AntigravityError(
+                "Antigravity retornou denied_actions: revisão incompleta por "
+                "bloqueio de permissões. O reviewer headless deve analisar o dossier "
+                "sem executar comandos; nenhuma aprovação foi registrada"
+            )
         structured_output = envelope.get("structured_output")
         if not isinstance(structured_output, dict):
             raise AntigravityError(

@@ -21,7 +21,7 @@
   `response` incluiu texto adicional e metadados de ferramenta, confirmando
   que esse campo não pode substituir o resultado estruturado.
 
-## Diagnóstico e limites
+## Diagnóstico inicial e limites dos probes sintéticos
 
 O erro `Executável não encontrado: agy` decorre da resolução do nome pelo
 `CommandRunner`, antes de enviar o prompt. A mudança para `-p` não corrige essa
@@ -29,7 +29,7 @@ etapa. Nesta sessão, o nome foi encontrado; não dispomos do PATH do processo q
 falhou anteriormente para atribuir a falha a uma instalação ou sessão específica.
 O caminho configurável permite eliminar essa dependência do PATH.
 
-O erro histórico `SUCCESS` sem `structured_output` não foi reproduzido nos
+O erro histórico `SUCCESS` sem `structured_output` não foi reproduzido nos primeiros
 probes da versão instalada. Não há evidência suficiente para declarar que
 `--mode plan`, stdin ou `--json-schema` foram a causa original. O teste antigo
 que fabricava essa causalidade foi removido. Ausência do objeto continua sendo
@@ -47,8 +47,46 @@ mantendo `GEMINI_REVIEWING` recuperável. A classificação de quota/rate limit
 nas respostas do provider foi preservada, incluindo o campo `error` textual
 documentado pela CLI.
 
-Nenhum probe executou `orch watch`, alterou SQLite ou retomou a sessão Codex
-persistida. A retomada é exercitada pelos testes de recovery no banco temporário;
+## Reprodução com o dossier real após o PR #54
+
+Após novo relato de falha, a chamada real de revisão foi autorizada pelo usuário
+e repetida isoladamente, sem executar o supervisor ou persistir seu resultado.
+O SQLite foi aberto com `mode=ro` somente para ler a identidade da execução.
+
+- Issue #45, PR #49, HEAD `47dd5dc88eb2953eb600a3fee74841d2533c9416`.
+- O planner recebeu 73.195 caracteres de prompt, no worktree real, usando
+  a política anterior e `REVIEW_PLAN_SCHEMA`.
+- A falha foi reproduzida duas vezes: exit code 0, `status: SUCCESS`,
+  `response` vazia, ausência de `structured_output` e uma ação `command`
+  em `denied_actions`. stderr indicava negação de permissão.
+- A documentação oficial descreve essa negação em headless: comandos que
+  exigem aprovação podem ser negados e a CLI ainda encerrar com código 0.
+- A política anterior proibia mutações, mas não proibia executar verificações
+  de leitura/testes. Os probes simples pediam expressamente que nenhuma ferramenta
+  fosse usada; por isso não cobriam o comportamento do dossier real.
+
+A correção explicita análise exclusivamente do dossier, sem executar comandos
+ou consultar ferramentas externas. Evidência insuficiente deve produzir lacuna
+e rejeição, nunca sucesso presumido. O adapter identifica `denied_actions`
+antes de aceitar o objeto estruturado, sem registrar display_name ou stderr.
+Nenhuma configuração de permissão da CLI foi ampliada.
+
+Com essa política, ambas as etapas reais passaram a retornar `structured_output`
+sem ações negadas nem stderr. A primeira análise final retornou APPROVED com
+finding bloqueante e foi corretamente recusada pelo parser. As severidades
+configuradas não eram comunicadas ao modelo; agora o pipeline as inclui nas duas
+etapas com a regra explícita de coerência do verdict. A validação permanece estrita.
+
+A repetição final com a política completa concluiu as duas chamadas reais:
+exit code 0, SUCCESS, objeto estruturado, nenhuma ação negada e stderr vazio.
+`parse_review_plan`, `parse_structured_review` e as revalidações de HEAD passaram;
+o resultado foi APPROVED sem findings para o mesmo HEAD. Esse resultado foi
+usado somente como diagnóstico, sem ser persistido ou autorizar merge.
+Após a chamada, a execução continuava em GEMINI_REVIEWING com `review_verdict`
+e `reviewed_head_sha` nulos, e o worktree original permaneceu limpo.
+
+Nenhum diagnóstico executou `orch watch`, alterou SQLite ou retomou a sessão
+Codex persistida. A retomada é exercitada pelos testes no banco temporário;
 uma retomada real continua sujeita ao estado remoto e às credenciais naquele momento.
 
 ## Fontes primárias

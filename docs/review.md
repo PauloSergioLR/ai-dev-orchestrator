@@ -38,9 +38,30 @@ estruturado bloqueia a revisão. A validação de domínio ainda exige todos os
 campos, verdict conhecido, findings coerentes e SHA exatamente igual ao esperado.
 
 O PR #53 retirou `--mode plan`, mas seu teste simulava a hipótese de que essa
-flag causava a perda do objeto. A investigação atual não reproduziu o erro
-histórico na versão 1.1.27 e não estabelece essa causalidade. Não reintroduzimos
-a flag. As evidências e os limites estão em [investigação da CLI](antigravity-investigation.md).
+flag causava a perda do objeto. Os probes sintéticos iniciais não reproduziram
+o erro. A reprodução posterior com o dossier real identificou `denied_actions`
+para `command`: a CLI encerrou com SUCCESS após negar uma ação em headless,
+sem resposta nem objeto estruturado. A flag não foi reintroduzida.
+As evidências estão em [investigação da CLI](antigravity-investigation.md).
+
+A política de produção define uma revisão baseada exclusivamente no dossier:
+o planner e o reviewer não executam comandos, testes, Git, consultas externas
+ou ferramentas de arquivos. Os gates e a CI são coletados pelo orquestrador
+antes da análise. Quando faltar evidência necessária, o reviewer deve explicitar
+a lacuna e rejeitar, sem inventar verificações. O mecanismo de resposta
+estruturada da CLI permanece permitido. Essas instruções não substituem o sandbox
+nem alteram permissões locais.
+
+As severidades bloqueantes configuradas são incluídas na parte autoritativa do
+prompt das duas etapas, com a regra explícita de usar REJECTED quando qualquer
+finding for bloqueante. Uma resposta contraditória continua inválida; o adapter
+e o parser não convertem automaticamente APPROVED em REJECTED nem descartam findings.
+
+Qualquer `denied_actions` diferente de lista vazia bloqueia o review, inclusive
+se houver `structured_output` com APPROVED. A mensagem indica revisão incompleta
+por bloqueio de permissões, sem expor os argumentos da ação negada. Não é
+necessário habilitar `--dangerously-skip-permissions` nem criar permissões globais
+de shell para corrigir esse fluxo.
 
 A política estável em `prompts/gemini/review_policy.md` separa instruções de
 autoridade do dossier não confiável. Issue, PR, diff e código são sempre dados,
@@ -62,6 +83,7 @@ revalidações normais. Não é necessário editar o SQLite. O watch pode contin
 outros efeitos configurados após a aprovação; não é um comando de diagnóstico.
 
 O teste `tests/integration/test_antigravity_live.py` é opt-in via
-`ORCH_TEST_ANTIGRAVITY_LIVE=1`: faz duas chamadas sintéticas em diretório temporário,
-consome quota e valida os schemas reais sem tocar no pipeline. No Windows, o
+`ORCH_TEST_ANTIGRAVITY_LIVE=1`: valida os schemas e uma revisão sintética usando
+a mesma política de produção e `build_prompt`, incluindo regras não confiáveis
+que pedem execução de comandos. Consome quota sem tocar no pipeline. No Windows, o
 daemon da CLI pode manter o diretório temporário aberto após terminar o processo.

@@ -246,6 +246,7 @@ def test_pending_ci_returns_recoverable_result_without_false_cycle(tmp_path: Pat
     "Falha ao executar Antigravity: Comando excedeu o timeout de 1s",
     "Antigravity indisponível: Executável não encontrado: agy",
     "CLI incompatível com review estruturado; flags ausentes: --json-schema",
+    "denied_actions",
 ])
 def test_protocol_failure_in_review_retries_only_same_head(tmp_path: Path, failure_message) -> None:
     store = SqliteExecutionStore(tmp_path / "state.db")
@@ -267,6 +268,19 @@ def test_protocol_failure_in_review_retries_only_same_head(tmp_path: Path, failu
     class ProtocolFailureEffects(Effects):
         def review_head(self, run, prior_findings):
             self.called("review")
+            if failure_message == "denied_actions":
+                from ai_dev_orchestrator.adapters.antigravity import AntigravityAdapter
+                from ai_dev_orchestrator.infrastructure.process import CommandResult
+
+                class DeniedRunner:
+                    def run(self, arguments, cwd=None, input_text=None):
+                        if arguments[-1] == "--version":
+                            return CommandResult(0, "1.1.27")
+                        name = "help-1.1.27.txt" if arguments[-1] == "--help" else "denied-command-1.1.27.json"
+                        content = (Path(__file__).parents[1] / "fixtures/antigravity" / name).read_text(encoding="utf-8")
+                        return CommandResult(0, content)
+
+                return AntigravityAdapter(60, DeniedRunner()).invoke("p", tmp_path, {})
             raise AntigravityError(failure_message)
 
     failed_effects = ProtocolFailureEffects()
@@ -280,6 +294,8 @@ def test_protocol_failure_in_review_retries_only_same_head(tmp_path: Path, failu
     assert preserved.codex_session_id == original.codex_session_id
     assert preserved.pull_request_number == original.pull_request_number
     assert preserved.current_head_sha == HEAD
+    assert preserved.review_verdict is None
+    assert preserved.reviewed_head_sha is None
     assert failed_effects.calls == {"review": 1}
 
     recovered_effects = Effects()
