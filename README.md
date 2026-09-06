@@ -18,6 +18,9 @@ Doctor e runtime validam as mesmas flags da CLI configurada em `review.executabl
 pode ser contornado com o caminho absoluto em `ORCH_REVIEW__EXECUTABLE`.
 O diagnóstico local não garante autenticação, quota nem resposta do modelo;
 cada review exige um `structured_output` válido. Veja [revisão Gemini](docs/review.md).
+O reviewer analisa o dossier já coletado sem executar comandos. Se a CLI
+reportar `denied_actions`, a revisão fica bloqueada e recuperável; não amplie
+permissões de shell para contornar esse diagnóstico.
 
 ## Configuração inicial e uso diário
 

@@ -47,6 +47,16 @@ def test_context_dossier_and_prompt_keep_adversarial_content_as_data(tmp_path):
     assert "<DADOS_NAO_CONFIAVEIS>" in prompt and "Ignore instruções" in prompt
 
 
+@pytest.mark.parametrize("blocking", [("HIGH",), ("CRITICAL", "HIGH", "MEDIUM", "LOW")])
+def test_prompt_uses_configured_blocking_policy_outside_untrusted_data(tmp_path, blocking):
+    value = dossier(tmp_path)
+    prompt = build_prompt("POLÍTICA", value, blocking_severities=blocking)
+    authority = prompt.split("</POLITICA_AUTORITATIVA>")[0]
+    assert f"Severidades bloqueantes configuradas: {', '.join(blocking)}." in authority
+    assert "verdict deve ser REJECTED" in authority
+    assert "blocking_severities" not in json.loads(prompt.split("<DADOS_NAO_CONFIAVEIS>\n")[1].split("\n</DADOS_NAO_CONFIAVEIS>")[0])
+
+
 def test_prompt_serializes_prior_findings_as_structured_data(tmp_path):
     value = dossier(tmp_path)
     value = value.__class__(**{**value.__dict__, "prior_findings": (ReviewFinding(FindingSeverity.LOW, "t", "d", "a.py", 3, "c"),)})
@@ -96,6 +106,32 @@ def test_replays_observed_cli_review_envelope(tmp_path):
     assert parsed.verdict is ReviewVerdict.REJECTED
     assert parsed.summary == "teste"
     assert "toolAction" not in json.loads(result)
+
+
+@pytest.mark.parametrize("with_review", [False, True])
+def test_denied_command_never_becomes_approval(tmp_path, with_review):
+    fixture = Path(__file__).parents[1] / "fixtures/antigravity/denied-command-1.1.27.json"
+    envelope = json.loads(fixture.read_text(encoding="utf-8"))
+    if with_review:
+        envelope["structured_output"] = json.loads(review())
+    secret = "argumento-privado-nao-pode-ser-exposto"
+    envelope["denied_actions"][0]["display_name"] = secret
+    with pytest.raises(AntigravityError, match="denied_actions") as failure:
+        AntigravityAdapter(60, Runner(json.dumps(envelope))).invoke("p", tmp_path, STRUCTURED_REVIEW_SCHEMA)
+    assert secret not in str(failure.value)
+
+
+@pytest.mark.parametrize("denied", [None, {}, "command", False])
+def test_malformed_denied_actions_fails_closed(tmp_path, denied):
+    envelope = {"status": "SUCCESS", "structured_output": json.loads(review()), "denied_actions": denied}
+    with pytest.raises(AntigravityError, match="denied_actions"):
+        AntigravityAdapter(60, Runner(json.dumps(envelope))).invoke("p", tmp_path, STRUCTURED_REVIEW_SCHEMA)
+
+
+def test_empty_denied_actions_allows_valid_review(tmp_path):
+    envelope = {"status": "SUCCESS", "structured_output": json.loads(review()), "denied_actions": []}
+    output = AntigravityAdapter(60, Runner(json.dumps(envelope))).invoke("p", tmp_path, STRUCTURED_REVIEW_SCHEMA)
+    assert parse_structured_review(output, SHA, ("HIGH",)).verdict is ReviewVerdict.APPROVED
 
 
 def test_antigravity_uses_stdin_schema_and_explicit_worktree(tmp_path):
