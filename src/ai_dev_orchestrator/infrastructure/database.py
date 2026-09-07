@@ -79,6 +79,12 @@ class SqliteExecutionStore:
                     "quota_classification": "TEXT",
                     "quota_observed_at": "TEXT",
                     "quota_retry_at": "TEXT",
+                    "cleanup_status": "TEXT NOT NULL DEFAULT 'PENDING'",
+                    "cleanup_detail": "TEXT",
+                    "codex_tokens": "INTEGER",
+                    "gemini_tokens": "INTEGER",
+                    "codex_cost": "REAL",
+                    "gemini_cost": "REAL",
                     "human_reason_code": "TEXT",
                     "human_reason": "TEXT",
                     "blocked_phase": "TEXT",
@@ -173,6 +179,21 @@ class SqliteExecutionStore:
             (issue_number,),
         )
 
+    def list_history(self, issue_number: int | None = None) -> tuple[RunRecord, ...]:
+        """Lista o journal de execuções em ordem estável, sem reescrever evidências."""
+        sql = "SELECT * FROM executions"
+        parameters: tuple[object, ...] = ()
+        if issue_number is not None:
+            sql += " WHERE issue_number = ?"
+            parameters = (issue_number,)
+        sql += " ORDER BY created_at DESC, id DESC"
+        try:
+            with self._connection() as c:
+                rows = c.execute(sql, parameters).fetchall()
+            return tuple(_record(row) for row in rows)
+        except sqlite3.Error as error:
+            raise ExecutionStoreError("Não foi possível consultar o histórico: " + str(error)) from error
+
     def get(self, execution_id: str) -> RunRecord:
         record = self._fetch_one(
             "SELECT * FROM executions WHERE id = ?", (execution_id,)
@@ -252,6 +273,12 @@ class SqliteExecutionStore:
             "quota_classification",
             "quota_observed_at",
             "quota_retry_at",
+            "cleanup_status",
+            "cleanup_detail",
+            "codex_tokens",
+            "gemini_tokens",
+            "codex_cost",
+            "gemini_cost",
             "human_reason_code",
             "human_reason",
             "blocked_phase",
@@ -340,6 +367,12 @@ class SqliteExecutionStore:
             "quota_classification",
             "quota_observed_at",
             "quota_retry_at",
+            "cleanup_status",
+            "cleanup_detail",
+            "codex_tokens",
+            "gemini_tokens",
+            "codex_cost",
+            "gemini_cost",
             "human_reason_code",
             "human_reason",
             "blocked_phase",
@@ -482,6 +515,26 @@ class SqliteExecutionStore:
                 (execution_id,),
             ).fetchall()
         return tuple(dict(row) for row in rows)
+
+    def record_usage(
+        self, execution_id: str, provider: str, *, tokens: int | None = None,
+        cost: float | None = None,
+    ) -> RunRecord:
+        """Guarda somente números estruturados fornecidos pelo provider, nunca logs."""
+        if provider not in {"codex", "gemini"}:
+            raise ExecutionStoreError("Provider de uso não suportado")
+        if tokens is None and cost is None:
+            return self.get(execution_id)
+        if (tokens is not None and (not isinstance(tokens, int) or isinstance(tokens, bool) or tokens < 0)) or (
+            cost is not None and (not isinstance(cost, (int, float)) or isinstance(cost, bool) or cost < 0)
+        ):
+            raise ExecutionStoreError("Uso estruturado deve conter valores não negativos")
+        updates: dict[str, object] = {}
+        if tokens is not None:
+            updates[f"{provider}_tokens"] = tokens
+        if cost is not None:
+            updates[f"{provider}_cost"] = cost
+        return self.checkpoint(execution_id, summary=f"Uso estruturado de {provider} registrado", **updates)
 
     def review_findings(self, execution_id: str, reviewed_head_sha: str | None = None) -> tuple[ReviewFinding, ...]:
         sql = "SELECT * FROM review_findings WHERE execution_id = ?"

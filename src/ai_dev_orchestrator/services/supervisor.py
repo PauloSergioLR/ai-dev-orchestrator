@@ -14,6 +14,9 @@ from ai_dev_orchestrator.domain.execution import ExecutionPhase
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
 from ai_dev_orchestrator.services.pipeline import RunPipelineError
 from ai_dev_orchestrator.services.work import WorkResult, WorkService
+from ai_dev_orchestrator.adapters.git import GitWorktreeAdapter
+from ai_dev_orchestrator.services.cleanup import CleanupService
+from ai_dev_orchestrator.services.history import HistoryService, format_duration
 from ai_dev_orchestrator.services.escalation import HumanEscalationService
 
 
@@ -108,9 +111,6 @@ class SupervisorService:
                 try:
                     result = self.work_service.work()
                 except RunPipelineError:
-                    # O pipeline sinaliza a quota depois de persistir o checkpoint.
-                    # Só a evidência inequívoca no store autoriza o supervisor a
-                    # converter esse erro em espera; demais falhas continuam terminais.
                     active_after_error = self.store.list_active()
                     if len(active_after_error) == 1 and active_after_error[0].phase in {
                         ExecutionPhase.WAITING_CODEX_QUOTA,
@@ -123,7 +123,21 @@ class SupervisorService:
                 if _is_waiting(result):
                     self.sleep(self.config.supervisor.poll_interval_seconds)
                     continue
-                # Uma conclusão libera a seleção da próxima Issue Ready.
+                self._show_completion(result)
+
+    def _show_completion(self, result: WorkResult) -> None:
+        issue = result.run.issue_number if result.run else (result.resume.issue_number if result.resume else None)
+        if issue is None:
+            return
+        run = self.store.get_latest_for_issue(issue)
+        if run is None or run.phase is not ExecutionPhase.COMPLETED:
+            return
+        metrics = HistoryService(self.store).metrics(run)
+        correction = "correção" if run.correction_attempts == 1 else "correções"
+        pr = f"PR #{run.pull_request_number}" if run.pull_request_number else "sem PR"
+        print(f"#{run.issue_number} COMPLETED | {pr} | {run.correction_attempts} {correction} | {metrics.reviews} reviews | {format_duration(metrics.duration)}")
+        if self.config.cleanup.auto_cleanup:
+            CleanupService(self.config, self.store, GitWorktreeAdapter()).cleanup(run.id)
 
 
 def _is_waiting(result: WorkResult) -> bool:

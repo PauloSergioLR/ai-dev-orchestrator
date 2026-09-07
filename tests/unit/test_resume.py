@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from ai_dev_orchestrator.adapters.antigravity import AntigravityError
 from ai_dev_orchestrator.domain.execution import ExecutionPhase, RunRecord
 from ai_dev_orchestrator.domain.recovery import (
     CiObservation, CiState, MergeObservation, MergeState, ProjectState,
@@ -238,6 +239,80 @@ def test_pending_ci_returns_recoverable_result_without_false_cycle(tmp_path: Pat
 
     assert result.phase == ExecutionPhase.WAITING_CI.value
     assert effects.calls == {"ci": 1}
+
+
+@pytest.mark.parametrize("failure_message", [
+    "Falha do contrato estruturado do reviewer: SUCCESS sem structured_output",
+    "Falha ao executar Antigravity: Comando excedeu o timeout de 1s",
+    "Antigravity indisponível: Executável não encontrado: agy",
+    "CLI incompatível com review estruturado; flags ausentes: --json-schema",
+    "denied_actions",
+])
+def test_protocol_failure_in_review_retries_only_same_head(tmp_path: Path, failure_message) -> None:
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    run = advance(store, ExecutionPhase.WAITING_CI)
+    original = store.transition(
+        run.id,
+        ExecutionPhase.GEMINI_REVIEWING,
+        summary="ci",
+        ci_head_sha=HEAD,
+    )
+    snapshot = RecoveryObservation(
+        WorktreeState.CONVERGENT,
+        local_head_sha=HEAD,
+        remote_head_sha=HEAD,
+        pull_requests=(pr(),),
+        ci=CiObservation(CiState.SUCCESS, HEAD),
+    )
+
+    class ProtocolFailureEffects(Effects):
+        def review_head(self, run, prior_findings):
+            self.called("review")
+            if failure_message == "denied_actions":
+                from ai_dev_orchestrator.adapters.antigravity import AntigravityAdapter
+                from ai_dev_orchestrator.infrastructure.process import CommandResult
+
+                class DeniedRunner:
+                    def run(self, arguments, cwd=None, input_text=None):
+                        if arguments[-1] == "--version":
+                            return CommandResult(0, "1.1.27")
+                        name = "help-1.1.27.txt" if arguments[-1] == "--help" else "denied-command-1.1.27.json"
+                        content = (Path(__file__).parents[1] / "fixtures/antigravity" / name).read_text(encoding="utf-8")
+                        return CommandResult(0, content)
+
+                return AntigravityAdapter(60, DeniedRunner()).invoke("p", tmp_path, {})
+            raise AntigravityError(failure_message)
+
+    failed_effects = ProtocolFailureEffects()
+    with pytest.raises(ResumeError, match="Retomada interrompida em GEMINI_REVIEWING"):
+        service(store, Observer(lambda _run: snapshot), failed_effects).resume(37)
+
+    preserved = store.get(original.id)
+    assert preserved.id == original.id
+    assert preserved.phase is ExecutionPhase.GEMINI_REVIEWING
+    assert preserved.branch == original.branch
+    assert preserved.codex_session_id == original.codex_session_id
+    assert preserved.pull_request_number == original.pull_request_number
+    assert preserved.current_head_sha == HEAD
+    assert preserved.review_verdict is None
+    assert preserved.reviewed_head_sha is None
+    assert failed_effects.calls == {"review": 1}
+
+    recovered_effects = Effects()
+    review_only_policy = RecoveryPolicy("owner/repo", "main", False, 3)
+    result = ResumeService(
+        store,
+        Observer(lambda _run: snapshot),
+        RecoveryPlanner(review_only_policy),
+        RecoveryExecutor(review_only_policy, store, recovered_effects),
+    ).resume(37)
+
+    assert result.execution_id == original.id
+    assert result.phase == ExecutionPhase.APPROVED_AWAITING_ACTION.value
+    assert result.current_head_sha == HEAD
+    assert result.pull_request_number == original.pull_request_number
+    assert result.codex_session_id == original.codex_session_id
+    assert recovered_effects.calls == {"review": 1}
 
 
 def test_legacy_merging_reconciles_existing_merge_without_mutation(tmp_path: Path) -> None:

@@ -256,7 +256,8 @@ class RunPipeline:
             GitHubCiAdapter(config),
             pull_requests,
             AntigravityAdapter(
-                config.review.timeout_seconds, model=config.providers.gemini_model
+                config.review.timeout_seconds, model=config.providers.gemini_model,
+                executable=config.review.executable,
             ),
             pull_requests,
             store,
@@ -707,14 +708,16 @@ class RunPipeline:
         policy = policy_path.read_text(encoding="utf-8")
         plan = parse_review_plan(
             self.reviewer.invoke(
-                build_prompt(policy, dossier), worktree.path, REVIEW_PLAN_SCHEMA
+                build_prompt(policy, dossier, blocking_severities=self.config.review.blocking_severities),
+                worktree.path, REVIEW_PLAN_SCHEMA
             )
         )
         context_builder.ensure_head_is_current(pull_request.number, head_sha)
         review = parse_structured_review(
             self.reviewer.invoke(
                 build_prompt(
-                    policy, dossier, plan, build_checklists(dossier.changed_files)
+                    policy, dossier, plan, build_checklists(dossier.changed_files),
+                    blocking_severities=self.config.review.blocking_severities,
                 ),
                 worktree.path,
                 STRUCTURED_REVIEW_SCHEMA,

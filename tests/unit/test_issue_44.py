@@ -129,11 +129,15 @@ def test_default_e_auto_nao_passam_flag_de_modelo(tmp_path: Path) -> None:
 
         def run(self, arguments, cwd=None, input_text=None):
             self.calls.append(list(arguments))
+            if arguments[-1] == "--version":
+                return CommandResult(0, "1.1.27")
+            if arguments[-1] == "--help":
+                return CommandResult(0, (Path(__file__).parents[1] / "fixtures/antigravity/help-1.1.27.txt").read_text(encoding="utf-8"))
             return CommandResult(0, envelope)
 
     agy = SingleResult()
     AntigravityAdapter(10, agy, model="default").invoke("revise", worktree, {})
-    assert "--model" not in agy.calls[0]
+    assert "--model" not in agy.calls[-1]
     assert (
         OrchestratorConfig(
             github={
@@ -161,6 +165,10 @@ def test_modelo_explicito_e_encaminhado_ao_antigravity(tmp_path: Path) -> None:
 
         def run(self, arguments, cwd=None, input_text=None):
             self.arguments = list(arguments)
+            if arguments[-1] == "--version":
+                return CommandResult(0, "1.1.27")
+            if arguments[-1] == "--help":
+                return CommandResult(0, (Path(__file__).parents[1] / "fixtures/antigravity/help-1.1.27.txt").read_text(encoding="utf-8"))
             return CommandResult(0, '{"status":"SUCCESS","structured_output":{}}')
 
     runner = AgyRunner()

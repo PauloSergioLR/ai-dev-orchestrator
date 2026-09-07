@@ -41,6 +41,9 @@ timeout_seconds = 30
 
 [review]
 provider = "antigravity"
+executable = "agy"
+# Se o PATH do processo não incluir a CLI, informe seu caminho absoluto.
+# executable = 'C:\\Users\\seu-usuario\\AppData\\Local\\agy\\bin\\agy.exe'
 timeout_seconds = 900
 max_correction_attempts = 3
 blocking_severities = ["CRITICAL", "HIGH", "MEDIUM"]
@@ -64,3 +67,9 @@ smtp_password_env = "ORCH_SMTP_PASSWORD"
 discord_webhook_env = "ORCH_DISCORD_WEBHOOK_URL"
 telegram_token_env = "ORCH_TELEGRAM_BOT_TOKEN"
 telegram_chat_id_env = "ORCH_TELEGRAM_CHAT_ID"
+
+[cleanup]
+# O padrão preserva branches; o cleanup automático também começa desabilitado.
+auto_cleanup = false
+remove_local_branch = false
+remove_remote_branch = false

@@ -129,6 +129,12 @@ class RunRecord:
     quota_classification: str | None = None
     quota_observed_at: datetime | None = None
     quota_retry_at: datetime | None = None
+    cleanup_status: str = "PENDING"
+    cleanup_detail: str | None = None
+    codex_tokens: int | None = None
+    gemini_tokens: int | None = None
+    codex_cost: float | None = None
+    gemini_cost: float | None = None
     human_reason_code: str | None = None
     human_reason: str | None = None
     blocked_phase: str | None = None
@@ -171,3 +177,5 @@ class ExecutionStore(Protocol):
         head_sha: str | None = None,
         **updates: object,
     ) -> RunRecord: ...
+
+    def list_history(self, issue_number: int | None = None) -> tuple[RunRecord, ...]: ...

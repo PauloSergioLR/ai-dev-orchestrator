@@ -21,6 +21,9 @@ from ai_dev_orchestrator.services.work import WorkError, WorkService
 from ai_dev_orchestrator.services.init_project import ProjectInitError, ProjectInitService
 from ai_dev_orchestrator.services.supervisor import SupervisorError, SupervisorService
 from ai_dev_orchestrator.config import OrchestratorConfig
+from ai_dev_orchestrator.adapters.git import GitWorktreeAdapter
+from ai_dev_orchestrator.services.cleanup import CleanupService
+from ai_dev_orchestrator.services.history import HistoryService, format_duration
 
 app = typer.Typer(
     help="Orquestrador local-first de desenvolvimento com IA.",
@@ -319,6 +322,67 @@ def state(
             + (record.quota_retry_at.isoformat() if record.quota_retry_at else "não informada")
         )
     typer.echo(f"Atualizado em: {record.updated_at.isoformat()}")
+
+
+@app.command()
+def history(
+    issue: int | None = typer.Option(None, "--issue", min=1, help="Filtra por Issue."),
+) -> None:
+    """Exibe execuções e métricas derivadas do journal SQLite local."""
+    try:
+        config = load_config()
+        entries = HistoryService(SqliteExecutionStore(config.state.database_path)).list(issue)
+    except (ConfigurationError, ExecutionStoreError) as error:
+        typer.echo(f"Erro: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    if not entries:
+        typer.echo("Nenhuma execução encontrada.")
+        return
+    for entry in entries:
+        run = entry.run
+        pr = f"#{run.pull_request_number}" if run.pull_request_number else "-"
+        reason = run.last_error or "-"
+        tokens = _usage_text(run.codex_tokens, run.gemini_tokens, run.codex_cost, run.gemini_cost)
+        typer.echo(
+            f"#{run.issue_number} | {run.id} | {run.phase} | duração {format_duration(entry.duration)} | "
+            f"branch {run.branch or '-'} | PR {pr} | correções {run.correction_attempts} | "
+            f"reviews {entry.reviews} | CI {format_duration(entry.ci_wait)} | quota {format_duration(entry.quota_wait)} | "
+            f"Codex {run.codex_model}; Gemini {run.gemini_model} | merge {run.merge_commit_sha or '-'} | "
+            f"Project {run.project_status or '-'} | cleanup {run.cleanup_status} | tokens {tokens} | motivo {reason}"
+        )
+
+
+@app.command()
+def cleanup(
+    issue: int = typer.Option(..., "--issue", min=1, help="Issue cuja execução concluída será limpa."),
+) -> None:
+    """Solicita cleanup seguro de uma execução concluída, conforme a política local."""
+    try:
+        config = load_config()
+        store = SqliteExecutionStore(config.state.database_path)
+        record = store.get_latest_for_issue(issue)
+        if record is None:
+            raise ExecutionStoreError(f"Nenhuma execução encontrada para a Issue #{issue}.")
+        result = CleanupService(config, store, GitWorktreeAdapter()).cleanup(record.id)
+    except (ConfigurationError, ExecutionStoreError) as error:
+        typer.echo(f"Erro: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Cleanup {result.status}: {result.detail}")
+
+
+def _usage_text(codex: int | None, gemini: int | None, codex_cost: float | None, gemini_cost: float | None) -> str:
+    if codex is None and gemini is None and codex_cost is None and gemini_cost is None:
+        return "indisponível"
+    values = []
+    if codex is not None:
+        values.append(f"Codex={codex}")
+    if gemini is not None:
+        values.append(f"Gemini={gemini}")
+    if codex_cost is not None:
+        values.append(f"custo Codex={codex_cost}")
+    if gemini_cost is not None:
+        values.append(f"custo Gemini={gemini_cost}")
+    return ", ".join(values)
 
 
 @app.command()

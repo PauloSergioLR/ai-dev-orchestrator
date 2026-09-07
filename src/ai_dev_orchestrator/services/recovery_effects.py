@@ -45,7 +45,8 @@ class RecoveryEffects:
         self.pull_requests = GitHubPullRequestAdapter(config)
         self.projects = GitHubProjectStatusAdapter(config)
         self.reviewer = AntigravityAdapter(
-            config.review.timeout_seconds, model=config.providers.gemini_model
+            config.review.timeout_seconds, model=config.providers.gemini_model,
+            executable=config.review.executable,
         )
         self.convergence = ConvergencePoller(config.convergence)
 

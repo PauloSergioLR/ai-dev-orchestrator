@@ -13,6 +13,14 @@ orch doctor
 O comando apenas informa o estado de Python, CLIs, repositório Git e configuração.
 O Antigravity CLI é o executável local usado para a revisão com Gemini.
 Ele não corrige problemas, instala ferramentas, altera autenticação ou envia prompts para IAs.
+Doctor e runtime validam as mesmas flags da CLI configurada em `review.executable`
+(padrão `agy`, confirmado na CLI oficial). No Windows, um PATH desatualizado
+pode ser contornado com o caminho absoluto em `ORCH_REVIEW__EXECUTABLE`.
+O diagnóstico local não garante autenticação, quota nem resposta do modelo;
+cada review exige um `structured_output` válido. Veja [revisão Gemini](docs/review.md).
+O reviewer analisa o dossier já coletado sem executar comandos. Se a CLI
+reportar `denied_actions`, a revisão fica bloqueada e recuperável; não amplie
+permissões de shell para contornar esse diagnóstico.
 
 ## Configuração inicial e uso diário
 
@@ -61,6 +69,14 @@ Os comandos `orch resume --issue N`, `orch state --issue N` e `orch doctor`
 continuam disponíveis para operação e diagnóstico explícitos.
 
 ## Configuração
+
+## Histórico e cleanup
+
+`orch history` (ou `orch history --issue N`) mostra o histórico local, duração,
+esperas de CI/quota, revisões, correções, modelos, merge, Project e cleanup sem
+expor logs dos providers. `orch cleanup --issue N` remove somente o worktree
+limpo de uma execução `COMPLETED`; a política pode permitir também branches.
+Por padrão, o cleanup automático e a remoção de branches permanecem desabilitados.
 
 Crie sua configuração local a partir do exemplo:
 

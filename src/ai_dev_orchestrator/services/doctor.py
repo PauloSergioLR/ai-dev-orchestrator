@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 from typing import Sequence
 
+from ai_dev_orchestrator.adapters.antigravity import AntigravityAdapter, AntigravityError
 from ai_dev_orchestrator.config import ConfigurationError, load_config
 from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner
 
@@ -47,7 +48,7 @@ class DoctorService:
             self._check_command("Git", ["git", "--version"]),
             self._check_github_cli(),
             self._check_command("Codex CLI", ["codex", "--version"]),
-            self._check_command("Antigravity CLI", ["agy", "--version"]),
+            self._check_antigravity_cli(),
             self._check_repository(),
             self._check_configuration(),
         ]
@@ -77,6 +78,22 @@ class DoctorService:
         if not result.succeeded:
             return DoctorCheck("GitHub CLI", CheckStatus.ERROR, "gh não está autenticado")
         return DoctorCheck("GitHub CLI", CheckStatus.OK, "autenticado")
+
+    def _check_antigravity_cli(self) -> DoctorCheck:
+        """Usa a mesma configuração e o mesmo preflight do runtime."""
+        try:
+            config = load_config(self.config_path)
+            version = AntigravityAdapter(
+                config.review.timeout_seconds, runner=self.runner,
+                model=config.providers.gemini_model,
+                executable=config.review.executable,
+            ).check_available()
+        except (ConfigurationError, AntigravityError) as error:
+            return DoctorCheck("Antigravity CLI", CheckStatus.ERROR, str(error))
+        return DoctorCheck(
+            "Antigravity CLI", CheckStatus.OK,
+            version + "; contrato local validado (não consulta o modelo)",
+        )
 
     def _check_repository(self) -> DoctorCheck:
         repository = self.runner.run(["git", "rev-parse", "--is-inside-work-tree"])

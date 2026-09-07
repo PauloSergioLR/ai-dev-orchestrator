@@ -1,0 +1,11 @@
+{
+  "status": "SUCCESS",
+  "response": "",
+  "num_turns": 1,
+  "denied_actions": [
+    {
+      "action": "command",
+      "display_name": "[argumentos omitidos]"
+    }
+  ]
+}

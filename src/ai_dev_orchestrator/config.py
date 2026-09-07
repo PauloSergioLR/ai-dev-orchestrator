@@ -136,6 +136,7 @@ class ReviewConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     provider: str = Field(default="antigravity", min_length=1)
+    executable: str = Field(default="agy", min_length=1)
     timeout_seconds: float = Field(default=900, gt=0)
     max_correction_attempts: int = Field(default=3, gt=0)
     blocking_severities: tuple[str, ...] = ("CRITICAL", "HIGH", "MEDIUM")
@@ -237,6 +238,16 @@ class NotificationsConfig(BaseModel):
         return normalized
 
 
+class CleanupConfig(BaseModel):
+    """Política explícita e conservadora para artefatos já concluídos."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    auto_cleanup: StrictBool = False
+    remove_local_branch: StrictBool = False
+    remove_remote_branch: StrictBool = False
+
+
 class _EnvironmentSettingsSource(PydanticBaseSettingsSource):
     """Converte o booleano textual de ambiente sem relaxar o TOML."""
 
@@ -278,6 +289,7 @@ class OrchestratorConfig(BaseSettings):
     providers: ProviderConfig = Field(default_factory=ProviderConfig)
     supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
+    cleanup: CleanupConfig = Field(default_factory=CleanupConfig)
 
     @classmethod
     def settings_customise_sources(

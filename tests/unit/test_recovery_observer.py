@@ -10,13 +10,23 @@ import pytest
 from ai_dev_orchestrator.config import OrchestratorConfig
 from ai_dev_orchestrator.domain.ci import PullRequestCiSnapshot, StatusCheck
 from ai_dev_orchestrator.domain.execution import ExecutionPhase, RunRecord
-from ai_dev_orchestrator.domain.recovery import MergeState, ProjectState, WorktreeState
+from ai_dev_orchestrator.domain.recovery import (
+    MergeState,
+    ProjectState,
+    PullRequestObservation,
+    PullRequestState,
+    RecoveryAction,
+    RecoveryObservation,
+    RecoveryPolicy,
+    WorktreeState,
+)
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
 from ai_dev_orchestrator.infrastructure.process import CommandResult
 from ai_dev_orchestrator.services.recovery_observer import (
     RecoveryObservationError,
     RecoveryObserver,
 )
+from ai_dev_orchestrator.services.recovery_planner import RecoveryPlanner
 
 HEAD = "a" * 40
 PARENT = "b" * 40
@@ -111,6 +121,80 @@ def test_base_ref_divergent_is_not_observed_as_absent(tmp_path: Path) -> None:
     (tmp_path / "worktree").mkdir()
 
     assert observer(tmp_path, {})._worktree(run(tmp_path, base_ref="outra"))[0] == WorktreeState.DIVERGENT
+
+
+def test_legacy_remote_base_ref_is_convergent_with_configured_branch(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "worktree").mkdir()
+    cfg = config(tmp_path).model_copy(
+        update={
+            "workspace": config(tmp_path).workspace.model_copy(
+                update={"base_branch": "main", "remote_name": "origin"}
+            )
+        }
+    )
+    value = RecoveryObserver(
+        cfg,
+        SqliteExecutionStore(cfg.state.database_path),
+        Runner(worktree_results(tmp_path)),
+    )
+
+    observed = value._worktree(
+        run(tmp_path, base_ref="refs/remotes/origin/main")
+    )
+
+    assert observed == (WorktreeState.CONVERGENT, HEAD, PARENT, False)
+
+
+def test_gemini_reviewing_with_equivalent_legacy_base_plans_review_head(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "worktree").mkdir()
+    original = config(tmp_path)
+    cfg = original.model_copy(
+        update={
+            "workspace": original.workspace.model_copy(
+                update={"base_branch": "main", "remote_name": "origin"}
+            )
+        }
+    )
+    value = RecoveryObserver(
+        cfg,
+        SqliteExecutionStore(cfg.state.database_path),
+        Runner(worktree_results(tmp_path)),
+    )
+    record = run(
+        tmp_path,
+        phase=ExecutionPhase.GEMINI_REVIEWING,
+        base_ref="refs/remotes/origin/main",
+        pull_request_number=49,
+        pull_request_url="https://github.com/owner/repo/pull/49",
+        ci_head_sha=HEAD,
+    )
+    worktree_state, local_head, parent, dirty = value._worktree(record)
+    pull_request = PullRequestObservation(
+        49,
+        "https://github.com/owner/repo/pull/49",
+        "owner/repo",
+        "main",
+        "feat/recovery",
+        HEAD,
+        PullRequestState.OPEN,
+    )
+    snapshot = RecoveryObservation(
+        worktree_state,
+        local_head_sha=local_head,
+        local_head_parent_sha=parent,
+        has_worktree_changes=dirty,
+        remote_head_sha=HEAD,
+        pull_requests=(pull_request,),
+    )
+    policy = RecoveryPolicy("owner/repo", "main", True, 3)
+
+    decision = RecoveryPlanner(policy).plan(record, snapshot)
+
+    assert decision.action == RecoveryAction.REVIEW_HEAD
 
 
 def test_remote_head_uses_configured_repository_and_remote(tmp_path: Path) -> None:

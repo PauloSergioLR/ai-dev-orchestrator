@@ -199,6 +199,24 @@ def test_rejected_review_resumes_same_session_then_approves(tmp_path: Path) -> N
         assert text in prompt
 
 
+def test_pipeline_forwards_custom_blocking_severities_to_both_stages(tmp_path: Path) -> None:
+    prompts = []
+
+    class PolicyFakes(LoopFakes):
+        def invoke(self, prompt, cwd, schema):
+            prompts.append(prompt)
+            return super().invoke(prompt, cwd, schema)
+
+    fakes = PolicyFakes(rejected_reviews=0)
+    service = pipeline(tmp_path, fakes)
+    service.config.review.blocking_severities = ("LOW",)
+    service.run(31, "feat/review-loop")
+    assert len(prompts) == 2
+    for prompt in prompts:
+        authority = prompt.split("</POLITICA_AUTORITATIVA>")[0]
+        assert "Severidades bloqueantes configuradas: LOW." in authority
+
+
 def test_correction_waits_for_old_pr_head_and_keeps_same_session_and_pr(
     tmp_path: Path,
 ) -> None:

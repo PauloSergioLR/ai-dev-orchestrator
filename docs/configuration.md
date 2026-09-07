@@ -22,6 +22,7 @@ in_progress_status = "In Progress"
 status_field_name = "Status"
 ai_review_status = "AI Review"
 done_status = "Done"
+human_required_status = "Human Review"
 pull_request_target = "main"
 protected_branches = ["main"]
 
@@ -54,11 +55,30 @@ poll_interval_seconds = 1
 timeout_seconds = 30
 
 [review]
+executable = "agy"
 max_correction_attempts = 3
 
 [supervisor]
 poll_interval_seconds = 60
 max_sleep_seconds = 300
+
+[notifications]
+channels = []
+smtp_host = "smtp.example.com"
+smtp_port = 587
+smtp_sender = "orchestrator@example.com"
+email_recipients = ["operacoes@example.com"]
+smtp_starttls = true
+smtp_username_env = "ORCH_SMTP_USERNAME"
+smtp_password_env = "ORCH_SMTP_PASSWORD"
+discord_webhook_env = "ORCH_DISCORD_WEBHOOK_URL"
+telegram_token_env = "ORCH_TELEGRAM_BOT_TOKEN"
+telegram_chat_id_env = "ORCH_TELEGRAM_CHAT_ID"
+
+[cleanup]
+auto_cleanup = false
+remove_local_branch = false
+remove_remote_branch = false
 ```
 
 Em `[github]`, `owner`, `repository` e `ready_status` devem ser textos não
@@ -92,7 +112,12 @@ entre leituras do GitHub após uma mutação remota, e `timeout_seconds` (padrã
 `30`) limita a espera total. O polling repete somente consultas e nunca repete
 push, criação de Pull Request, merge ou alteração de Project.
 
-Em `[review]`, `max_correction_attempts` define quantas correções após um
+Em `[review]`, `executable` define o nome no PATH ou caminho absoluto da CLI
+Antigravity; o padrão oficial é `agy`. `ORCH_REVIEW__EXECUTABLE` sobrescreve
+esse campo. Doctor, pipeline e recovery usam a mesma configuração; não há
+troca automática para Gemini CLI ou para o aplicativo gráfico Antigravity.
+Consulte o [contrato validado do reviewer](review.md).
+`max_correction_attempts` define quantas correções após um
 `REJECTED` podem ocorrer na mesma sessão Codex. O padrão é `3` e o valor deve
 ser um inteiro positivo.
 
@@ -110,6 +135,17 @@ usados ficam registrados no run e não podem ser trocados silenciosamente.
 é inferido. `retry_without_reset_seconds` é opcional e somente deve ser definido
 quando o projeto possuir uma política segura de retry sem horário do provider.
 
+Em `[notifications]`, `channels` aceita zero, um ou vários canais entre `email`,
+`discord` e `telegram`. `github.human_required_status` define o Status aplicado
+quando a execução entra em `HUMAN_REQUIRED` (padrão `Human Review`). O TOML guarda
+somente opções não secretas e nomes de variáveis de ambiente; credenciais ficam
+fora do arquivo e não são persistidas no SQLite.
+
+Em `[cleanup]`, todas as opções começam desabilitadas. Mesmo quando habilitado,
+o cleanup só atua em `COMPLETED`, recusa worktree sujo, base/destino/branches
+protegidas e só remove referência remota após a confirmação persistida do merge
+do HEAD esperado. Uma falha é registrada como pendência e não muda a conclusão.
+
 ## Variáveis de ambiente
 
 Variáveis com prefixo `ORCH_` podem sobrescrever o arquivo. Para campos
@@ -123,6 +159,7 @@ ORCH_GITHUB__READY_STATUS
 ORCH_GITHUB__IN_PROGRESS_STATUS
 ORCH_GITHUB__AI_REVIEW_STATUS
 ORCH_GITHUB__DONE_STATUS
+ORCH_GITHUB__HUMAN_REQUIRED_STATUS
 ORCH_GITHUB__PULL_REQUEST_TARGET
 ORCH_GITHUB__PROTECTED_BRANCHES
 ORCH_WORKSPACE__REPOSITORY_PATH
@@ -145,6 +182,11 @@ ORCH_PROVIDERS__GEMINI_MODEL
 ORCH_SUPERVISOR__POLL_INTERVAL_SECONDS
 ORCH_SUPERVISOR__MAX_SLEEP_SECONDS
 ORCH_SUPERVISOR__RETRY_WITHOUT_RESET_SECONDS
+ORCH_SMTP_USERNAME
+ORCH_SMTP_PASSWORD
+ORCH_DISCORD_WEBHOOK_URL
+ORCH_TELEGRAM_BOT_TOKEN
+ORCH_TELEGRAM_CHAT_ID
 ```
 
 Por exemplo, `ORCH_EXECUTION__MAX_ATTEMPTS=3` substitui apenas esse valor. A
