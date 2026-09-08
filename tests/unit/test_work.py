@@ -55,6 +55,9 @@ class Store:
     def list_historical_candidates(self):
         return ()
 
+    def list_reconciliation_required(self):
+        return ()
+
     def list_active(self) -> tuple[object, ...]:
         return self.active
 
@@ -172,6 +175,16 @@ def test_active_execution_resumes_without_reading_project(tmp_path: Path) -> Non
     assert pipeline.calls == sync.calls == []
 
 
+def test_human_required_nunca_libera_nova_issue(tmp_path: Path) -> None:
+    active = (SimpleNamespace(issue_number=45, phase=__import__("ai_dev_orchestrator.domain.execution", fromlist=["ExecutionPhase"]).ExecutionPhase.HUMAN_REQUIRED),)
+    work, projects, _, pipeline, resumer, sync = service(tmp_path, (item(7),), active=active)
+
+    with pytest.raises(WorkError, match="supersessão"):
+        work.work()
+
+    assert projects.calls == 0 and pipeline.calls == resumer.calls == sync.calls == []
+
+
 def test_multiple_active_executions_fail_closed(tmp_path: Path) -> None:
     active = (SimpleNamespace(issue_number=1), SimpleNamespace(issue_number=2))
     work, projects, _, pipeline, resumer, _ = service(tmp_path, (), active=active)
@@ -181,6 +194,21 @@ def test_multiple_active_executions_fail_closed(tmp_path: Path) -> None:
 
     assert projects.calls == 0
     assert pipeline.calls == resumer.calls == []
+
+
+def test_failed_publicado_exige_reconciliacao_antes_de_nova_issue(tmp_path: Path) -> None:
+    class OrphanStore(Store):
+        def list_reconciliation_required(self):
+            return (SimpleNamespace(issue_number=45),)
+
+    projects, issues = Projects((item(7),)), Issues()
+    pipeline, resumer, sync = Pipeline(), Resumer(), Synchronizer()
+    work = WorkService(config(tmp_path), OrphanStore(), projects, issues, pipeline, resumer, sync)
+
+    with pytest.raises(WorkError, match="supersede"):
+        work.work()
+
+    assert projects.calls == 0 and pipeline.calls == sync.calls == []
 
 
 def test_sync_failure_does_not_start_pipeline(tmp_path: Path) -> None:

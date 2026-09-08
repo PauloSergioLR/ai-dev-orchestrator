@@ -23,6 +23,7 @@ from ai_dev_orchestrator.config import OrchestratorConfig
 from ai_dev_orchestrator.adapters.git import GitWorktreeAdapter
 from ai_dev_orchestrator.services.cleanup import CleanupService
 from ai_dev_orchestrator.services.history import HistoryService, format_duration
+from ai_dev_orchestrator.services.supersession import SupersessionError, SupersessionService
 
 app = typer.Typer(
     help="Orquestrador local-first de desenvolvimento com IA.",
@@ -381,6 +382,27 @@ def resume(
     typer.echo(f"PR: #{result.pull_request_number or '-'}")
     typer.echo(f"HEAD: {result.current_head_sha or '-'}")
     typer.echo(f"Correções: {result.correction_attempts}")
+
+
+@app.command()
+def supersede(
+    issue: int = typer.Option(..., "--issue", min=1, help="Issue cuja execução antiga será supersedida."),
+    reason: str = typer.Option(..., "--reason", help="Motivo humano, persistido de forma sanitizada."),
+    yes: bool = typer.Option(False, "--yes", help="Confirma sem prompt interativo."),
+) -> None:
+    """Marca um run com PR fechado sem merge como deliberadamente supersedido."""
+    try:
+        service = SupersessionService.from_config(load_config())
+        preview = service.preview(issue)
+        typer.echo("Evidência observada: " + preview.evidence)
+        if not yes and not typer.confirm("Superseder esta execução sem alterar PR, Project ou arquivos?"):
+            typer.echo("Supersessão cancelada; nenhuma alteração foi feita.")
+            return
+        result = service.supersede(issue, reason)
+    except (ConfigurationError, ExecutionStoreError, SupersessionError) as error:
+        typer.echo(f"Erro: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"Execução {result.id} supersedida; histórico preservado.")
 
 
 @app.command()

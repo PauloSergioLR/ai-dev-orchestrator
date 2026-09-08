@@ -9,6 +9,8 @@ from ai_dev_orchestrator.cli import app
 from ai_dev_orchestrator.services.pipeline import RunResult
 from ai_dev_orchestrator.services.resume import ResumeError, ResumeResult
 from ai_dev_orchestrator.services.work import WorkResult
+from ai_dev_orchestrator.domain.execution import ExecutionPhase, RunRecord
+from ai_dev_orchestrator.services.supersession import SupersessionPreview
 
 runner = CliRunner()
 
@@ -146,3 +148,47 @@ def test_resume_encaminha_flags_explicitas_sem_substituir_identidade(monkeypatch
         assert result.exit_code == 0
         assert calls[-1] == (37, {option: True})
         assert "Execução: same" in result.output
+
+
+def test_supersede_yes_nao_pergunta_e_persiste_por_servico(monkeypatch):
+    calls = []
+    record = RunRecord("antiga", 45, ExecutionPhase.FAILED, __import__("datetime").datetime.now(), __import__("datetime").datetime.now(),
+                       branch="work/antigo", pull_request_number=49, pull_request_url="url", current_head_sha="a" * 40)
+
+    class Service:
+        def preview(self, issue):
+            calls.append(("preview", issue))
+            return SupersessionPreview(record, "b" * 40, __import__("ai_dev_orchestrator.domain.recovery", fromlist=["PullRequestState"]).PullRequestState.CLOSED)
+        def supersede(self, issue, reason):
+            calls.append(("supersede", issue, reason))
+            return record
+
+    monkeypatch.setattr("ai_dev_orchestrator.cli.load_config", lambda: object())
+    monkeypatch.setattr("ai_dev_orchestrator.cli.SupersessionService.from_config", lambda _: Service())
+
+    result = runner.invoke(app, ["supersede", "--issue", "45", "--reason", "PR encerrado", "--yes"])
+
+    assert result.exit_code == 0
+    assert calls == [("preview", 45), ("supersede", 45, "PR encerrado")]
+    assert "histórico preservado" in result.output
+
+
+def test_supersede_confirmacao_negativa_nao_altera_nada(monkeypatch):
+    calls = []
+    record = RunRecord("antiga", 45, ExecutionPhase.FAILED, __import__("datetime").datetime.now(), __import__("datetime").datetime.now(),
+                       branch="work/antigo", pull_request_number=49, pull_request_url="url")
+
+    class Service:
+        def preview(self, issue):
+            return SupersessionPreview(record, None, __import__("ai_dev_orchestrator.domain.recovery", fromlist=["PullRequestState"]).PullRequestState.CLOSED)
+        def supersede(self, *args):
+            calls.append(args)
+            return record
+
+    monkeypatch.setattr("ai_dev_orchestrator.cli.load_config", lambda: object())
+    monkeypatch.setattr("ai_dev_orchestrator.cli.SupersessionService.from_config", lambda _: Service())
+
+    result = runner.invoke(app, ["supersede", "--issue", "45", "--reason", "PR encerrado"], input="n\n")
+
+    assert result.exit_code == 0 and calls == []
+    assert "cancelada" in result.output
