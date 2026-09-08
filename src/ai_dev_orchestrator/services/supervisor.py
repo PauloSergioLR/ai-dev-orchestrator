@@ -10,7 +10,7 @@ import time
 from typing import Callable, Iterator
 
 from ai_dev_orchestrator.config import OrchestratorConfig
-from ai_dev_orchestrator.domain.execution import ExecutionPhase
+from ai_dev_orchestrator.domain.execution import ExecutionPhase, PROVIDER_WAIT_PHASES
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
 from ai_dev_orchestrator.services.pipeline import RunPipelineError
 from ai_dev_orchestrator.services.work import WorkResult, WorkService
@@ -53,14 +53,15 @@ class SupervisorService:
                 active = self.store.list_active()
                 if len(active) > 1:
                     raise SupervisorError("Mais de uma execução ativa foi encontrada")
-                if active and active[0].phase in {
-                    ExecutionPhase.WAITING_CODEX_QUOTA,
-                    ExecutionPhase.WAITING_GEMINI_QUOTA,
-                }:
+                if active and active[0].phase in PROVIDER_WAIT_PHASES:
                     run = active[0]
+                    if run.phase == ExecutionPhase.BLOCKED_PROVIDER:
+                        raise SupervisorError(f"Provider exige intervenção: {run.last_error}")
                     retry_at = run.quota_retry_at
                     policy_retry = False
                     if retry_at is None:
+                        if run.phase == ExecutionPhase.WAITING_PROVIDER:
+                            raise SupervisorError("Espera transitória sem retry comprovado")
                         interval = self.config.supervisor.retry_without_reset_seconds
                         if interval is None:
                             raise SupervisorError(
@@ -80,20 +81,9 @@ class SupervisorService:
                         )
                         continue
                     if policy_retry:
-                        target = (
-                            ExecutionPhase.CODEX_RUNNING
-                            if run.phase == ExecutionPhase.WAITING_CODEX_QUOTA
-                            else ExecutionPhase.GEMINI_REVIEWING
-                        )
-                        self.store.transition(
-                            run.id,
-                            target,
-                            summary="Intervalo seguro da política local foi alcançado",
-                            quota_provider=None,
-                            quota_classification=None,
-                            quota_observed_at=None,
-                            quota_retry_at=None,
-                            last_error=None,
+                        self.store.checkpoint(
+                            run.id, summary="Intervalo da política local foi alcançado",
+                            quota_retry_at=retry_at.isoformat(),
                         )
                 try:
                     result = self.work_service.work()
@@ -102,10 +92,7 @@ class SupervisorService:
                     # Só a evidência inequívoca no store autoriza o supervisor a
                     # converter esse erro em espera; demais falhas continuam terminais.
                     active_after_error = self.store.list_active()
-                    if len(active_after_error) == 1 and active_after_error[0].phase in {
-                        ExecutionPhase.WAITING_CODEX_QUOTA,
-                        ExecutionPhase.WAITING_GEMINI_QUOTA,
-                    }:
+                    if len(active_after_error) == 1 and active_after_error[0].phase in PROVIDER_WAIT_PHASES:
                         continue
                     raise
                 if result is None:
@@ -136,7 +123,7 @@ def _is_waiting(result: WorkResult) -> bool:
         result.resumed
         and result.resume
         and result.resume.phase
-        in {"WAITING_CODEX_QUOTA", "WAITING_GEMINI_QUOTA", "WAITING_CI"}
+        in {"WAITING_CODEX_QUOTA", "WAITING_GEMINI_QUOTA", "WAITING_PROVIDER", "WAITING_CI"}
     )
 
 

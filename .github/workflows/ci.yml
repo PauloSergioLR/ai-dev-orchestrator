@@ -8,7 +8,16 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: test
+          - os: windows-latest
+            name: test-windows
     steps:
       - name: Obter o código do repositório
         uses: actions/checkout@v4
@@ -24,3 +33,5 @@ jobs:
         run: uv run ruff check .
       - name: Executar os testes
         run: uv run pytest
+      - name: Validar whitespace do diff
+        run: git diff --check

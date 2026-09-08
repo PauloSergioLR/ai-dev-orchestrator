@@ -66,17 +66,27 @@ class RecoveryExecutor:
         if action == RecoveryAction.START_CODEX:
             if run.codex_session_id:
                 raise RecoveryExecutionError("Sessão Codex já existe")
-            session = self.effects.start_codex(run)
+            if run.codex_start_attempted:
+                raise RecoveryExecutionError("Primeira chamada já iniciada sem sessão comprovada")
+            audited = self.store.checkpoint(run.id, summary="Primeira chamada Codex iniciada", codex_start_attempted=True)
+            session = self.effects.start_codex(audited)
             self._required(session, "Sessão Codex")
             return self.store.transition(run.id, ExecutionPhase.TESTING, summary=decision.reason, codex_session_id=session)
         if action == RecoveryAction.RESUME_CODEX:
             self._required(run.codex_session_id, "Sessão Codex")
-            if self.effects.resume_codex(run) != run.codex_session_id:
+            if run.review_verdict == "REJECTED":
+                findings = self.store.review_findings(run.id, run.reviewed_head_sha)
+                if not findings or run.reviewed_head_sha != run.current_head_sha:
+                    raise RecoveryExecutionError("Findings não correspondem ao HEAD da correção")
+                session = self.effects.resume_correction(run, findings)
+            else:
+                session = self.effects.resume_codex(run)
+            if session != run.codex_session_id:
                 raise RecoveryExecutionError("Provider retornou sessão Codex divergente")
-            return self.store.transition(run.id, ExecutionPhase.TESTING, summary=decision.reason)
+            return self.store.transition(run.id, ExecutionPhase.TESTING, summary=decision.reason, provider_retry_attempts=0)
         if action == RecoveryAction.RUN_LOCAL_GATES:
             self.effects.run_local_gates(run)
-            return self.store.transition(run.id, ExecutionPhase.COMMIT_PENDING, summary=decision.reason)
+            return self.store.transition(run.id, ExecutionPhase.COMMIT_PENDING, summary=decision.reason, provider_retry_attempts=0)
         if action in {RecoveryAction.CREATE_COMMIT, RecoveryAction.RECORD_EXISTING_COMMIT}:
             result = self.effects.create_commit(run) if action == RecoveryAction.CREATE_COMMIT else CommitResult(observation.local_head_sha or "", observation.local_head_parent_sha or "")
             if not result.new_head_sha or result.new_head_sha == run.current_head_sha or result.parent_head_sha != run.current_head_sha:
@@ -115,10 +125,11 @@ class RecoveryExecutor:
             findings = self.store.review_findings(run.id, run.reviewed_head_sha)
             if not findings or not run.codex_session_id:
                 raise RecoveryExecutionError("Findings ou sessão Codex ausentes")
-            audited = self.store.checkpoint(run.id, summary="Tentativa de correção iniciada", correction_attempts=run.correction_attempts + 1)
+            audited = self.store.transition(run.id, ExecutionPhase.CODEX_RUNNING,
+                                            summary="Tentativa de correção iniciada", correction_attempts=run.correction_attempts + 1)
             if self.effects.resume_correction(audited, findings) != run.codex_session_id:
                 raise RecoveryExecutionError("Provider retornou sessão Codex divergente")
-            return self.store.transition(run.id, ExecutionPhase.TESTING, summary=decision.reason)
+            return self.store.transition(run.id, ExecutionPhase.TESTING, summary=decision.reason, provider_retry_attempts=0)
         if action in {RecoveryAction.MERGE_PULL_REQUEST, RecoveryAction.RECORD_EXISTING_MERGE}:
             if action == RecoveryAction.MERGE_PULL_REQUEST and (
                 run.review_verdict != "APPROVED"

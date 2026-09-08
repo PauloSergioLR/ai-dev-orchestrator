@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Protocol, Sequence
 
 from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner
+from ai_dev_orchestrator.domain.provider import ProviderFailure, FAILURE_MESSAGES, classify_process_failure
+from datetime import datetime, timezone
 
 
 LOCAL_GATE_TIMEOUT_SECONDS = 120
@@ -15,6 +17,10 @@ MAX_GATE_DIAGNOSTIC_CHARACTERS = 500
 
 class LocalValidationError(Exception):
     """Indica que um gate local obrigatório falhou."""
+
+
+class LocalProcessFailure(ProviderFailure, LocalValidationError):
+    """Falha de infraestrutura distinta de um teste que efetivamente falhou."""
 
 
 class ProcessRunner(Protocol):
@@ -46,6 +52,11 @@ class LocalValidationService:
         results: list[GateResult] = []
         for name, command in self.gates:
             result = self.runner.run(command, cwd=worktree)
+            if result.failure_kind is not None:
+                kind = classify_process_failure(result.failure_kind)
+                raise LocalProcessFailure("local", kind, FAILURE_MESSAGES[kind],
+                                          datetime.now(timezone.utc), returncode=result.returncode,
+                                          diagnostic_source="processo")
             diagnostic = self._summarize(result.error or result.stderr.strip() or result.stdout.strip())
             gate = GateResult(name, command, result.succeeded, result.returncode, diagnostic)
             results.append(gate)

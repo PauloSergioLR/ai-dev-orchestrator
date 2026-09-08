@@ -12,7 +12,7 @@ from ai_dev_orchestrator.adapters.codex import (
     CodexAdapter,
     CodexError,
 )
-from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner
+from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner, ProcessFailureKind
 
 
 @dataclass
@@ -21,7 +21,7 @@ class FakeRunner:
     arguments: list[str] = field(default_factory=list)
     input_text: str | None = None
 
-    def run(self, arguments: list[str], input_text: str | None = None) -> CommandResult:
+    def run(self, arguments: list[str], input_text: str | None = None, **policies) -> CommandResult:
         self.arguments = arguments
         self.input_text = input_text
         return self.result
@@ -123,9 +123,9 @@ def test_rejects_empty_session_id_before_running_codex(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("result", "message"),
     [
-        (CommandResult(None, error="Executável não encontrado: codex"), "não encontrado"),
-        (CommandResult(None, error="Comando excedeu o timeout de 1800s"), "timeout"),
-        (CommandResult(1, stderr="sessão não encontrada"), "código 1.*sessão não encontrada"),
+        (CommandResult(None, error="Executável não encontrado: codex", failure_kind=ProcessFailureKind.EXECUTABLE_MISSING), "não encontrado"),
+        (CommandResult(None, error="Comando excedeu o timeout de 1800s", failure_kind=ProcessFailureKind.TIMEOUT), "timeout"),
+        (CommandResult(1, stderr="sessão não encontrada"), "código 1.*saída omitida"),
     ],
 )
 def test_reports_process_failures(tmp_path: Path, result: CommandResult, message: str) -> None:
@@ -176,7 +176,7 @@ def test_reports_failure_when_resuming_session(tmp_path: Path) -> None:
     worktree = tmp_path / "worktree"
     worktree.mkdir()
 
-    with pytest.raises(CodexError, match="retomar a sessão.*sessão não encontrada"):
+    with pytest.raises(CodexError, match="retomar a sessão.*saída omitida"):
         CodexAdapter(FakeRunner(CommandResult(1, stderr="sessão não encontrada"))).resume(
             worktree, "thread-123", "Continue"
         )

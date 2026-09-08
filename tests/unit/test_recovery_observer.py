@@ -38,7 +38,7 @@ class Runner:
         self.results = results
         self.calls: list[tuple[str, ...]] = []
 
-    def run(self, arguments: list[str]) -> CommandResult:
+    def run(self, arguments: list[str], **policies) -> CommandResult:
         key = tuple(str(value) for value in arguments)
         self.calls.append(key)
         return self.results.get(key, CommandResult(1, stderr="comando não previsto"))

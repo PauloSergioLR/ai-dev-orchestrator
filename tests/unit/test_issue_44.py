@@ -72,7 +72,7 @@ class Runner:
     result: CommandResult
     calls: list[list[str]] = field(default_factory=list)
 
-    def run(self, arguments, input_text=None):
+    def run(self, arguments, input_text=None, **policies):
         self.calls.append(list(arguments))
         return self.result
 
@@ -82,7 +82,7 @@ class CwdRunner:
     results: dict[tuple[str, ...], CommandResult]
     calls: list[tuple[str, ...]] = field(default_factory=list)
 
-    def run(self, arguments, cwd=None, input_text=None):
+    def run(self, arguments, cwd=None, input_text=None, **policies):
         key = tuple(arguments)
         self.calls.append(key)
         return self.results.get(key, CommandResult(1, stderr="indisponível"))
@@ -127,7 +127,7 @@ def test_default_e_auto_nao_passam_flag_de_modelo(tmp_path: Path) -> None:
         def __init__(self):
             self.calls = []
 
-        def run(self, arguments, cwd=None, input_text=None):
+        def run(self, arguments, cwd=None, input_text=None, **policies):
             self.calls.append(list(arguments))
             if arguments[-1] == "--version":
                 return CommandResult(0, "1.1.27")
@@ -163,7 +163,7 @@ def test_modelo_explicito_e_encaminhado_ao_antigravity(tmp_path: Path) -> None:
         def __init__(self):
             self.arguments = []
 
-        def run(self, arguments, cwd=None, input_text=None):
+        def run(self, arguments, cwd=None, input_text=None, **policies):
             self.arguments = list(arguments)
             if arguments[-1] == "--version":
                 return CommandResult(0, "1.1.27")
@@ -458,7 +458,7 @@ def test_supervisor_nao_converte_erro_sem_checkpoint_de_quota(tmp_path: Path) ->
 @pytest.mark.parametrize(
     "kind", [ProviderFailureKind.AUTH_ERROR, ProviderFailureKind.MODEL_UNAVAILABLE]
 )
-def test_auth_e_modelo_indisponivel_falham_terminalmente(
+def test_auth_e_modelo_indisponivel_exigem_intervencao(
     tmp_path: Path, kind: ProviderFailureKind
 ) -> None:
     config = _config(tmp_path)
@@ -482,7 +482,8 @@ def test_auth_e_modelo_indisponivel_falham_terminalmente(
         pipeline._record_provider_wait(failure, ExecutionPhase.WAITING_CODEX_QUOTA)
 
     latest = store.get(run.id)
-    assert latest.phase == ExecutionPhase.FAILED
+    assert latest.phase == ExecutionPhase.BLOCKED_PROVIDER
+    assert store.get_active_for_issue(44).id == run.id
     assert latest.quota_classification == kind.value
 
 

@@ -26,7 +26,7 @@ def test_creates_versioned_schema_and_reopens_without_losing_record(
     assert reopened.get(created.id).branch == "feat/state"
     with sqlite3.connect(path) as connection:
         assert (
-            connection.execute("SELECT version FROM schema_version").fetchone()[0] == 2
+            connection.execute("SELECT version FROM schema_version").fetchone()[0] == 3
         )
 
 
@@ -130,5 +130,5 @@ def test_migrates_schema_v1_preserving_execution_and_journal(tmp_path: Path) -> 
     assert store.get_active_for_issue(37).id == execution_id
     assert [event.sequence for event in store.events(execution_id)] == [1, 2]
     with sqlite3.connect(path) as connection:
-        assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 2
+        assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 3
         assert connection.execute("SELECT name FROM sqlite_master WHERE name = 'review_findings'").fetchone()

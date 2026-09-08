@@ -20,6 +20,8 @@ class ExecutionPhase(StrEnum):
     GEMINI_REVIEWING = "GEMINI_REVIEWING"
     WAITING_CODEX_QUOTA = "WAITING_CODEX_QUOTA"
     WAITING_GEMINI_QUOTA = "WAITING_GEMINI_QUOTA"
+    WAITING_PROVIDER = "WAITING_PROVIDER"
+    BLOCKED_PROVIDER = "BLOCKED_PROVIDER"
     NEEDS_CHANGES = "NEEDS_CHANGES"
     MERGE_PENDING = "MERGE_PENDING"
     MERGING = "MERGING"
@@ -87,6 +89,20 @@ _ALLOWED = {
     },
 }
 
+# Esperas suspendem a fase; nunca apagam o checkpoint de retomada.
+PROVIDER_WAIT_PHASES = frozenset({
+    ExecutionPhase.WAITING_CODEX_QUOTA, ExecutionPhase.WAITING_GEMINI_QUOTA,
+    ExecutionPhase.WAITING_PROVIDER, ExecutionPhase.BLOCKED_PROVIDER,
+})
+RESUMABLE_PROVIDER_PHASES = frozenset({
+    ExecutionPhase.CODEX_RUNNING, ExecutionPhase.GEMINI_REVIEWING,
+    ExecutionPhase.TESTING, ExecutionPhase.NEEDS_CHANGES,
+})
+for _phase in RESUMABLE_PROVIDER_PHASES:
+    _ALLOWED[_phase].update(PROVIDER_WAIT_PHASES)
+for _phase in PROVIDER_WAIT_PHASES:
+    _ALLOWED.setdefault(_phase, set()).update(RESUMABLE_PROVIDER_PHASES)
+
 
 def validate_transition(old: ExecutionPhase, new: ExecutionPhase) -> None:
     """Recusa saltos e reaberturas que ocultariam o histórico da execução."""
@@ -106,6 +122,7 @@ class RunRecord:
     worktree_path: str | None = None
     base_ref: str | None = None
     codex_session_id: str | None = None
+    codex_start_attempted: bool = False
     pull_request_number: int | None = None
     pull_request_url: str | None = None
     current_head_sha: str | None = None
@@ -123,6 +140,8 @@ class RunRecord:
     quota_classification: str | None = None
     quota_observed_at: datetime | None = None
     quota_retry_at: datetime | None = None
+    provider_resume_phase: str | None = None
+    provider_retry_attempts: int = 0
     cleanup_status: str = "PENDING"
     cleanup_detail: str | None = None
     codex_tokens: int | None = None
@@ -146,6 +165,8 @@ class ExecutionStore(Protocol):
     """Porta de persistência usada pelo pipeline, independente do SQLite."""
 
     def create(self, issue_number: int, **details: object) -> RunRecord: ...
+
+    def get(self, execution_id: str) -> RunRecord: ...
 
     def transition(
         self,

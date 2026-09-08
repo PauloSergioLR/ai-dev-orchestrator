@@ -136,6 +136,20 @@ class RecoveryPlanner:
         ):
             return self._block("Pull Request persistido não converge com a observação.")
         if phase == ExecutionPhase.CODEX_RUNNING:
+            if run.codex_start_attempted and not run.codex_session_id:
+                return self._block("Primeira chamada Codex iniciada sem sessão comprovada; intervenção necessária.")
+            if run.pull_request_number is not None:
+                if (observed.local_head_sha != run.current_head_sha
+                    or observed.remote_head_sha != run.current_head_sha
+                    or not self._has_convergent_persisted_pr(run, observed)
+                    or observed.merge.state != MergeState.OPEN):
+                    return self._block("Identidade/HEAD do PR divergiu durante a correção.")
+            if run.review_verdict == ReviewState.REJECTED.value and (
+                not run.codex_session_id or run.reviewed_head_sha != run.current_head_sha
+                or observed.findings_head_sha != run.current_head_sha
+                or run.correction_attempts < 1
+            ):
+                return self._block("Checkpoint de correção sem sessão, tentativa ou findings do HEAD rejeitado.")
             return self._decision(RecoveryAction.RESUME_CODEX, "Sessão Codex persistida.") if run.codex_session_id else self._decision(RecoveryAction.START_CODEX, "Primeira sessão Codex ainda não foi persistida.")
         if phase == ExecutionPhase.TESTING:
             return self._decision(RecoveryAction.RUN_LOCAL_GATES, "Gates locais pendentes.")

@@ -16,7 +16,7 @@ from ai_dev_orchestrator.domain.project import (
     ProjectStatusField,
     ProjectStatusOption,
 )
-from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner
+from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner, OutputPolicy
 from ai_dev_orchestrator.services.validation import GateResult
 from ai_dev_orchestrator.services.merge import MergePullRequestSnapshot, MergeResult, _is_sha
 
@@ -44,7 +44,7 @@ class GitHubProjectStatusError(Exception):
 class ProcessRunner(Protocol):
     """Contrato mínimo do executor usado pelo adapter."""
 
-    def run(self, arguments: Sequence[str]) -> CommandResult:
+    def run(self, arguments: Sequence[str], *, stdout_policy: OutputPolicy = OutputPolicy.UTF8_STRICT) -> CommandResult:
         """Executa um processo local."""
 
 
@@ -70,7 +70,7 @@ class GitHubIssueAdapter:
             f"{self.config.owner}/{self.config.repository}", "--json",
             "number,title,body,state,url,labels,assignees",
         ]
-        result = self.runner.run(arguments)
+        result = self.runner.run(arguments, stdout_policy=OutputPolicy.UTF8_STRICT)
         if result.error:
             raise GitHubIssueError(
                 f"Não foi possível executar o GitHub CLI: {result.error}"
@@ -192,7 +192,7 @@ class GitHubPullRequestAdapter:
             "--base", self.config.pull_request_base, "--head", branch,
             "--title", issue.title, "--body", build_pull_request_body(issue, branch, gates),
         ]
-        result = self.runner.run(arguments)
+        result = self.runner.run(arguments, stdout_policy=OutputPolicy.UTF8_STRICT)
         if result.error:
             raise GitHubPullRequestError(f"Não foi possível executar o GitHub CLI ao criar o Pull Request: {result.error}")
         if not result.succeeded:
@@ -223,7 +223,7 @@ class GitHubPullRequestAdapter:
         view = self.runner.run([
             "gh", "pr", "view", str(pull_request_number), "--repo", self.config.repository_full_name,
             "--json", "number,url,state,baseRefName,headRefName,headRefOid,changedFiles,files",
-        ])
+        ], stdout_policy=OutputPolicy.UTF8_STRICT)
         if view.error or not view.succeeded:
             detail = view.error or view.stderr.strip() or view.stdout.strip()
             raise GitHubPullRequestError(f"Não foi possível ler Pull Request #{pull_request_number}: {detail}")
@@ -241,7 +241,7 @@ class GitHubPullRequestAdapter:
             raise GitHubPullRequestError("Lista de arquivos do Pull Request está truncada ou incompleta")
         commits_result = self.runner.run([
             "gh", "api", "--paginate", "--slurp", f"repos/{self.config.repository_full_name}/pulls/{pull_request_number}/commits",
-        ])
+        ], stdout_policy=OutputPolicy.UTF8_STRICT)
         if commits_result.error or not commits_result.succeeded:
             detail = commits_result.error or commits_result.stderr.strip() or commits_result.stdout.strip()
             raise GitHubPullRequestError(f"Não foi possível ler todos os commits do Pull Request #{pull_request_number}: {detail}")
@@ -264,7 +264,7 @@ class GitHubPullRequestAdapter:
             raise GitHubPullRequestError(
                 "Resposta REST paginada contém commits ou arquivos inválidos"
             ) from error
-        diff = self.runner.run(["gh", "pr", "diff", str(pull_request_number), "--repo", self.config.repository_full_name])
+        diff = self.runner.run(["gh", "pr", "diff", str(pull_request_number), "--repo", self.config.repository_full_name], stdout_policy=OutputPolicy.UTF8_STRICT)
         if diff.error or not diff.succeeded:
             detail = diff.error or diff.stderr.strip() or diff.stdout.strip()
             raise GitHubPullRequestError(f"Não foi possível ler diff do Pull Request #{pull_request_number}: {detail}")
@@ -283,7 +283,7 @@ class GitHubPullRequestAdapter:
         result = self.runner.run([
             "gh", "pr", "view", str(pull_request_number), "--repo", self.config.repository_full_name,
             "--json", "number,url,state,isDraft,baseRefName,headRefName,headRefOid,mergeable,mergedAt,mergeCommit",
-        ])
+        ], stdout_policy=OutputPolicy.UTF8_STRICT)
         if result.error or not result.succeeded:
             detail = result.error or result.stderr.strip() or result.stdout.strip()
             raise GitHubPullRequestError(f"Não foi possível ler estado final do Pull Request #{pull_request_number}: {detail}")
@@ -312,7 +312,7 @@ class GitHubPullRequestAdapter:
         result = self.merge_runner.run([
             "gh", "api", "--method", "PUT", f"repos/{self.config.repository_full_name}/pulls/{pull_request_number}/merge",
             "-f", "merge_method=merge", "-f", f"sha={expected_head_sha}",
-        ])
+        ], stdout_policy=OutputPolicy.UTF8_STRICT)
         if result.error or not result.succeeded:
             detail = result.error or result.stderr.strip() or result.stdout.strip()
             raise GitHubPullRequestError(f"Falha ao executar merge do Pull Request #{pull_request_number}: {detail}")
@@ -333,7 +333,7 @@ class GitHubPullRequestAdapter:
             raise GitHubPullRequestError("SHA inválido na verificação pós-merge")
         result = self.runner.run([
             "gh", "api", f"repos/{self.config.repository_full_name}/git/commits/{merge_commit_sha}",
-        ])
+        ], stdout_policy=OutputPolicy.UTF8_STRICT)
         if result.error or not result.succeeded:
             detail = result.error or result.stderr.strip() or result.stdout.strip()
             raise GitHubPullRequestError(f"Não foi possível verificar commit de merge: {detail}")
@@ -380,7 +380,7 @@ class GitHubCiAdapter:
             "gh", "pr", "view", str(pull_request_number), "--repo",
             self.config.repository_full_name, "--json", "headRefOid,statusCheckRollup",
         ]
-        result = self.runner.run(arguments)
+        result = self.runner.run(arguments, stdout_policy=OutputPolicy.UTF8_STRICT)
         if result.error:
             raise GitHubCiError(f"Não foi possível executar o GitHub CLI ao consultar a CI: {result.error}")
         if not result.succeeded:
@@ -472,7 +472,7 @@ class GitHubProjectAdapter:
             "gh", "project", "item-list", str(self.config.project_number), "--owner",
             self.config.owner, "--limit", str(GITHUB_PROJECT_ITEM_LIMIT), "--format", "json",
         ]
-        result = self.runner.run(arguments)
+        result = self.runner.run(arguments, stdout_policy=OutputPolicy.UTF8_STRICT)
         if result.error:
             raise GitHubProjectError(
                 f"Não foi possível executar o GitHub CLI para ler o Project: {result.error}"
@@ -664,7 +664,7 @@ class GitHubProjectStatusAdapter:
             ) from error
 
     def _run(self, arguments: list[str], operation: str) -> CommandResult:
-        result = self.runner.run(arguments)
+        result = self.runner.run(arguments, stdout_policy=OutputPolicy.UTF8_STRICT)
         if result.error:
             raise GitHubProjectStatusError(
                 f"Não foi possível executar o GitHub CLI ao {operation}: {result.error}"

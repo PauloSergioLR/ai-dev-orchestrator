@@ -55,7 +55,7 @@ from ai_dev_orchestrator.services.merge import (
 )
 from ai_dev_orchestrator.domain.execution import ExecutionPhase, ExecutionStore
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
-from ai_dev_orchestrator.domain.provider import ProviderFailure, ProviderFailureKind
+from ai_dev_orchestrator.domain.provider import ProviderFailure
 
 
 class RunPipelineError(Exception):
@@ -338,6 +338,7 @@ class RunPipeline:
             "Project marcado como em andamento",
             project_status=self.config.github.in_progress_status,
         )
+        self._checkpoint("Primeira chamada Codex iniciada", codex_start_attempted=True)
         try:
             execution = self.codex_executor.execute(
                 worktree.path, build_initial_prompt(issue)
@@ -345,7 +346,7 @@ class RunPipeline:
         except ProviderFailure as error:
             self._record_provider_wait(error, ExecutionPhase.WAITING_CODEX_QUOTA)
             raise RunPipelineError(
-                "Limite do Codex observado; execução preservada para retomada"
+                "Falha do Codex observada; execução preservada para retomada"
             ) from error
         except Exception as error:
             raise RunPipelineError(
@@ -372,6 +373,9 @@ class RunPipeline:
         self._transition(ExecutionPhase.TESTING, "Gates locais serão executados")
         try:
             gates = self.local_validator.validate(worktree.path)
+        except ProviderFailure as error:
+            self._record_provider_wait(error, ExecutionPhase.WAITING_PROVIDER)
+            raise RunPipelineError("Falha de processo local; checkpoint preservado") from error
         except Exception as error:
             raise RunPipelineError(
                 f"Falha nos gates locais; o Status está em '{self.config.github.in_progress_status}' "
@@ -499,7 +503,7 @@ class RunPipeline:
             )
             self._record_provider_wait(error, waiting_phase)
             raise RunPipelineError(
-                f"Limite do provider {error.provider} observado; execução preservada para retomada"
+                f"Falha do provider {error.provider} observada; execução preservada para retomada"
             ) from error
         except Exception as error:
             raise RunPipelineError(
@@ -946,29 +950,9 @@ class RunPipeline:
     def _record_provider_wait(
         self, failure: ProviderFailure, phase: ExecutionPhase
     ) -> None:
-        """Persiste somente metadados seguros e fornecidos pelo provider."""
-        if failure.classification not in {
-            ProviderFailureKind.TRANSIENT_RATE_LIMIT,
-            ProviderFailureKind.TERMINAL_QUOTA,
-        }:
-            if self.execution_store is not None and self._execution_id is not None:
-                self.execution_store.transition(
-                    self._execution_id,
-                    ExecutionPhase.FAILED,
-                    summary="Falha terminal do provider",
-                    quota_provider=failure.provider,
-                    quota_classification=failure.classification.value,
-                    quota_observed_at=failure.observed_at.isoformat(),
-                    last_error=str(failure),
-                )
-            raise RunPipelineError(str(failure)) from failure
-        updates: dict[str, object] = {
-            "quota_provider": failure.provider,
-            "quota_classification": failure.classification.value,
-            "quota_observed_at": failure.observed_at.isoformat(),
-            "quota_retry_at": failure.retry_at.isoformat() if failure.retry_at else None,
-            "last_error": str(failure),
-        }
-        if failure.session_id:
-            updates["codex_session_id"] = failure.session_id
-        self._transition(phase, "Provider indisponível por limite de uso", **updates)
+        """Aplica a mesma política usada pela retomada e pelo supervisor."""
+        from ai_dev_orchestrator.services.provider_recovery import record_provider_failure
+        if self.execution_store is not None and self._execution_id is not None:
+            run = record_provider_failure(self.execution_store, self._execution_id, failure)
+            if run.phase == ExecutionPhase.BLOCKED_PROVIDER:
+                raise RunPipelineError(run.last_error) from failure

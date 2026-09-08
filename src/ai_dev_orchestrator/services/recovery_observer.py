@@ -7,18 +7,19 @@ from pathlib import Path
 
 from ai_dev_orchestrator.adapters.github import (
     GitHubCiAdapter,
+    GitHubIssueAdapter,
     GitHubProjectAdapter,
     GitHubPullRequestAdapter,
 )
 from ai_dev_orchestrator.config import OrchestratorConfig
 from ai_dev_orchestrator.domain.base_ref import base_refs_equivalent
-from ai_dev_orchestrator.domain.execution import RunRecord
+from ai_dev_orchestrator.domain.execution import RunRecord, ExecutionPhase
 from ai_dev_orchestrator.domain.recovery import (
     CiObservation, CiState, MergeObservation, MergeState, ProjectState,
     PullRequestObservation, PullRequestState, RecoveryObservation, WorktreeState,
 )
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
-from ai_dev_orchestrator.infrastructure.process import CommandRunner
+from ai_dev_orchestrator.infrastructure.process import CommandRunner, OutputPolicy
 from ai_dev_orchestrator.services.ci_gate import classify_required_checks
 
 
@@ -39,17 +40,32 @@ class RecoveryObserver:
 
     def observe(self, run: RunRecord) -> RecoveryObservation:
         worktree, head, parent, dirty = self._worktree(run)
-        prs = self._pull_requests(run.branch)
+        historical = run.phase == ExecutionPhase.FAILED
+        prs = self._pull_requests(run.branch, historical=historical)
         ci = self._ci(run, prs)
         merge = self._merge(run, prs)
         project = self._project(run)
         remote = self._remote_head(run)
+        evidence = {}
+        if historical:
+            from ai_dev_orchestrator.infrastructure.codex_session import session_matches_worktree
+            issue = GitHubIssueAdapter(self.config, self.runner).get_issue(run.issue_number)
+            matches = [item for item in self.projects.list_items()
+                       if item.id == run.project_item_id and item.is_issue
+                       and item.issue_number == run.issue_number
+                       and item.repository == self.config.github.repository_full_name]
+            evidence = {
+                "issue_number": issue.number, "issue_state": issue.state,
+                "codex_session_id": run.codex_session_id if session_matches_worktree(run.codex_session_id, run.worktree_path) else None,
+                "project_status": matches[0].status if len(matches) == 1 else None,
+            }
         return RecoveryObservation(
             worktree, local_head_sha=head, local_head_parent_sha=parent,
             has_worktree_changes=dirty, remote_head_sha=remote,
             pull_requests=prs, ci=ci,
             findings_head_sha=run.reviewed_head_sha if self.store.review_findings(run.id, run.reviewed_head_sha) else None,
             merge=merge, project_state=project,
+            **evidence,
         )
 
     def _worktree(self, run: RunRecord) -> tuple[WorktreeState, str | None, str | None, bool]:
@@ -64,7 +80,7 @@ class RecoveryObserver:
             return WorktreeState.DIVERGENT, None, None, False
         branch = self._git_required(run, ["branch", "--show-current"])
         root = self._git_required(run, ["rev-parse", "--show-toplevel"])
-        if not branch or branch != run.branch or not root:
+        if not branch or branch != run.branch or not root or Path(root).resolve() != Path(run.worktree_path).resolve():
             return WorktreeState.DIVERGENT, None, None, False
         common = self._git_required(run, ["rev-parse", "--git-common-dir"])
         expected = self.runner.run(["git", "-C", str(self.config.workspace.repository_path), "rev-parse", "--git-common-dir"])
@@ -110,12 +126,15 @@ class RecoveryObserver:
             raise RecoveryObservationError("SHA remoto inválido")
         return sha
 
-    def _pull_requests(self, branch: str | None) -> tuple[PullRequestObservation, ...]:
+    def _pull_requests(self, branch: str | None, *, historical: bool = False) -> tuple[PullRequestObservation, ...]:
         if not branch:
             return ()
+        fields = "number,url,state,baseRefName,headRefName,headRefOid,isDraft,mergedAt,mergeCommit"
+        if historical:
+            fields += ",closingIssuesReferences"
         result = self.runner.run(["gh", "pr", "list", "--repo", self.config.github.repository_full_name,
                                   "--head", branch, "--state", "all", "--json",
-                                  "number,url,state,baseRefName,headRefName,headRefOid,isDraft,mergedAt,mergeCommit"])
+                                  fields], stdout_policy=OutputPolicy.UTF8_STRICT)
         if result.error or not result.succeeded:
             raise RecoveryObservationError("Não foi possível consultar Pull Requests")
         try:
@@ -124,6 +143,7 @@ class RecoveryObserver:
                 value["number"], value["url"], self.config.github.repository_full_name,
                 value["baseRefName"], value["headRefName"], value["headRefOid"],
                 PullRequestState.MERGED if value.get("mergedAt") else PullRequestState(value["state"]),
+                tuple(issue["number"] for issue in value.get("closingIssuesReferences", [])),
             ) for value in values)
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise RecoveryObservationError("Resposta de Pull Requests inválida") from error

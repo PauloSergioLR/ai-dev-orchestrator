@@ -1,0 +1,11 @@
+{
+  "session_id": "sessao-existente",
+  "returncode": 126,
+  "stderr": "",
+  "events": [
+    {"type": "thread.started", "thread_id": "sessao-existente"},
+    {"type": "turn.started"},
+    {"type": "error", "message": "You've hit your usage limit. Upgrade to Pro (...), visit (...) or try again at 5:09 AM."},
+    {"type": "turn.failed", "error": {"message": "You've hit your usage limit. Upgrade to Pro (...), visit (...) or try again at 5:09 AM."}}
+  ]
+}

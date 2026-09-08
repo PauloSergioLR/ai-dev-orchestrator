@@ -14,7 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 from ai_dev_orchestrator.cli import app
-from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner
+from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner, OutputPolicy
 from ai_dev_orchestrator.services.doctor import (
     CheckStatus,
     DoctorCheck,
@@ -82,7 +82,7 @@ def test_command_runner_handles_missing_executable(monkeypatch: pytest.MonkeyPat
 def test_command_runner_handles_failed_process(monkeypatch: pytest.MonkeyPatch) -> None:
     completed = subprocess.CompletedProcess(["tool"], 2, b"", b"falhou")
     monkeypatch.setattr(shutil, "which", lambda command: command)
-    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: completed)
+    monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.run_captured", lambda *args, **kwargs: completed)
 
     result = CommandRunner().run(["tool"])
 
@@ -97,7 +97,7 @@ def test_command_runner_handles_utf8_output_independently_of_system_locale(
         ["tool"], 0, "emoji: 😀".encode(), "漢字".encode()
     )
     monkeypatch.setattr(shutil, "which", lambda command: command)
-    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: completed)
+    monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.run_captured", lambda *args, **kwargs: completed)
 
     result = CommandRunner().run(["tool"])
 
@@ -113,11 +113,12 @@ def test_command_runner_normalizes_utf8_decoding_failure(
         return subprocess.CompletedProcess(args[0], 0, b"\x80", b"")
 
     monkeypatch.setattr(shutil, "which", lambda command: command)
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.run_captured", run)
 
-    result = CommandRunner().run(["tool"])
+    result = CommandRunner().run(["tool"], stdout_policy=OutputPolicy.UTF8_STRICT)
 
-    assert result.returncode is None
+    assert result.returncode == 0
+    assert not result.succeeded
     assert result.stdout == ""
     assert result.stderr == ""
     assert result.error is not None
@@ -130,7 +131,7 @@ def test_command_runner_handles_timeout(monkeypatch: pytest.MonkeyPatch) -> None
         raise subprocess.TimeoutExpired(["tool"], 5)
 
     monkeypatch.setattr(shutil, "which", lambda command: command)
-    monkeypatch.setattr(subprocess, "run", timeout)
+    monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.run_captured", timeout)
     result = CommandRunner().run(["tool"])
 
     assert result.returncode is None
@@ -145,7 +146,7 @@ def test_command_runner_uses_safe_subprocess_options(monkeypatch: pytest.MonkeyP
         return subprocess.CompletedProcess(args[0], 0, b"", b"")
 
     monkeypatch.setattr(shutil, "which", lambda command: command)
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.run_captured", run)
     CommandRunner(timeout=7).run(["tool", "--version"], input_text=None)
 
     assert received == {
@@ -169,7 +170,7 @@ def test_command_runner_forwards_textual_stdin_without_changing_arguments(
         return subprocess.CompletedProcess(args[0], 0, b"stdout", b"stderr")
 
     monkeypatch.setattr(shutil, "which", lambda command: r"C:\\tools\\tool.exe")
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.run_captured", run)
 
     result = CommandRunner(timeout=7).run(arguments, cwd=tmp_path, input_text="texto")
 
@@ -200,7 +201,7 @@ def test_command_runner_preserves_unicode_stdin_bytes_without_newline_translatio
         return subprocess.CompletedProcess(args[0], 0, kwargs["input"], b"")
 
     monkeypatch.setattr(shutil, "which", lambda command: command)
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.run_captured", run)
 
     result = CommandRunner().run(["tool", "exec", "-"], input_text=payload)
 
@@ -221,7 +222,7 @@ def test_command_runner_normalizes_utf8_input_encoding_failure(
         raise UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed")
 
     monkeypatch.setattr(shutil, "which", lambda command: command)
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.run_captured", run)
 
     result = CommandRunner().run(["tool"], input_text="\ud800")
 
@@ -234,7 +235,7 @@ def test_command_runner_normalizes_utf8_input_encoding_failure(
 def test_command_runner_forwards_explicit_cwd(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     received: dict[str, object] = {}
     monkeypatch.setattr(shutil, "which", lambda command: command)
-    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: (received.update(kwargs), subprocess.CompletedProcess(args[0], 0, b"", b""))[1])
+    monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.run_captured", lambda *args, **kwargs: (received.update(kwargs), subprocess.CompletedProcess(args[0], 0, b"", b""))[1])
     CommandRunner().run(["tool"], cwd=tmp_path)
     assert received["cwd"] == tmp_path
 
@@ -258,7 +259,7 @@ def test_command_runner_resolves_path_executable_without_changing_arguments(
         received.update(kwargs)
         return subprocess.CompletedProcess(args[0], 0, "saída".encode(), "aviso".encode())
 
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.run_captured", run)
 
     result = CommandRunner(timeout=9).run(arguments, cwd=tmp_path)
 
