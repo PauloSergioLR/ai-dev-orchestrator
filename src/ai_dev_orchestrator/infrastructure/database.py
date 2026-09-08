@@ -162,6 +162,67 @@ class SqliteExecutionStore:
         from ai_dev_orchestrator.domain.historical import is_historical_candidate
         return tuple(run for run in self.list_history() if is_historical_candidate(run))
 
+    def list_reconciliation_required(self) -> tuple[RunRecord, ...]:
+        """FAILED publicado nunca é ignorado pelo scheduler antes de uma decisão humana."""
+        return tuple(
+            run for run in self.list_history()
+            if run.phase is ExecutionPhase.FAILED and run.pull_request_number is not None
+        )
+
+    def supersede(self, execution_id: str, *, summary: str) -> RunRecord:
+        """Encerra auditavelmente um run deliberadamente substituído pelo usuário.
+
+        Esta é a única transição para SUPERSEDED. Ela não altera nenhum checkpoint
+        de identidade nem faz I/O fora do SQLite.
+        """
+        current = self.get(execution_id)
+        if current.phase in {ExecutionPhase.COMPLETED, ExecutionPhase.SUPERSEDED}:
+            raise ExecutionStoreError("Execução concluída ou já supersedida não pode ser abandonada")
+        try:
+            with self._connection() as c:
+                sequence = c.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM execution_events WHERE execution_id = ?",
+                    (execution_id,),
+                ).fetchone()[0]
+                now = _now()
+                c.execute(
+                    "UPDATE executions SET phase = ?, terminal = 1, updated_at = ? WHERE id = ?",
+                    (ExecutionPhase.SUPERSEDED.value, now, execution_id),
+                )
+                c.execute(
+                    "INSERT INTO execution_events(execution_id, sequence, previous_phase, phase, created_at, summary, head_sha) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (execution_id, sequence, current.phase.value, ExecutionPhase.SUPERSEDED.value,
+                     now, _sanitize(summary), current.current_head_sha),
+                )
+        except sqlite3.Error as error:
+            raise ExecutionStoreError(f"Não foi possível superseder execução: {error}") from error
+        return self.get(execution_id)
+
+    def require_human(self, execution_id: str, *, summary: str) -> RunRecord:
+        """Promove uma divergência remota a checkpoint explícito, sem descartá-la."""
+        current = self.get(execution_id)
+        if current.phase in TERMINAL_PHASES:
+            raise ExecutionStoreError("Execução terminal não pode exigir nova intervenção")
+        if current.phase is ExecutionPhase.HUMAN_REQUIRED:
+            return current
+        try:
+            with self._connection() as c:
+                sequence = c.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM execution_events WHERE execution_id = ?",
+                    (execution_id,),
+                ).fetchone()[0]
+                now = _now()
+                c.execute("UPDATE executions SET phase = ?, updated_at = ? WHERE id = ?",
+                          (ExecutionPhase.HUMAN_REQUIRED.value, now, execution_id))
+                c.execute(
+                    "INSERT INTO execution_events(execution_id, sequence, previous_phase, phase, created_at, summary, head_sha) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (execution_id, sequence, current.phase.value, ExecutionPhase.HUMAN_REQUIRED.value,
+                     now, _sanitize(summary), current.current_head_sha),
+                )
+        except sqlite3.Error as error:
+            raise ExecutionStoreError(f"Não foi possível registrar intervenção humana: {error}") from error
+        return self.get(execution_id)
+
     def reactivate_historical(self, expected: RunRecord, observation, planner) -> RunRecord:
         """Única exceção à terminalidade; transação compara identidade e audita a prova."""
         from ai_dev_orchestrator.domain.historical import historical_target, validate_historical

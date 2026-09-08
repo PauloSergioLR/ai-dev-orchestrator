@@ -174,3 +174,26 @@ O mecanismo Windows segue o contrato de
 [Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects).
 Os testes locais usam processos temporários, stdin grande, caminhos com espaços
 ou acentos, CP1252 e timeout com descendente; não executam sessões reais de IA.
+
+## Supersessão explícita
+
+`SUPERSEDED` é terminal e significa que uma pessoa declarou que aquele run não
+deve mais ser retomado. Não é `COMPLETED`, não altera o Project para `Done` e não
+é uma falha transitória recuperável. O SQLite mantém execution_id, branch,
+worktree, sessão Codex, PR, HEAD, findings e journal; o evento final inclui o
+motivo sanitizado e a evidência remota observada no momento da decisão.
+
+`orch supersede --issue N --reason "..."` primeiro lê o estado remoto. A decisão
+só é possível quando existe exatamente o PR persistido, com número, URL e branch
+idênticos, em `CLOSED` sem merge comprovado. Estado remoto desconhecido, múltiplos
+PRs, identidade divergente, PR aberto ou mergeado bloqueiam. HEAD remoto diferente
+é mostrado no evento como evidência, sem ser adotado. A confirmação interativa é
+obrigatória por padrão; `--yes` é a confirmação explícita para automação.
+
+O scheduler bloqueia qualquer `FAILED` que já tenha PR associado, inclusive uma
+falha que não se enquadre como candidata histórica transitória. Isso impede que
+um PR aberto ou Project ainda em review seja ignorado só porque `list_active()`
+está vazio. O run deixa de bloquear apenas após reconciliação segura ou
+supersessão explícita. `SUPERSEDED` não aparece em `list_active()` nem em
+`list_historical_candidates()`, mas continua em `orch history`. A supersessão não
+inicia novo run; uma futura seleção de Issue em `Ready` recebe outro execution_id.

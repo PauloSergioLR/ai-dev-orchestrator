@@ -25,6 +25,7 @@ class WorkError(Exception):
 class ActiveExecutionReader(Protocol):
     def list_active(self) -> tuple[RunRecord, ...]: ...
     def list_historical_candidates(self) -> tuple[RunRecord, ...]: ...
+    def list_reconciliation_required(self) -> tuple[RunRecord, ...]: ...
 
 
 class ProjectReader(Protocol):
@@ -107,6 +108,10 @@ class WorkService:
         )
 
     def work(self) -> WorkResult | None:
+        orphaned = self.store.list_reconciliation_required()
+        if orphaned:
+            raise WorkError("Execução publicada exige reconciliação ou supersessão explícita: "
+                            + ", ".join(f"#{run.issue_number} (--recover-failed ou orch supersede)" for run in orphaned))
         historical = self.store.list_historical_candidates()
         if historical:
             raise WorkError("Execução histórica com falha transitória exige reconciliação: "
@@ -116,6 +121,8 @@ class WorkService:
             issues = ", ".join(f"#{run.issue_number}" for run in active)
             raise WorkError(f"Execuções ativas ambíguas: {issues}")
         if active:
+            if getattr(active[0], "phase", None) is not None and active[0].phase.value == "HUMAN_REQUIRED":
+                raise WorkError(f"Execução #{active[0].issue_number} exige reconciliação ou supersessão explícita")
             return WorkResult(
                 resumed=True,
                 resume=self.resume_service.resume(active[0].issue_number),

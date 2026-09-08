@@ -82,6 +82,8 @@ class ResumeService:
                 raise ResumeError(f"A execução da Issue #{issue_number} já é terminal; use --recover-failed para reconciliar falha transitória")
         if run.phase in TERMINAL_PHASES:
             raise ResumeError(f"A execução da Issue #{issue_number} já é terminal")
+        if run.phase is ExecutionPhase.HUMAN_REQUIRED:
+            return self._result(run)
         if (
             (self.codex_model is not None and run.codex_model != self.codex_model)
             or (self.gemini_model is not None and run.gemini_model != self.gemini_model)
@@ -119,6 +121,7 @@ class ResumeService:
                 raise ResumeError("Retomada sem progresso detectada")
             seen.add(signature)
             if decision.action.value == "BLOCK":
+                self.store.require_human(run.id, summary="Reconciliação remota exige intervenção: " + decision.reason)
                 raise ResumeError(decision.reason)
             try:
                 run = self.executor.execute(run, decision, observation)

@@ -88,6 +88,23 @@ O arquivo `orchestrator.toml` é local e não é versionado. Consulte a
 [documentação de configuração](docs/configuration.md) para os campos,
 variáveis de ambiente e regras de segurança.
 
+## Supersessão explícita de execução antiga
+
+Quando um Pull Request antigo foi fechado sem merge e a Issue será refeita, não
+apague o SQLite nem crie outra execução manualmente. Primeiro observe e encerre
+o run antigo de forma auditável:
+
+```powershell
+orch supersede --issue N --reason "PR antigo encerrado; Issue será refeita sobre main atual"
+```
+
+O comando exibe branch, PR e HEADs persistido/remoto e pede confirmação. Para
+automação deliberada, use `--yes`. Ele só aceita o PR persistido, único, fechado
+sem merge; PR aberto exige recovery normal, e PR mergeado exige reconciliação de
+merge. Nenhum arquivo, sessão, PR, Project ou registro histórico é removido ou
+alterado além da fase local `SUPERSEDED`. Depois disso, a Issue pode receber uma
+nova execução quando voltar a `Ready`.
+
 ## Retomada após falhas de runtime
 
 Falhas de rede e timeout preservam a execução ativa e têm até três retries com
