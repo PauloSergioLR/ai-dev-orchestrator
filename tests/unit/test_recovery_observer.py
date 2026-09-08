@@ -311,3 +311,40 @@ def test_unproved_merge_never_becomes_merged(tmp_path: Path) -> None:
 
     with pytest.raises(RecoveryObservationError):
         value._merge(run(tmp_path), (pull,))
+
+
+
+@pytest.mark.parametrize("session_valid,project_repository", [(True, "owner/repo"), (False, "owner/repo"), (True, "other/repo")])
+def test_observacao_historica_exige_sessao_e_item_da_issue(monkeypatch, tmp_path, session_valid, project_repository):
+    (tmp_path / "worktree").mkdir()
+    record = run(tmp_path, phase=ExecutionPhase.FAILED, codex_session_id="same", project_item_id="item")
+    results = worktree_results(tmp_path)
+    results[("git", "-C", str(tmp_path / "repo"), "ls-remote", "--heads", "upstream", "refs/heads/feat/recovery")] = CommandResult(0, f"{HEAD}\trefs/heads/feat/recovery")
+    results[("gh", "pr", "list", "--repo", "owner/repo", "--head", "feat/recovery", "--state", "all", "--json", "number,url,state,baseRefName,headRefName,headRefOid,isDraft,mergedAt,mergeCommit,closingIssuesReferences")] = CommandResult(0, json.dumps([{
+        "number": 39, "url": "https://github.com/owner/repo/pull/39", "state": "OPEN",
+        "baseRefName": "main", "headRefName": "feat/recovery", "headRefOid": HEAD,
+        "closingIssuesReferences": [{"number": 37}],
+    }]))
+    results[("gh", "issue", "view", "37", "--repo", "owner/repo", "--json", "number,title,body,state,url,labels,assignees")] = CommandResult(0, json.dumps({
+        "number": 37, "title": "Correção", "body": "", "state": "OPEN", "url": "issue-url", "labels": [], "assignees": [],
+    }))
+    value = observer(tmp_path, results)
+    value.projects = SimpleNamespace(list_items=lambda: (SimpleNamespace(
+        id="item", is_issue=True, issue_number=37, repository=project_repository, status="AI Review",
+    ),))
+    value.ci_reader = SimpleNamespace(get_ci_snapshot=lambda _: PullRequestCiSnapshot(
+        HEAD, (StatusCheck("test", "COMPLETED", "SUCCESS", None),),
+    ))
+    calls = []
+
+    def session_matches(session, worktree):
+        calls.append((session, worktree))
+        return session_valid
+
+    monkeypatch.setattr("ai_dev_orchestrator.infrastructure.codex_session.session_matches_worktree", session_matches)
+    evidence = value.observe(record)
+    assert evidence.issue_number == 37 and evidence.issue_state == "OPEN"
+    assert evidence.pull_requests[0].issue_numbers == (37,)
+    assert evidence.codex_session_id == ("same" if session_valid else None)
+    assert evidence.project_status == ("AI Review" if project_repository == "owner/repo" else None)
+    assert calls == [("same", str(tmp_path / "worktree"))]

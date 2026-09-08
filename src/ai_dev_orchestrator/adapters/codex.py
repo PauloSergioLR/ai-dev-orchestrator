@@ -193,14 +193,16 @@ class CodexAdapter:
             error = event.get("error")
             if event.get("type") not in {"error", "turn.failed"} and not isinstance(error, dict):
                 continue
-            detail = error if isinstance(error, dict) else event
-            message = detail.get("message", "")
-            message = message if isinstance(message, str) else ""
-            kinds = {mapping.get(str(detail.get("code", "")).casefold(), ProviderFailureKind.UNKNOWN),
-                     classify_provider_text(message)}
-            kind = next(k for k in FAILURE_PRECEDENCE if k in kinds)
-            retry = reliable_retry_at(detail.get("retry_at")) or textual_retry_at(message)
-            signals.append((kind, retry))
+            details = [event, error] if isinstance(error, dict) else [event]
+            for detail in details:
+                message = detail.get("message", "")
+                message = message if isinstance(message, str) else ""
+                kinds = {mapping.get(str(detail.get("code", "")).casefold(), ProviderFailureKind.UNKNOWN),
+                         classify_provider_text(message)}
+                kind = next(k for k in FAILURE_PRECEDENCE if k in kinds)
+                # Todos os sinais contam, inclusive message junto de error aninhado.
+                signals.append((kind, reliable_retry_at(detail.get("retry_at"))))
+                signals.append((kind, textual_retry_at(message)))
         if not signals:
             return None
         kind = next(k for k in FAILURE_PRECEDENCE if any(s[0] == k for s in signals))

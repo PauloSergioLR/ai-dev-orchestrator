@@ -109,5 +109,48 @@ def test_timeout_real_encerra_descendente_antes_de_retry(tmp_path):
     assert not marker.exists()
 
 
-def test_limpeza_nao_comprovada_nunca_vira_timeout_ret entavel(monkeypatch):
-    pass
+def test_limpeza_nao_comprovada_nunca_vira_timeout_retentavel(monkeypatch):
+    """ProcessCleanupError → PROCESS_CLEANUP_ERROR (INTERVENTION), nunca TIMEOUT (RETRY)."""
+    from ai_dev_orchestrator.infrastructure.process import ProcessCleanupError
+    from ai_dev_orchestrator.domain.provider import (
+        FAILURE_POLICY, FailureDisposition, classify_process_failure,
+    )
+
+    monkeypatch.setattr(shutil, "which", lambda name: name)
+
+    def run(*args, **kwargs):
+        raise ProcessCleanupError(args[0], 1, output=b"parcial", stderr=b"")
+    monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.run_captured", run)
+
+    result = CommandRunner(timeout=1).run([sys.executable, "noop.py"])
+    assert result.failure_kind == ProcessFailureKind.PROCESS_CLEANUP_ERROR
+    assert result.failure_kind != ProcessFailureKind.TIMEOUT
+
+    kind = classify_process_failure(result.failure_kind)
+    assert kind.value == "PROCESS_CLEANUP_ERROR"
+    assert FAILURE_POLICY[kind] == FailureDisposition.INTERVENTION
+
+
+
+@pytest.mark.parametrize("code", [0, 2, 126])
+def test_processo_real_preserva_exit_code(code):
+    result = CommandRunner(timeout=10).run([sys.executable, "-c", f"raise SystemExit({code})"])
+    assert result.returncode == code
+    assert result.succeeded == (code == 0)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Job Object é específico do Windows")
+def test_falha_ao_vincular_job_nao_inicia_comando(monkeypatch, tmp_path):
+    from ai_dev_orchestrator.infrastructure.windows_job import WindowsJob
+
+    marker = tmp_path / "nao-iniciar.txt"
+
+    def deny(self, process):
+        raise PermissionError("simulação de vínculo recusado")
+
+    monkeypatch.setattr(WindowsJob, "assign", deny)
+    result = CommandRunner(timeout=10).run([
+        sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(marker),
+    ])
+    assert result.failure_kind == ProcessFailureKind.OS_ERROR
+    assert not marker.exists()

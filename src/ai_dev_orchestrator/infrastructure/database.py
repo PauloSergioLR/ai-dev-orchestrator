@@ -92,6 +92,9 @@ class SqliteExecutionStore:
                 for name, declaration in additions.items():
                     if name not in existing_columns:
                         c.execute(f"ALTER TABLE executions ADD COLUMN {name} {declaration}")
+                        if name == "codex_start_attempted":
+                            # O schema antigo não prova que CODEX_RUNNING ainda não chamou a CLI.
+                            c.execute("UPDATE executions SET codex_start_attempted = 1 WHERE phase != 'PREPARING' OR codex_session_id IS NOT NULL")
                 c.execute(
                     "CREATE TABLE IF NOT EXISTS execution_events (execution_id TEXT NOT NULL REFERENCES executions(id), sequence INTEGER NOT NULL, previous_phase TEXT, phase TEXT NOT NULL, created_at TEXT NOT NULL, summary TEXT NOT NULL, head_sha TEXT, PRIMARY KEY(execution_id, sequence))"
                 )
@@ -557,6 +560,7 @@ def _sanitize_finding(value: str, limit: int) -> str:
 def _record(row: sqlite3.Row) -> RunRecord:
     excluded = {"id", "issue_number", "phase", "created_at", "updated_at", "terminal"}
     values = {key: row[key] for key in row.keys() if key not in excluded}
+    values["codex_start_attempted"] = bool(values.get("codex_start_attempted", False))
     for field in ("quota_observed_at", "quota_retry_at"):
         if values.get(field):
             values[field] = _parse_time(values[field])

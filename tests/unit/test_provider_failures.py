@@ -193,3 +193,21 @@ def test_thread_id_invalido_falha_fechado(tmp_path, value):
         CodexAdapter(Runner(CommandResult(126, jsonl({"type": "thread.started", "thread_id": value})))).execute(tmp_path, "p")
     assert caught.value.classification == Kind.PROTOCOL_ERROR
     assert caught.value.session_id is None
+
+
+
+def test_quota_no_evento_prevalece_sobre_error_network_aninhado(tmp_path):
+    output = jsonl({"type": "error", "message": "You've hit your usage limit",
+                    "error": {"code": "network", "message": "connection reset"}})
+    with pytest.raises(ProviderFailure) as caught:
+        CodexAdapter(Runner(CommandResult(126, output))).resume(tmp_path, "same", "p")
+    assert caught.value.classification == Kind.TERMINAL_QUOTA
+
+
+def test_retry_estruturado_e_textual_conflitantes_no_mesmo_evento(tmp_path):
+    output = jsonl({"type": "error", "code": "quota_exceeded",
+                    "message": "usage limit; try again at 2026-09-09T05:00:00Z",
+                    "retry_at": "2026-09-08T05:00:00Z"})
+    with pytest.raises(ProviderFailure) as caught:
+        CodexAdapter(Runner(CommandResult(126, output))).resume(tmp_path, "same", "p")
+    assert caught.value.retry_at is None

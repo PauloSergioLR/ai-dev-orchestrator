@@ -84,3 +84,93 @@ da chamada ao Codex, preservando auditoria mesmo se o provider falhar.
 
 A cobertura tem três níveis: planner puro, executor com doubles dos adapters e
 integração controlada do observer, effects, serviço de retomada e CLI.
+
+## Falhas de provider e retomada
+
+A política é centralizada por classificação, compartilhada entre pipeline,
+resume e supervisor. Esperas e bloqueios continuam ativos: work/watch não
+selecionam outra Issue enquanto existir uma execução suspensa.
+
+| Classificação | Estado e política |
+| --- | --- |
+| TERMINAL_QUOTA, TRANSIENT_RATE_LIMIT | Espera do provider; reset confiável ou intervenção |
+| NETWORK_ERROR, TIMEOUT, LOCAL_TRANSIENT (inclui OS_ERROR local) | WAITING_PROVIDER; até três retries após 30, 60 e 120 segundos |
+| AUTH_ERROR, MODEL_UNAVAILABLE | BLOCKED_PROVIDER; corrigir a causa antes de retry explícito |
+| UNKNOWN, EXECUTABLE_MISSING, PROTOCOL_ERROR, MALFORMED_JSON, ENCODING_ERROR, PROCESS_CLEANUP_ERROR | Bloqueio conservador, sem retry automático |
+
+TERMINAL_QUOTA descreve a indisponibilidade da quota, não o fim da execução.
+O horário de reset exige data e fuso explícitos. “Try again at 5:09 AM” não
+basta. Sinais JSONL têm precedência determinística: quota, autenticação,
+modelo indisponível, rate-limit, rede, timeout e desconhecido. O exit 126 com
+stderr vazio é diagnosticado pelos eventos error/turn.failed; error.code
+não é obrigatório. A identidade emitida em thread.started é preservada,
+inclusive em falhas com saída parcial confiável.
+
+A fase suspensa e o contador de retries ficam no SQLite e sobrevivem ao
+reinício. Uma tentativa bem-sucedida encerra a sequência de retries daquela
+etapa. Ao esgotar o limite, a execução permanece bloqueada. Diagnósticos
+persistem classificação, origem, exit code e tentativa; mensagens brutas,
+prompts e URLs dos providers não são copiados para o journal.
+
+Use orch state --issue N para inspecionar o checkpoint e orch resume --issue N
+para a retomada normal. Após corrigir a causa, orch resume --issue N
+--retry-provider permite uma tentativa explícita, inclusive quando não há
+reset confiável. Essa opção não dispensa as provas do planner. Se o início do
+Codex foi tentado sem que um ID confiável chegasse ao checkpoint, o sistema
+bloqueia: não inicia outra sessão nem usa --last como alternativa.
+
+Durante uma correção, execution_id, sessão, PR, branch, worktree, modelos e
+findings são preservados. Retry de transporte não incrementa novamente
+correction_attempts. Depois do novo commit, as provas antigas de CI/review/merge
+são invalidadas; os findings continuam associados ao SHA que os originou.
+
+## Recuperação explícita de FAILED histórico
+
+orch resume --issue N --recover-failed solicita reconciliação pelo domínio/store.
+A migração automática para schema 3 preserva registros anteriores e acrescenta
+os checkpoints de início de sessão e retry. Nenhuma edição manual do banco é
+necessária ou suportada por esse caminho.
+
+Somente FAILED com evidência persistida de falha transitória de rede, timeout ou
+falha local transitória pode ser candidato. O journal deve provar a fase anterior
+CODEX_RUNNING, GEMINI_REVIEWING ou TESTING. O observer exige worktree e branch
+corretos, raiz/base do repositório, HEAD local e remoto iguais ao checkpoint,
+PR único aberto e vinculado à Issue aberta, ausência de merge, identidade e
+status convergentes do item do Project e metadados locais da sessão Codex
+com o mesmo ID e diretório. CI, review e findings também precisam ser coerentes
+com a etapa. Metadados ausentes, duplicados ou em formato desconhecido bloqueiam.
+
+Após leituras externas, o store compara novamente o snapshot e revalida as
+provas em transação, impedindo reativação concorrente com outro run ativo.
+A reativação preserva o ID, registra evento auditável e não flexibiliza a
+transição genérica de FAILED. A execução volta ao planner antes de qualquer
+efeito. Mudanças externas posteriores continuam sujeitas às validações de cada
+etapa; as leituras GitHub não constituem uma transação com o banco local.
+
+work/watch bloqueiam a seleção de nova Issue enquanto houver candidato histórico
+pendente de reconciliação explícita. Registros terminais sem evidência suficiente
+não são automaticamente reinterpretados como falhas transitórias.
+
+## Processos e encoding no Windows/Linux
+
+CommandRunner captura bytes e declara políticas independentes para stdout e
+stderr. SYSTEM_TEXT tenta UTF-8 e então a code page local, preservando bytes
+não mapeáveis como escapes visíveis. UTF8_STRICT rejeita corrupção sem fallback;
+BINARY mantém os bytes sem interpretação textual. Um erro de decoding preserva
+o returncode real e identifica o stream. Codex JSONL, Antigravity JSON e saídas
+GitHub de máquina usam UTF8_STRICT; stderr diagnóstico pode usar SYSTEM_TEXT.
+
+Prompts seguem por stdin UTF-8 e shell=False permanece obrigatório. No Windows,
+um bootstrap Python aguarda o vínculo a um Job Object privado antes de iniciar
+o comando. A árvore herda o job, sem breakaway; timeout termina o job e confirma
+que não há processos ativos antes de liberar retry. Fechar o job também encerra
+descendentes remanescentes. Não há dependência de taskkill nem enumeração global
+de processos. No Linux, o comando inicia em sessão própria e o timeout encerra
+seu grupo de processos. Isso não é um sandbox para comandos que tentem escapar
+deliberadamente do grupo. Falha em confirmar encerramento bloqueia a retomada
+automática (PROCESS_CLEANUP_ERROR).
+
+O mecanismo Windows segue o contrato de
+[Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects).
+Os testes locais usam processos temporários, stdin grande, caminhos com espaços
+ou acentos, CP1252 e timeout com descendente; não executam sessões reais de IA.

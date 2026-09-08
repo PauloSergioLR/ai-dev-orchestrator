@@ -132,3 +132,23 @@ def test_migrates_schema_v1_preserving_execution_and_journal(tmp_path: Path) -> 
     with sqlite3.connect(path) as connection:
         assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 3
         assert connection.execute("SELECT name FROM sqlite_master WHERE name = 'review_findings'").fetchone()
+
+
+
+def test_schema_v2_sem_sessao_nao_autoriza_novo_inicio(tmp_path):
+    path = tmp_path / "legacy-v2.db"
+    store = SqliteExecutionStore(path)
+    run = store.create(37, branch="feat/recovery", worktree_path=str(tmp_path), base_ref="main")
+    store.transition(run.id, ExecutionPhase.CODEX_RUNNING, summary="início legado")
+    events = store.events(run.id)
+    # Simula apenas o banco temporário no formato anterior ao checkpoint de início.
+    with sqlite3.connect(path) as connection:
+        for column in ("provider_resume_phase", "provider_retry_attempts", "codex_start_attempted"):
+            connection.execute(f"ALTER TABLE executions DROP COLUMN {column}")
+        connection.execute("UPDATE schema_version SET version = 2")
+    reopened = SqliteExecutionStore(path)
+    restored = reopened.get(run.id)
+    assert restored.id == run.id and restored.codex_session_id is None
+    assert restored.codex_start_attempted is True
+    assert restored.provider_retry_attempts == 0
+    assert reopened.events(run.id) == events

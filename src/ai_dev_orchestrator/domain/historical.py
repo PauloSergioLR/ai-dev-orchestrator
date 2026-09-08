@@ -76,4 +76,3 @@ def validate_historical(run, target, observed, planner):
     decision = planner.plan(candidate, observed)
     if decision.action == RecoveryAction.BLOCK:
         raise ValueError(decision.reason)
-

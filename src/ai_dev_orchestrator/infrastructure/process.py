@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+import json
+import sys
 import locale
 import os
 from pathlib import Path
@@ -38,14 +40,37 @@ def run_captured(command, *, capture_output, timeout, shell, check, cwd=None, in
     """Captura bytes e encerra a árvore antes de permitir retry após timeout."""
     if shell or not capture_output or check:
         raise ValueError("Contrato de processo exige captura, shell=False e check=False")
-    options = {"start_new_session": True} if os.name != "nt" else {}
-    process = subprocess.Popen(command, cwd=cwd, shell=False, stdin=subprocess.PIPE if input is not None else None,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, **options)
+    job = None
+    launch_command = command
+    options = {"start_new_session": True}
+    if os.name == "nt":
+        from ai_dev_orchestrator.infrastructure.windows_job import WindowsJob
+        job = WindowsJob()
+        launch_command = [sys.executable, str(Path(__file__).with_name("_process_child.py"))]
+        header = json.dumps({"command": command, "has_input": input is not None}).encode("ascii")
+        input = header + b"\n" + (input or b"")
+        options = {"creationflags": subprocess.CREATE_NO_WINDOW}
+    try:
+        process = subprocess.Popen(launch_command, cwd=cwd, shell=False,
+                                   stdin=subprocess.PIPE if input is not None else None,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, **options)
+        if job is not None:
+            # O bootstrap só inicia o comando após receber o cabeçalho via stdin.
+            try:
+                job.assign(process)
+            except OSError:
+                process.kill()
+                process.communicate(timeout=5)
+                raise
+    except BaseException:
+        if job is not None:
+            job.close()
+        raise
     try:
         try:
             stdout, stderr = process.communicate(input=input, timeout=timeout)
         except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
-            stopped = _stop_process_tree(process)
+            stopped = job.stop() if job is not None else _stop_process_tree(process)
             try:
                 stdout, stderr = process.communicate(timeout=5)
             except subprocess.TimeoutExpired:
@@ -59,6 +84,8 @@ def run_captured(command, *, capture_output, timeout, shell, check, cwd=None, in
             raise failure(command, timeout, output=stdout, stderr=stderr) from error
         return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     finally:
+        if job is not None:
+            job.close()
         for stream in (process.stdin, process.stdout, process.stderr):
             if stream is not None:
                 stream.close()
@@ -67,15 +94,8 @@ def run_captured(command, *, capture_output, timeout, shell, check, cwd=None, in
 def _stop_process_tree(process: subprocess.Popen) -> bool:
     stopped = False
     try:
-        if os.name == "nt":
-            taskkill = shutil.which("taskkill.exe")
-            if taskkill is not None:
-                result = subprocess.run([taskkill, "/PID", str(process.pid), "/T", "/F"],
-                                        capture_output=True, timeout=10, shell=False, check=False)
-                stopped = result.returncode == 0
-        else:
-            os.killpg(process.pid, signal.SIGKILL)
-            stopped = True
+        os.killpg(process.pid, signal.SIGKILL)
+        stopped = True
     except ProcessLookupError:
         stopped = True
     except (OSError, subprocess.TimeoutExpired):

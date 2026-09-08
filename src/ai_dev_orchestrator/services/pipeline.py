@@ -749,7 +749,8 @@ class RunPipeline:
                 and self.ci_reader is not None
             )
             self._transition(
-                ExecutionPhase.TESTING, "Gates locais da correção serão executados"
+                ExecutionPhase.TESTING, "Gates locais da correção serão executados",
+                provider_retry_attempts=0
             )
             gates = self.local_validator.validate(worktree.path)
             self._ensure_existing_pull_request(
@@ -763,7 +764,12 @@ class RunPipeline:
             self._ensure_existing_pull_request(
                 pull_request, worktree.branch, ci_result.expected_head_sha
             )
-            self._transition(ExecutionPhase.PUSH_PENDING, "Commit da correção confirmado; push será publicado", current_head_sha=new_head)
+            self._transition(
+                ExecutionPhase.PUSH_PENDING, "Commit da correção confirmado; push será publicado",
+                current_head_sha=new_head, head_sha=new_head, ci_head_sha=None,
+                reviewed_head_sha=None, review_verdict=None,
+                merge_commit_sha=None, merged_head_sha=None,
+            )
             self.git_publisher.push(
                 worktree.path, self.config.workspace.remote_name, worktree.branch
             )

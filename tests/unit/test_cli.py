@@ -128,3 +128,21 @@ def test_work_reports_no_eligible_issue_as_success(monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert result.output == "Nenhuma Issue Ready elegível.\n"
+
+
+
+def test_resume_encaminha_flags_explicitas_sem_substituir_identidade(monkeypatch):
+    calls = []
+
+    class Service:
+        def resume(self, issue, **options):
+            calls.append((issue, options))
+            return ResumeResult(issue, "same", "TESTING", "feat/recovery", "session", 39, "a" * 40, 2)
+
+    monkeypatch.setattr("ai_dev_orchestrator.cli.load_config", lambda: object())
+    monkeypatch.setattr("ai_dev_orchestrator.cli.ResumeService.from_config", lambda _: Service())
+    for flag, option in (("--retry-provider", "retry_provider"), ("--recover-failed", "recover_failed")):
+        result = runner.invoke(app, ["resume", "--issue", "37", flag])
+        assert result.exit_code == 0
+        assert calls[-1] == (37, {option: True})
+        assert "Execução: same" in result.output
