@@ -184,6 +184,94 @@ def pipeline(tmp_path: Path, fakes: LoopFakes, maximum: int = 3, auto_merge: boo
     )
 
 
+@pytest.mark.parametrize("kind", ["NETWORK_ERROR", "TERMINAL_QUOTA", "TIMEOUT"])
+def test_pipeline_recovery_correction_preserves_identity_after_restart(tmp_path, kind):
+    """Pipeline → SQLite → restart → resume: o mesmo PR recebe apenas um novo commit."""
+    from datetime import datetime, timezone
+    from ai_dev_orchestrator.domain.execution import ExecutionPhase
+    from ai_dev_orchestrator.domain.provider import ProviderFailure, ProviderFailureKind
+    from ai_dev_orchestrator.domain.recovery import (
+        RecoveryObservation, RecoveryPolicy, WorktreeState, PullRequestObservation,
+        PullRequestState, CiObservation, CiState, MergeObservation, MergeState,
+    )
+    from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
+    from ai_dev_orchestrator.services.recovery_effects import RecoveryEffects
+    from ai_dev_orchestrator.services.recovery_executor import RecoveryExecutor
+    from ai_dev_orchestrator.services.recovery_planner import RecoveryPlanner
+    from ai_dev_orchestrator.services.resume import ResumeService
+    from ai_dev_orchestrator.services.ci_gate import CiGate
+
+    class InterruptedFakes(LoopFakes):
+        fail = True
+
+        def resume(self, worktree, session_id, prompt):
+            if self.fail:
+                self.events.append(f"interrupted:{session_id}")
+                raise ProviderFailure("codex", ProviderFailureKind(kind), "diagnóstico",
+                                      datetime(2026, 1, 1, tzinfo=timezone.utc),
+                                      session_id=session_id, returncode=126)
+            return super().resume(worktree, session_id, prompt)
+
+    fakes = InterruptedFakes()
+    initial = pipeline(tmp_path, fakes)
+    database = tmp_path / "state.db"
+    initial.execution_store = SqliteExecutionStore(database)
+    with pytest.raises(RunPipelineError, match="preservada"):
+        initial.run(31, "feat/review-loop")
+    waiting = initial.execution_store.get_latest_for_issue(31)
+    assert waiting.phase == (ExecutionPhase.WAITING_CODEX_QUOTA if kind == "TERMINAL_QUOTA" else ExecutionPhase.WAITING_PROVIDER)
+    assert waiting.provider_resume_phase == "CODEX_RUNNING"
+    assert waiting.codex_session_id == "sessao-original"
+    assert waiting.correction_attempts == 1
+    assert waiting.reviewed_head_sha == waiting.ci_head_sha == waiting.current_head_sha == SHA_A
+    assert waiting.review_verdict == "REJECTED"
+    assert waiting.pull_request_number == 32 and waiting.project_status == "AI Review"
+    prior_findings = initial.execution_store.review_findings(waiting.id, SHA_A)
+    assert prior_findings
+
+    store = SqliteExecutionStore(database)
+    fakes.fail = False
+    class Observer:
+        def observe(self, run):
+            return RecoveryObservation(
+                WorktreeState.CONVERGENT, local_head_sha=fakes.local_head,
+                local_head_parent_sha=SHA_A, has_worktree_changes=fakes.local_head == SHA_A,
+                remote_head_sha=fakes.head,
+                pull_requests=(PullRequestObservation(32, waiting.pull_request_url, "acme/repo", "main",
+                                                      waiting.branch, fakes.head, PullRequestState.OPEN),),
+                ci=CiObservation(CiState.SUCCESS, fakes.head),
+                findings_head_sha=run.reviewed_head_sha if store.review_findings(run.id, run.reviewed_head_sha) else None,
+                merge=MergeObservation(MergeState.OPEN),
+            )
+
+    effects = RecoveryEffects(initial.config)
+    effects.codex = fakes
+    effects.validation = fakes
+    effects.publication = fakes
+    effects.issues = fakes
+    effects.pull_requests = fakes
+    effects.reviewer = fakes
+    effects._wait_ci_result = lambda run: CiGate(fakes, initial.config.ci).wait(run.pull_request_number, run.current_head_sha)
+    policy = RecoveryPolicy("acme/repo", "main", False, 3)
+    result = ResumeService(store, Observer(), RecoveryPlanner(policy), RecoveryExecutor(policy, store, effects)).resume(
+        31, retry_provider=kind == "TERMINAL_QUOTA",
+    )
+    final = store.get(waiting.id)
+    assert result.phase == "APPROVED_AWAITING_ACTION"
+    for identity_field in ("id", "issue_number", "branch", "worktree_path", "base_ref", "codex_session_id",
+                  "pull_request_number", "pull_request_url", "project_item_id", "project_status"):
+        assert getattr(final, identity_field) == getattr(waiting, identity_field)
+    assert final.correction_attempts == 1 and final.provider_retry_attempts == 0
+    assert final.current_head_sha == final.ci_head_sha == final.reviewed_head_sha == SHA_B
+    assert final.review_verdict == "APPROVED"
+    assert store.review_findings(final.id, SHA_A) == prior_findings
+    assert not store.review_findings(final.id, SHA_B)
+    assert len(store.list_history()) == 1
+    assert fakes.events.count("execute") == fakes.events.count("criar-pr") == fakes.correction_commits == 1
+    assert len(fakes.resume_prompts) == 1 and "Ajuste" in fakes.resume_prompts[0]
+    assert not fakes.merge_calls
+
+
 def test_rejected_review_resumes_same_session_then_approves(tmp_path: Path) -> None:
     fakes = LoopFakes()
     result = pipeline(tmp_path, fakes).run(31, "feat/review-loop")

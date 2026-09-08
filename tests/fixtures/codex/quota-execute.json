@@ -1,0 +1,10 @@
+{
+  "returncode": 126,
+  "stderr": "",
+  "events": [
+    {"type": "thread.started", "thread_id": "01a074ff-702a-7f50-9b50-1978f0420cf5"},
+    {"type": "turn.started"},
+    {"type": "error", "message": "You've hit your usage limit. Upgrade to Pro (...), visit (...) or try again at 5:09 AM."},
+    {"type": "turn.failed", "error": {"message": "You've hit your usage limit. Upgrade to Pro (...), visit (...) or try again at 5:09 AM."}}
+  ]
+}

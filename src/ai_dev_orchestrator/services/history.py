@@ -44,10 +44,11 @@ class HistoryService:
 
 
 def _execution_end(events: tuple[ExecutionEvent, ...], run: RunRecord):
-    """Usa a transição terminal original, não checkpoints operacionais posteriores."""
-    for event in events:
-        if event.phase in TERMINAL_PHASES and event.previous_phase != event.phase:
-            return event.created_at
+    """Ignora FAILED já reconciliado e checkpoints posteriores à conclusão atual."""
+    if run.phase in TERMINAL_PHASES:
+        for event in reversed(events):
+            if event.phase == run.phase and event.previous_phase != event.phase:
+                return event.created_at
     return run.updated_at
 
 

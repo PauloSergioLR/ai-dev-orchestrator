@@ -387,7 +387,7 @@ def test_correction_failure_or_session_mismatch_preserves_audit(tmp_path: Path, 
     with pytest.raises(Exception):
         executor.execute(run, decision(RecoveryAction.RESUME_CORRECTION), observation)
     persisted = store.get(run.id)
-    assert (persisted.phase, persisted.correction_attempts, effects.calls) == (ExecutionPhase.NEEDS_CHANGES, 1, {"correction": 1})
+    assert (persisted.phase, persisted.correction_attempts, effects.calls) == (ExecutionPhase.CODEX_RUNNING, 1, {"correction": 1})
 
 
 def test_correction_limit_skips_provider(tmp_path: Path) -> None:

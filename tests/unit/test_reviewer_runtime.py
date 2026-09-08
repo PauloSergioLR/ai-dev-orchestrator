@@ -47,7 +47,7 @@ def test_doctor_and_runtime_resolve_same_configured_executable(tmp_path, monkeyp
         return subprocess.CompletedProcess(args, 0, output.encode("utf-8"), b"")
 
     monkeypatch.setattr(shutil, "which", which)
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.run_captured", run)
     config = load_config(path)
     adapter = AntigravityAdapter(12, executable=config.review.executable)
     check = DoctorService(config_path=path)._check_antigravity_cli()

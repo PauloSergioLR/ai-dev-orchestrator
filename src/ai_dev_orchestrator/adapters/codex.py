@@ -4,13 +4,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
-from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner
+from ai_dev_orchestrator.infrastructure.process import (
+    CommandResult, CommandRunner, OutputPolicy,
+)
 from ai_dev_orchestrator.domain.provider import (
     ProviderFailure, ProviderFailureKind, classify_provider_text,
+    FAILURE_MESSAGES, FAILURE_PRECEDENCE, reliable_retry_at, textual_retry_at, classify_process_failure,
 )
 
 
@@ -19,6 +23,10 @@ CODEX_TIMEOUT_SECONDS = 30 * 60
 
 class CodexError(Exception):
     """Indica uma falha esperada ao executar ou retomar o Codex CLI."""
+
+
+class CodexProviderFailure(ProviderFailure, CodexError):
+    """Diagnóstico tipado compatível com a fronteira pública do adapter."""
 
 
 @dataclass(frozen=True)
@@ -36,7 +44,8 @@ class ProcessRunner(Protocol):
     """Contrato mínimo do executor de processos usado pelo adapter."""
 
     def run(
-        self, arguments: Sequence[str], input_text: str | None = None
+        self, arguments: Sequence[str], input_text: str | None = None, *,
+        stdout_policy: OutputPolicy = OutputPolicy.UTF8_STRICT,
     ) -> CommandResult:
         """Executa um processo local."""
 
@@ -59,8 +68,7 @@ class CodexAdapter:
         arguments = ["codex", "exec", "-C", str(path), "--json"]
         if self.model != "default":
             arguments.extend(["--model", self.model])
-        result = self._run([*arguments, "-"], prompt, "executar")
-        session_id, final_message = self._parse_jsonl(result.stdout, require_session=True)
+        result, session_id, final_message = self._run([*arguments, "-"], prompt, "executar")
         assert session_id is not None
         return CodexExecution(
             session_id=session_id,
@@ -80,13 +88,11 @@ class CodexAdapter:
         arguments = ["codex", "exec", "-C", str(path), "--json"]
         if self.model != "default":
             arguments.extend(["--model", self.model])
-        result = self._run(
+        result, returned_session_id, final_message = self._run(
             [*arguments, "resume", session_id, "-"],
             prompt,
             "retomar a sessão",
-        )
-        returned_session_id, final_message = self._parse_jsonl(
-            result.stdout, require_session=True
+            expected_session=session_id,
         )
         assert returned_session_id is not None
         if returned_session_id != session_id:
@@ -109,87 +115,108 @@ class CodexAdapter:
             raise CodexError(f"O worktree informado não é um diretório acessível: {path}")
         return path.resolve()
 
-    def _run(self, arguments: list[str], input_text: str, operation: str) -> CommandResult:
-        result = self.runner.run(arguments, input_text=input_text)
-        if result.error:
-            raise CodexError(f"Não foi possível executar Codex ao {operation}: {result.error}")
-        if not result.succeeded:
-            detail = result.stderr.strip() or result.stdout.strip()
-            structured = self._structured_failure(result.stdout)
-            kind = structured[0] if structured else classify_provider_text(detail)
-            retry_at = structured[1] if structured else None
-            if kind is not ProviderFailureKind.UNKNOWN:
-                raise ProviderFailure(
-                    "codex", kind, "Falha reportada pela CLI", datetime.now(timezone.utc), retry_at,
-                    self._partial_session(result.stdout),
-                )
-            message = f"Codex retornou código {result.returncode} ao {operation}"
-            if detail:
-                message = f"{message}: {detail}"
-            raise CodexError(message)
-        return result
-
-    @staticmethod
-    def _partial_session(stdout: str) -> str | None:
-        for line in stdout.splitlines():
+    def _run(self, arguments: list[str], input_text: str, operation: str,
+             expected_session: str | None = None) -> tuple[CommandResult, str | None, str]:
+        result = self.runner.run(arguments, input_text=input_text,
+                                 stdout_policy=OutputPolicy.UTF8_STRICT)
+        events = []
+        malformed = False
+        lines = result.stdout.splitlines()
+        if "stdout" in result.encoding_errors:
+            # Somente linhas completas anteriores à corrupção podem provar o ID.
+            # Esse prefixo nunca é aceito como resultado ou classificação remota.
+            lines = []
+            for raw in result.stdout_bytes.splitlines(keepends=True):
+                if not raw.endswith(b"\n"):
+                    break
+                try:
+                    lines.append(raw.decode("utf-8", errors="strict"))
+                except UnicodeDecodeError:
+                    break
+        for line in lines:
+            if not line.strip():
+                continue
             try:
                 event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(event, dict) and event.get("type") == "thread.started":
-                value = event.get("thread_id")
-                return value if isinstance(value, str) and value else None
-        return None
+                if not isinstance(event, dict):
+                    raise ValueError()
+                events.append(event)
+            except (ValueError, json.JSONDecodeError):
+                malformed = True
+                break
+        sessions = {e["thread_id"] for e in events if e.get("type") == "thread.started"
+                    and isinstance(e.get("thread_id"), str)
+                    and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", e["thread_id"])}
+        session = expected_session or (next(iter(sessions)) if len(sessions) == 1 else None)
+
+        def fail(kind, source, retry_at=None, message=None):
+            raise CodexProviderFailure(
+                "codex", kind, message or FAILURE_MESSAGES[kind], datetime.now(timezone.utc),
+                retry_at, session, result.returncode, source,
+            )
+
+        if len(sessions) > 1 or (expected_session and sessions - {expected_session}):
+            fail(ProviderFailureKind.PROTOCOL_ERROR, "thread.started",
+                 message="Codex retornou uma sessão diferente da solicitada")
+        if any(e.get("type") == "thread.started" and (not isinstance(e.get("thread_id"), str) or e["thread_id"] not in sessions) for e in events):
+            fail(ProviderFailureKind.PROTOCOL_ERROR, "thread.started")
+        if result.error:
+            fail(classify_process_failure(result.failure_kind), "processo")
+        if malformed:
+            fail(ProviderFailureKind.MALFORMED_JSON, "stdout", message="Codex retornou JSONL inválido")
+        structured = self._structured_failure(events)
+        if structured or not result.succeeded:
+            kind, retry = structured or (classify_provider_text(result.stderr), None)
+            # stderr pode descrever uma sessão ausente, mas nunca prova sucesso.
+            message = None
+            if kind == ProviderFailureKind.UNKNOWN:
+                message = f"Codex retornou código {result.returncode} ao {operation}; saída omitida"
+            fail(kind, "JSONL" if structured else "stderr", retry, message)
+        try:
+            session_id, final_message = self._parse_events(events, require_session=True)
+        except CodexError as error:
+            fail(ProviderFailureKind.PROTOCOL_ERROR, "JSONL", message=str(error))
+        return result, session_id, final_message
 
     @staticmethod
-    def _structured_failure(stdout: str) -> tuple[ProviderFailureKind, datetime | None] | None:
+    def _structured_failure(events: list[dict[str, Any]]) -> tuple[ProviderFailureKind, datetime | None] | None:
         mapping = {
             "rate_limit": ProviderFailureKind.TRANSIENT_RATE_LIMIT,
             "quota_exceeded": ProviderFailureKind.TERMINAL_QUOTA,
             "authentication": ProviderFailureKind.AUTH_ERROR,
             "network": ProviderFailureKind.NETWORK_ERROR,
             "model_unavailable": ProviderFailureKind.MODEL_UNAVAILABLE,
+            "timeout": ProviderFailureKind.TIMEOUT,
         }
-        for line in stdout.splitlines():
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(event, dict):
-                continue
+        signals: list[tuple[ProviderFailureKind, datetime | None]] = []
+        for event in events:
             error = event.get("error")
-            if not isinstance(error, dict):
+            if event.get("type") not in {"error", "turn.failed"} and not isinstance(error, dict):
                 continue
-            code = str(error.get("code", "")).casefold()
-            if code not in mapping:
-                continue
-            retry_at = None
-            raw_retry = error.get("retry_at")
-            if isinstance(raw_retry, str):
-                try:
-                    retry_at = datetime.fromisoformat(raw_retry.replace("Z", "+00:00"))
-                    if retry_at.tzinfo is None:
-                        retry_at = None
-                except ValueError:
-                    retry_at = None
-            return mapping[code], retry_at
-        return None
+            details = [event, error] if isinstance(error, dict) else [event]
+            for detail in details:
+                message = detail.get("message", "")
+                message = message if isinstance(message, str) else ""
+                kinds = {mapping.get(str(detail.get("code", "")).casefold(), ProviderFailureKind.UNKNOWN),
+                         classify_provider_text(message)}
+                kind = next(k for k in FAILURE_PRECEDENCE if k in kinds)
+                # Todos os sinais contam, inclusive message junto de error aninhado.
+                signals.append((kind, reliable_retry_at(detail.get("retry_at"))))
+                signals.append((kind, textual_retry_at(message)))
+        if not signals:
+            return None
+        kind = next(k for k in FAILURE_PRECEDENCE if any(s[0] == k for s in signals))
+        retries = {r for k, r in signals if k == kind and r is not None}
+        # Sinais conflitantes não autorizam escolher uma janela arbitrária.
+        return kind, next(iter(retries)) if len(retries) == 1 else None
 
     @classmethod
-    def _parse_jsonl(cls, stdout: str, require_session: bool) -> tuple[str | None, str]:
+    def _parse_events(cls, events: list[dict[str, Any]], require_session: bool) -> tuple[str | None, str]:
         session_id: str | None = None
         final_message: str | None = None
         has_event = False
         completed = False
-        for line in stdout.splitlines():
-            if not line.strip():
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError as error:
-                raise CodexError("Codex retornou JSONL inválido") from error
-            if not isinstance(event, dict):
-                raise CodexError("Codex retornou um evento JSONL inválido: objeto esperado")
+        for event in events:
             has_event = True
             if event.get("type") == "thread.started":
                 session_id = cls._required_string(event, "thread_id", "thread.started")

@@ -24,6 +24,7 @@ class WorkError(Exception):
 
 class ActiveExecutionReader(Protocol):
     def list_active(self) -> tuple[RunRecord, ...]: ...
+    def list_historical_candidates(self) -> tuple[RunRecord, ...]: ...
 
 
 class ProjectReader(Protocol):
@@ -106,6 +107,10 @@ class WorkService:
         )
 
     def work(self) -> WorkResult | None:
+        historical = self.store.list_historical_candidates()
+        if historical:
+            raise WorkError("Execução histórica com falha transitória exige reconciliação: "
+                            + ", ".join(f"#{run.issue_number} (--recover-failed)" for run in historical))
         active = self.store.list_active()
         if len(active) > 1:
             issues = ", ".join(f"#{run.issue_number}" for run in active)

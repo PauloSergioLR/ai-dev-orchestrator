@@ -96,6 +96,7 @@ class PullRequestObservation:
     head_branch: str
     head_sha: str
     state: PullRequestState
+    issue_numbers: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -125,6 +126,10 @@ class RecoveryObservation:
     findings_head_sha: str | None = None
     merge: MergeObservation = field(default_factory=MergeObservation)
     project_state: ProjectState = ProjectState.UNKNOWN
+    issue_number: int | None = None
+    issue_state: str | None = None
+    codex_session_id: str | None = None
+    project_status: str | None = None
 
 
 @dataclass(frozen=True)

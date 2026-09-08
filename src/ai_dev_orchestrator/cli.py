@@ -287,6 +287,10 @@ def state(
             "Próxima tentativa: "
             + (record.quota_retry_at.isoformat() if record.quota_retry_at else "não informada")
         )
+        if record.provider_resume_phase:
+            typer.echo(f"Fase suspensa: {record.provider_resume_phase}")
+            typer.echo(f"Falhas consecutivas: {record.provider_retry_attempts}")
+            typer.echo(f"Diagnóstico: {record.last_error or '-'}")
     typer.echo(f"Atualizado em: {record.updated_at.isoformat()}")
 
 
@@ -354,10 +358,18 @@ def _usage_text(codex: int | None, gemini: int | None, codex_cost: float | None,
 @app.command()
 def resume(
     issue: int = typer.Option(..., "--issue", min=1, help="Número positivo da Issue."),
+    retry_provider: bool = typer.Option(False, "--retry-provider", help="Tenta novamente após intervenção na causa do bloqueio do provider."),
+    recover_failed: bool = typer.Option(False, "--recover-failed", help="Reconcilia FAILED transitório com provas locais/remotas antes de reativar."),
 ) -> None:
     """Retoma uma execução ativa a partir do estado persistido."""
     try:
-        result = ResumeService.from_config(load_config()).resume(issue)
+        service = ResumeService.from_config(load_config())
+        options = {}
+        if retry_provider:
+            options["retry_provider"] = True
+        if recover_failed:
+            options["recover_failed"] = True
+        result = service.resume(issue, **options)
     except (ConfigurationError, ResumeError, ExecutionStoreError) as error:
         typer.echo(f"Erro: {error}", err=True)
         raise typer.Exit(code=1) from error

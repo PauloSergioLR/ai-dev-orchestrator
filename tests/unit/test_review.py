@@ -11,7 +11,7 @@ from ai_dev_orchestrator.domain.issue import Issue
 from ai_dev_orchestrator.domain.provider import ProviderFailure, ProviderFailureKind
 from ai_dev_orchestrator.domain.review import ReviewVerdict
 from ai_dev_orchestrator.domain.review import FindingSeverity, ReviewFinding, StructuredReview
-from ai_dev_orchestrator.infrastructure.process import CommandResult
+from ai_dev_orchestrator.infrastructure.process import CommandResult, ProcessFailureKind
 from ai_dev_orchestrator.services.pipeline import RunResult
 from ai_dev_orchestrator.services.review import (ContextBuilder, REVIEW_PLAN_SCHEMA,
     STRUCTURED_REVIEW_SCHEMA, ReviewError, build_checklists, build_prompt,
@@ -91,7 +91,7 @@ def test_review_rejects_malformed_output(output):
 
 class Runner:
     def __init__(self, output): self.output, self.calls = output, []
-    def run(self, arguments, cwd=None, input_text=None):
+    def run(self, arguments, cwd=None, input_text=None, **policies):
         self.calls.append((arguments, cwd, input_text))
         if arguments[-1] == "--version":
             return CommandResult(0, "1.1.27")
@@ -164,7 +164,7 @@ def test_antigravity_does_not_expose_stdout_on_protocol_or_process_failure(tmp_p
     assert secret not in str(protocol.value)
 
     class FailedRunner(Runner):
-        def run(self, arguments, cwd=None, input_text=None):
+        def run(self, arguments, cwd=None, input_text=None, **policies):
             if arguments[-1] in {"--help", "--version"}:
                 return super().run(arguments, cwd, input_text)
             return CommandResult(2, stdout=secret)
@@ -215,7 +215,7 @@ def test_review_config_rejects_invalid_provider_and_accepts_low_blocking():
 @pytest.mark.parametrize("missing", ["--json-schema", "--print-timeout", "--model"])
 def test_runtime_blocks_missing_capability_before_prompt(tmp_path, missing):
     class IncompatibleRunner(Runner):
-        def run(self, arguments, cwd=None, input_text=None):
+        def run(self, arguments, cwd=None, input_text=None, **policies):
             result = super().run(arguments, cwd, input_text)
             if arguments[-1] == "--help":
                 return CommandResult(0, result.stdout.replace(missing, "--unsupported"))
@@ -228,16 +228,17 @@ def test_runtime_blocks_missing_capability_before_prompt(tmp_path, missing):
     assert all(call[2] is None for call in runner.calls)
 
 
-@pytest.mark.parametrize("detail", ["Comando excedeu o timeout de 1s", "erro de processo"])
-def test_runtime_preserves_invocation_errors(tmp_path, detail):
+@pytest.mark.parametrize("detail,process_kind,kind", [("Comando excedeu o timeout de 1s", ProcessFailureKind.TIMEOUT, ProviderFailureKind.TIMEOUT), ("erro de processo", ProcessFailureKind.OS_ERROR, ProviderFailureKind.LOCAL_TRANSIENT)])
+def test_runtime_preserves_invocation_errors(tmp_path, detail, process_kind, kind):
     class FailedRunner(Runner):
-        def run(self, arguments, cwd=None, input_text=None):
+        def run(self, arguments, cwd=None, input_text=None, **policies):
             if input_text is not None:
-                return CommandResult(None, error=detail)
+                return CommandResult(None, error=detail, failure_kind=process_kind)
             return super().run(arguments, cwd, input_text)
 
-    with pytest.raises(AntigravityError, match=detail):
+    with pytest.raises(AntigravityError) as caught:
         AntigravityAdapter(1, FailedRunner("")).invoke("p", tmp_path, {})
+    assert caught.value.classification == kind
 
 
 @pytest.mark.parametrize("exit_code", [0, 1])
@@ -247,7 +248,7 @@ def test_runtime_preserves_invocation_errors(tmp_path, detail):
 ])
 def test_runtime_classifies_real_string_error_envelope(tmp_path, detail, kind, exit_code):
     class FailedRunner(Runner):
-        def run(self, arguments, cwd=None, input_text=None):
+        def run(self, arguments, cwd=None, input_text=None, **policies):
             if input_text is not None:
                 return CommandResult(exit_code, json.dumps({"status": "ERROR", "error": detail}))
             return super().run(arguments, cwd, input_text)

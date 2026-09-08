@@ -87,3 +87,15 @@ orch init
 O arquivo `orchestrator.toml` é local e não é versionado. Consulte a
 [documentação de configuração](docs/configuration.md) para os campos,
 variáveis de ambiente e regras de segurança.
+
+## Retomada após falhas de runtime
+
+Falhas de rede e timeout preservam a execução ativa e têm até três retries com
+backoff persistido. Quota aguarda reset confiável; autenticação, modelo e erros
+de protocolo exigem intervenção. Nenhum desses casos cria outra sessão ou PR.
+
+Use orch state --issue N para o diagnóstico e orch resume --issue N para
+retomar. Depois de corrigir um bloqueio, --retry-provider solicita uma tentativa
+explícita. --recover-failed reconcilia registros históricos de falha transitória
+somente quando a identidade local/remota pode ser comprovada. Consulte as
+[regras de recuperação e encoding](docs/recovery-state-machine.md#falhas-de-provider-e-retomada).

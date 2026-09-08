@@ -172,3 +172,17 @@ Arquivo ausente, TOML inválido e valores inválidos geram um erro de configura�
 claro, com a causa original preservada para diagnóstico. Não armazene tokens,
 senhas ou qualquer credencial neste arquivo. Autenticação futura deve usar as
 ferramentas autenticadas ou um mecanismo de segredos específico.
+
+## Retentativas de runtime
+
+Falhas de rede e timeout usam até três retries, com intervalos persistidos de
+30, 60 e 120 segundos. Esse contador é independente de max_correction_attempts:
+repetir transporte não consome outra correção. Não há configuração que habilite
+retry ilimitado. retry_without_reset_seconds aplica-se somente às esperas de
+quota/rate-limit sem reset informado; não contorna bloqueios de autenticação,
+modelo, protocolo ou limite de retries transitórios.
+
+Após tratar a causa, orch resume --issue N --retry-provider solicita retry
+explícito. Para FAILED histórico com evidência transitória, use --recover-failed.
+As opções mantêm as verificações de identidade e convergência descritas na
+[máquina de estados](recovery-state-machine.md#falhas-de-provider-e-retomada).

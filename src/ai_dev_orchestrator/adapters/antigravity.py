@@ -8,12 +8,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ai_dev_orchestrator.domain.provider import ProviderFailure, ProviderFailureKind, classify_provider_text
-from ai_dev_orchestrator.infrastructure.process import CommandRunner
+from ai_dev_orchestrator.domain.provider import (
+    ProviderFailure, ProviderFailureKind, classify_provider_text, FAILURE_MESSAGES,
+    FAILURE_PRECEDENCE, reliable_retry_at, classify_process_failure,
+)
+from ai_dev_orchestrator.infrastructure.process import CommandRunner, OutputPolicy
 
 
-class AntigravityError(Exception):
+class AntigravityError(ProviderFailure):
     """Falha controlada na invocação headless do provider."""
+
+    def __init__(self, message: str, classification=ProviderFailureKind.PROTOCOL_ERROR,
+                 returncode=None, source="protocolo") -> None:
+        super().__init__("gemini", classification, message, datetime.now(timezone.utc),
+                         returncode=returncode, diagnostic_source=source)
 
 
 class AntigravityAdapter:
@@ -31,11 +39,7 @@ class AntigravityAdapter:
         for flag in ("--version", "--help"):
             result = self.runner.run([self.executable, flag])
             if result.error:
-                raise AntigravityError(
-                    f"Antigravity indisponível: {result.error}. "
-                    "Configure review.executable (ORCH_REVIEW__EXECUTABLE) com o "
-                    "caminho da CLI ou ajuste o PATH do processo."
-                )
+                self._process_failure(result)
             if not result.succeeded:
                 raise AntigravityError(
                     f"Antigravity {flag} retornou código {result.returncode}; saída omitida"
@@ -74,43 +78,44 @@ class AntigravityAdapter:
         ]
         if self.model != "default":
             arguments.extend(["--model", self.model])
-        result = self.runner.run(arguments, cwd=cwd, input_text=prompt)
+        result = self.runner.run(arguments, cwd=cwd, input_text=prompt,
+                                 stdout_policy=OutputPolicy.UTF8_STRICT)
         if result.error:
             # Erros locais do runner (timeout, resolução, UTF-8) não são um
             # diagnóstico remoto do provider e devem permitir nova retomada.
-            raise AntigravityError(f"Falha ao executar Antigravity: {result.error}")
+            self._process_failure(result)
         if not result.succeeded:
             detail = "\n".join((result.stderr, result.stdout))
             kind = classify_provider_text(detail)
             if kind is not ProviderFailureKind.UNKNOWN:
-                raise ProviderFailure("gemini", kind, "Falha reportada pela CLI", datetime.now(timezone.utc))
+                raise ProviderFailure("gemini", kind, FAILURE_MESSAGES[kind], datetime.now(timezone.utc),
+                                      returncode=result.returncode, diagnostic_source="CLI")
             raise AntigravityError(
-                f"Antigravity retornou código {result.returncode}; saída omitida"
+                f"Antigravity retornou código {result.returncode}; saída omitida",
+                ProviderFailureKind.UNKNOWN, result.returncode,
             )
         try:
             envelope = json.loads(result.stdout)
         except json.JSONDecodeError as error:
-            raise AntigravityError("Antigravity retornou envelope JSON inválido") from error
+            raise AntigravityError("Antigravity retornou envelope JSON inválido",
+                                   ProviderFailureKind.MALFORMED_JSON, result.returncode) from error
         if isinstance(envelope, dict) and envelope.get("status") != "SUCCESS":
             failure = envelope.get("error")
             if isinstance(failure, str):
                 kind = classify_provider_text(failure)
                 if kind is not ProviderFailureKind.UNKNOWN:
                     raise ProviderFailure(
-                        "gemini", kind, "Falha reportada pela CLI", datetime.now(timezone.utc)
+                        "gemini", kind, FAILURE_MESSAGES[kind], datetime.now(timezone.utc),
+                        returncode=result.returncode, diagnostic_source="JSON"
                     )
             if isinstance(failure, dict):
                 mapping = {"RATE_LIMIT": ProviderFailureKind.TRANSIENT_RATE_LIMIT, "QUOTA_EXCEEDED": ProviderFailureKind.TERMINAL_QUOTA, "AUTH_ERROR": ProviderFailureKind.AUTH_ERROR, "NETWORK_ERROR": ProviderFailureKind.NETWORK_ERROR, "MODEL_UNAVAILABLE": ProviderFailureKind.MODEL_UNAVAILABLE}
                 kind = mapping.get(str(failure.get("code", "")).upper(), ProviderFailureKind.UNKNOWN)
-                retry_at = None
-                if isinstance(failure.get("retry_at"), str):
-                    try:
-                        retry_at = datetime.fromisoformat(failure["retry_at"].replace("Z", "+00:00"))
-                        if retry_at.tzinfo is None:
-                            retry_at = None
-                    except ValueError:
-                        pass
-                raise ProviderFailure("gemini", kind, "Falha reportada pela CLI", datetime.now(timezone.utc), retry_at)
+                textual = classify_provider_text(str(failure.get("message", "")))
+                kind = next(k for k in FAILURE_PRECEDENCE if k in {kind, textual})
+                retry_at = reliable_retry_at(failure.get("retry_at"))
+                raise ProviderFailure("gemini", kind, FAILURE_MESSAGES[kind], datetime.now(timezone.utc), retry_at,
+                                      returncode=result.returncode, diagnostic_source="JSON")
         if not isinstance(envelope, dict) or envelope.get("status") != "SUCCESS":
             raise AntigravityError("Antigravity não retornou status SUCCESS")
         if envelope.get("error"):
@@ -130,3 +135,11 @@ class AntigravityAdapter:
                 "SUCCESS sem structured_output compatível"
             )
         return json.dumps(structured_output)
+
+    @staticmethod
+    def _process_failure(result) -> None:
+        kind = classify_process_failure(result.failure_kind)
+        message = FAILURE_MESSAGES[kind]
+        if kind == ProviderFailureKind.EXECUTABLE_MISSING:
+            message += "; configure review.executable (ORCH_REVIEW__EXECUTABLE) ou ajuste o PATH"
+        raise AntigravityError(message, kind, result.returncode, "processo")

@@ -273,7 +273,7 @@ def test_protocol_failure_in_review_retries_only_same_head(tmp_path: Path, failu
                 from ai_dev_orchestrator.infrastructure.process import CommandResult
 
                 class DeniedRunner:
-                    def run(self, arguments, cwd=None, input_text=None):
+                    def run(self, arguments, cwd=None, input_text=None, **policies):
                         if arguments[-1] == "--version":
                             return CommandResult(0, "1.1.27")
                         name = "help-1.1.27.txt" if arguments[-1] == "--help" else "denied-command-1.1.27.json"
@@ -284,12 +284,13 @@ def test_protocol_failure_in_review_retries_only_same_head(tmp_path: Path, failu
             raise AntigravityError(failure_message)
 
     failed_effects = ProtocolFailureEffects()
-    with pytest.raises(ResumeError, match="Retomada interrompida em GEMINI_REVIEWING"):
+    with pytest.raises(ResumeError, match="PROTOCOL_ERROR"):
         service(store, Observer(lambda _run: snapshot), failed_effects).resume(37)
 
     preserved = store.get(original.id)
     assert preserved.id == original.id
-    assert preserved.phase is ExecutionPhase.GEMINI_REVIEWING
+    assert preserved.phase is ExecutionPhase.BLOCKED_PROVIDER
+    assert preserved.provider_resume_phase == ExecutionPhase.GEMINI_REVIEWING.value
     assert preserved.branch == original.branch
     assert preserved.codex_session_id == original.codex_session_id
     assert preserved.pull_request_number == original.pull_request_number
@@ -305,7 +306,7 @@ def test_protocol_failure_in_review_retries_only_same_head(tmp_path: Path, failu
         Observer(lambda _run: snapshot),
         RecoveryPlanner(review_only_policy),
         RecoveryExecutor(review_only_policy, store, recovered_effects),
-    ).resume(37)
+    ).resume(37, retry_provider=True)
 
     assert result.execution_id == original.id
     assert result.phase == ExecutionPhase.APPROVED_AWAITING_ACTION.value

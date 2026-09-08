@@ -21,7 +21,7 @@ class FakeRunner:
     def __post_init__(self) -> None:
         self.arguments: list[list[str]] = []
 
-    def run(self, arguments: list[str]) -> CommandResult:
+    def run(self, arguments: list[str], **policies) -> CommandResult:
         self.arguments.append(arguments)
         return self.results.pop(0)
 

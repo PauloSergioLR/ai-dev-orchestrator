@@ -22,7 +22,7 @@ class FakeRunner:
     result: CommandResult
     arguments: list[str] = field(default_factory=list)
 
-    def run(self, arguments: list[str]) -> CommandResult:
+    def run(self, arguments: list[str], **policies) -> CommandResult:
         self.arguments = arguments
         return self.result
 

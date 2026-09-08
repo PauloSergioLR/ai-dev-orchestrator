@@ -15,7 +15,7 @@ from ai_dev_orchestrator.domain.execution import (
 )
 from ai_dev_orchestrator.domain.review import ReviewFinding, ReviewVerdict, StructuredReview
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _SUMMARY_LIMIT = 500
 
 
@@ -59,7 +59,7 @@ class SqliteExecutionStore:
                         "INSERT INTO schema_version(version) VALUES (?)",
                         (SCHEMA_VERSION,),
                     )
-                elif row["version"] == 1:
+                elif row["version"] in {1, 2}:
                     c.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
                 elif row["version"] != SCHEMA_VERSION:
                     raise SchemaVersionError(
@@ -79,6 +79,9 @@ class SqliteExecutionStore:
                     "quota_classification": "TEXT",
                     "quota_observed_at": "TEXT",
                     "quota_retry_at": "TEXT",
+                    "provider_resume_phase": "TEXT",
+                    "codex_start_attempted": "INTEGER NOT NULL DEFAULT 0",
+                    "provider_retry_attempts": "INTEGER NOT NULL DEFAULT 0",
                     "cleanup_status": "TEXT NOT NULL DEFAULT 'PENDING'",
                     "cleanup_detail": "TEXT",
                     "codex_tokens": "INTEGER",
@@ -89,6 +92,9 @@ class SqliteExecutionStore:
                 for name, declaration in additions.items():
                     if name not in existing_columns:
                         c.execute(f"ALTER TABLE executions ADD COLUMN {name} {declaration}")
+                        if name == "codex_start_attempted":
+                            # O schema antigo não prova que CODEX_RUNNING ainda não chamou a CLI.
+                            c.execute("UPDATE executions SET codex_start_attempted = 1 WHERE phase != 'PREPARING' OR codex_session_id IS NOT NULL")
                 c.execute(
                     "CREATE TABLE IF NOT EXISTS execution_events (execution_id TEXT NOT NULL REFERENCES executions(id), sequence INTEGER NOT NULL, previous_phase TEXT, phase TEXT NOT NULL, created_at TEXT NOT NULL, summary TEXT NOT NULL, head_sha TEXT, PRIMARY KEY(execution_id, sequence))"
                 )
@@ -106,6 +112,8 @@ class SqliteExecutionStore:
             ) from error
 
     def create(self, issue_number: int, **details: object) -> RunRecord:
+        if any(run.issue_number == issue_number for run in self.list_historical_candidates()):
+            raise ActiveExecutionError("Execução histórica transitória exige --recover-failed; novo run recusado")
         now, execution_id = _now(), str(uuid4())
         try:
             with self._connection() as c:
@@ -149,6 +157,34 @@ class SqliteExecutionStore:
             "SELECT * FROM executions WHERE issue_number = ? AND terminal = 0",
             (issue_number,),
         )
+
+    def list_historical_candidates(self) -> tuple[RunRecord, ...]:
+        from ai_dev_orchestrator.domain.historical import is_historical_candidate
+        return tuple(run for run in self.list_history() if is_historical_candidate(run))
+
+    def reactivate_historical(self, expected: RunRecord, observation, planner) -> RunRecord:
+        """Única exceção à terminalidade; transação compara identidade e audita a prova."""
+        from ai_dev_orchestrator.domain.historical import historical_target, validate_historical
+        try:
+            with self._connection() as c:
+                c.execute("BEGIN IMMEDIATE")
+                row = c.execute("SELECT * FROM executions WHERE id = ?", (expected.id,)).fetchone()
+                if row is None or _record(row) != expected:
+                    raise ExecutionStoreError("Execução mudou desde a prova histórica")
+                if c.execute("SELECT 1 FROM executions WHERE terminal = 0 LIMIT 1").fetchone():
+                    raise ActiveExecutionError("Outra execução ativa impede reativação")
+                target = historical_target(expected, self.events(expected.id))
+                validate_historical(expected, target, observation, planner)
+                now = _now()
+                c.execute("UPDATE executions SET phase = ?, terminal = 0, updated_at = ?, quota_retry_at = NULL, provider_resume_phase = NULL, provider_retry_attempts = 0 WHERE id = ?",
+                          (target.value, now, expected.id))
+                sequence = c.execute("SELECT MAX(sequence) + 1 FROM execution_events WHERE execution_id = ?", (expected.id,)).fetchone()[0]
+                c.execute("INSERT INTO execution_events(execution_id, sequence, previous_phase, phase, created_at, summary, head_sha) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                          (expected.id, sequence, expected.phase.value, target.value, now,
+                           "FAILED transitório reconciliado: worktree, sessão, Issue, PR, HEADs, merge e Project comprovados", expected.current_head_sha))
+        except (sqlite3.Error, ValueError) as error:
+            raise ExecutionStoreError(f"Reativação histórica recusada: {error}") from error
+        return self.get(expected.id)
 
     def list_active(self) -> tuple[RunRecord, ...]:
         """Lista execuções não terminais para coordenação sequencial."""
@@ -264,6 +300,9 @@ class SqliteExecutionStore:
             "quota_classification",
             "quota_observed_at",
             "quota_retry_at",
+            "provider_resume_phase",
+            "codex_start_attempted",
+            "provider_retry_attempts",
             "cleanup_status",
             "cleanup_detail",
             "codex_tokens",
@@ -351,6 +390,9 @@ class SqliteExecutionStore:
             "quota_classification",
             "quota_observed_at",
             "quota_retry_at",
+            "provider_resume_phase",
+            "codex_start_attempted",
+            "provider_retry_attempts",
             "cleanup_status",
             "cleanup_detail",
             "codex_tokens",
@@ -402,6 +444,8 @@ class SqliteExecutionStore:
 
     @staticmethod
     def _validate_models(current: RunRecord, updates: dict[str, object]) -> None:
+        if current.codex_start_attempted and updates.get("codex_start_attempted", True) is not True:
+            raise ExecutionStoreError("O início da primeira chamada Codex não pode ser apagado")
         for field in ("codex_model", "gemini_model"):
             if field in updates and getattr(current, field) != updates[field]:
                 raise ExecutionStoreError(
@@ -435,7 +479,7 @@ class SqliteExecutionStore:
                          finding.line, _sanitize_finding(finding.criterion, 500) if finding.criterion else None, now),
                     )
                 sequence = c.execute("SELECT COALESCE(MAX(sequence), 0) + 1 FROM execution_events WHERE execution_id = ?", (execution_id,)).fetchone()[0]
-                c.execute("UPDATE executions SET reviewed_head_sha = ?, review_verdict = ?, updated_at = ? WHERE id = ?", (review.reviewed_head_sha, review.verdict.value, now, execution_id))
+                c.execute("UPDATE executions SET reviewed_head_sha = ?, review_verdict = ?, updated_at = ?, provider_retry_attempts = 0 WHERE id = ?", (review.reviewed_head_sha, review.verdict.value, now, execution_id))
                 c.execute("INSERT INTO execution_events(execution_id, sequence, previous_phase, phase, created_at, summary, head_sha) VALUES (?, ?, ?, ?, ?, ?, ?)", (execution_id, sequence, current.phase.value, current.phase.value, now, _sanitize(summary), review.reviewed_head_sha))
         except ExecutionStoreError:
             raise
@@ -516,6 +560,7 @@ def _sanitize_finding(value: str, limit: int) -> str:
 def _record(row: sqlite3.Row) -> RunRecord:
     excluded = {"id", "issue_number", "phase", "created_at", "updated_at", "terminal"}
     values = {key: row[key] for key in row.keys() if key not in excluded}
+    values["codex_start_attempted"] = bool(values.get("codex_start_attempted", False))
     for field in ("quota_observed_at", "quota_retry_at"):
         if values.get(field):
             values[field] = _parse_time(values[field])

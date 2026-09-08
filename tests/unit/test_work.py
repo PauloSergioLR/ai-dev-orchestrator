@@ -52,6 +52,9 @@ def item(
 class Store:
     active: tuple[object, ...] = ()
 
+    def list_historical_candidates(self):
+        return ()
+
     def list_active(self) -> tuple[object, ...]:
         return self.active
 
