@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -16,11 +18,15 @@ from typer.testing import CliRunner
 from ai_dev_orchestrator.cli import app
 from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner, OutputPolicy
 from ai_dev_orchestrator.services.doctor import (
+    CheckScope,
     CheckStatus,
     DoctorCheck,
     DoctorService,
     has_errors,
 )
+from ai_dev_orchestrator.domain.provider import ProviderFailure, ProviderFailureKind
+from ai_dev_orchestrator.adapters.antigravity import AntigravityError
+from ai_dev_orchestrator.services.review import REVIEW_PLAN_SCHEMA, STRUCTURED_REVIEW_SCHEMA
 
 
 @dataclass
@@ -402,3 +408,131 @@ def test_doctor_appears_in_cli_help() -> None:
 
     assert result.exit_code == 0
     assert "doctor" in result.output
+
+
+def test_normal_doctor_does_not_run_deep_provider_probes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(sys, "version_info", SimpleNamespace(major=3, minor=13, micro=1))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("provider não deve ser chamado sem --deep")
+
+    monkeypatch.setattr("ai_dev_orchestrator.services.doctor.CodexAdapter", forbidden)
+    checks = DoctorService(
+        FakeRunner(successful_results()), write_valid_config(tmp_path / "orchestrator.toml")
+    ).diagnose()
+
+    assert all(check.scope is CheckScope.LOCAL_CAPABILITY for check in checks)
+
+
+def test_deep_provider_probes_use_a_discarded_synthetic_workspace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    workspaces: list[Path] = []
+
+    class Codex:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def execute(self, workspace, prompt):
+            workspaces.append(Path(workspace))
+            assert "ação" in prompt
+            return SimpleNamespace(session_id="synthetic-session")
+
+        def resume(self, workspace, session_id, prompt):
+            assert Path(workspace) == workspaces[0]
+            assert session_id == "synthetic-session"
+            return SimpleNamespace(session_id=session_id)
+
+    class Reviewer:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def invoke(self, prompt, workspace, schema):
+            assert Path(workspace) == workspaces[0]
+            if schema is REVIEW_PLAN_SCHEMA:
+                return json.dumps({field: [] for field in REVIEW_PLAN_SCHEMA["required"]})
+            return json.dumps({
+                "verdict": "APPROVED", "findings": [], "reviewed_head_sha": "0" * 40,
+                "summary": "ação validada",
+            })
+
+    monkeypatch.setattr("ai_dev_orchestrator.services.doctor.CodexAdapter", Codex)
+    monkeypatch.setattr("ai_dev_orchestrator.services.doctor.AntigravityAdapter", Reviewer)
+    checks = DoctorService(config_path=write_valid_config(tmp_path / "orchestrator.toml"))._deep_provider_checks()
+
+    assert all(check.status is CheckStatus.OK for check in checks)
+    assert all(check.scope is CheckScope.LIVE_PROVIDER for check in checks)
+    assert workspaces and not workspaces[0].exists()
+
+
+def test_deep_structured_output_failure_is_a_provider_probe_failure(tmp_path: Path) -> None:
+    class Reviewer:
+        def invoke(self, prompt, workspace, schema):
+            raise AntigravityError("Falha do contrato estruturado do reviewer")
+
+    check = DoctorService()._probe_antigravity_schema(
+        "Antigravity StructuredReview", Reviewer(), tmp_path, "probe",
+        STRUCTURED_REVIEW_SCHEMA, lambda output: output,
+    )
+
+    assert check.status is CheckStatus.ERROR
+    assert check.scope is CheckScope.LIVE_PROVIDER
+    assert "contrato estruturado" in check.message
+
+
+def test_deep_provider_quota_and_encoding_keep_their_specific_classification() -> None:
+    service = DoctorService()
+    quota = ProviderFailure(
+        "codex", ProviderFailureKind.TERMINAL_QUOTA, "Limite de uso/quota esgotado",
+        datetime.now(timezone.utc),
+    )
+    encoding = ProviderFailure(
+        "gemini", ProviderFailureKind.ENCODING_ERROR, "Encoding UTF-8 inválido",
+        datetime.now(timezone.utc),
+    )
+
+    assert service._provider_error("Codex exec", quota).message.startswith("TERMINAL_QUOTA")
+    assert service._provider_error("Antigravity", encoding).message.startswith("ENCODING_ERROR")
+
+
+def test_state_consistency_is_read_only_and_only_reports_divergence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    opened: list[bool] = []
+    run = SimpleNamespace(
+        issue_number=65, project_status="AI Review", pull_request_number=72,
+        current_head_sha="a" * 40,
+    )
+
+    class Store:
+        def __init__(self, path, *, read_only=False) -> None:
+            opened.append(read_only)
+
+        def list_active(self):
+            return (run,)
+
+    class Projects:
+        def __init__(self, config) -> None:
+            pass
+
+        def list_items(self):
+            return (SimpleNamespace(issue_number=65, status="Done"),)
+
+    class PullRequests:
+        def __init__(self, config) -> None:
+            pass
+
+        def get_merge_snapshot(self, number):
+            return SimpleNamespace(head_sha="b" * 40)
+
+    monkeypatch.setattr("ai_dev_orchestrator.services.doctor.SqliteExecutionStore", Store)
+    monkeypatch.setattr("ai_dev_orchestrator.services.doctor.GitHubProjectAdapter", Projects)
+    monkeypatch.setattr("ai_dev_orchestrator.services.doctor.GitHubPullRequestAdapter", PullRequests)
+    check = DoctorService(config_path=write_valid_config(tmp_path / "orchestrator.toml"))._check_state_consistency()
+
+    assert opened == [True]
+    assert check.status is CheckStatus.WARNING
+    assert check.scope is CheckScope.STATE_CONSISTENCY
+    assert "diverge" in check.message
