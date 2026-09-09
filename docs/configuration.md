@@ -186,3 +186,61 @@ Após tratar a causa, orch resume --issue N --retry-provider solicita retry
 explícito. Para FAILED histórico com evidência transitória, use --recover-failed.
 As opções mantêm as verificações de identidade e convergência descritas na
 [máquina de estados](recovery-state-machine.md#falhas-de-provider-e-retomada).
+# Notificações operacionais e intervenção humana
+
+`orch init --notifications` pergunta se deseja configurar notificações e quais
+canais ativar. Exibe apenas os nomes das variáveis ausentes. Também é possível
+editar o perfil diretamente:
+
+```toml
+[notifications]
+channels = ["email", "discord", "telegram"]
+timeout_seconds = 15
+retry_seconds = 300
+max_attempts = 3
+```
+
+O padrão `channels = []` desativa as entregas, mas mantém o escalonamento no
+SQLite e no GitHub Project. Cada canal é independente. Credenciais são lidas do
+ambiente do processo; nunca coloque seus valores no TOML, Issue ou banco.
+
+| Canal | Variáveis de ambiente |
+| --- | --- |
+| E-mail | `ORCH_SMTP_HOST`, `ORCH_SMTP_USER`, `ORCH_SMTP_PASSWORD`, `ORCH_EMAIL_FROM`, `ORCH_EMAIL_TO` |
+| Discord | `ORCH_DISCORD_WEBHOOK` |
+| Telegram | `ORCH_TELEGRAM_TOKEN`, `ORCH_TELEGRAM_CHAT_ID` |
+
+O e-mail usa SMTP com STARTTLS obrigatório e validação de certificado. A porta
+padrão é 587; `ORCH_SMTP_PORT` permite ajustá-la. Discord usa um webhook HTTPS e
+desativa menções; Telegram envia texto sem interpretação de Markdown.
+
+As mensagens contêm repositório, Issue, motivo estruturado, fase interrompida,
+PR, HEAD, número de correções, horário UTC e uma ação de inspeção. Não incluem
+prompts, findings, stdout ou exceções dos canais.
+
+O limite de correções usa `review.max_correction_attempts`: se for 5, o sexto
+ciclo de correção não inicia. A execução passa a `HUMAN_REQUIRED` e o Project
+recebe `Human Review`. Autenticação, modelo irrecuperável, divergência remota,
+CI terminal/expirada, merge sem convergência e erro interno recebem `Blocked`.
+Quota com retry comprovado continua em espera. Sem retry comprovado, somente
+`supervisor.retry_without_reset_seconds` autoriza a espera automática segura.
+
+`orch watch` encerra ao encontrar intervenção humana, preservando a execução
+ativa e impedindo a seleção de outra Issue. `orch state --issue N` mostra motivo,
+fase, horário e resultados das entregas. Ao executar novamente `orch watch` ou
+`orch resume --issue N`, apenas entregas pendentes podem ser tentadas novamente,
+respeitando intervalo e limite; entregas confirmadas não são repetidas. Nenhuma
+dessas tentativas recria branch, sessão ou PR. Após corrigir um provider,
+`orch resume --issue N --retry-provider` reutiliza seu checkpoint e a mesma
+sessão comprovada. Demais divergências continuam exigindo reconciliação humana
+ou supersessão explícita conforme o fluxo existente.
+
+A deduplicação usa execução, motivo, fase, HEAD, correções e canal, com reserva
+transacional no SQLite. Mudanças materiais permitem outro aviso. Cada entrega
+em andamento mantém sua reserva por pelo menos cinco minutos, mesmo quando o
+intervalo de retry configurado é menor. Cada tentativa
+registra somente canal, chave do evento, estado, contador e horário; falhas de
+um canal não impedem os outros nem apagam `HUMAN_REQUIRED`. Atualizações do
+Project também têm entrega auditada e independente. Se o processo cair depois
+do envio externo e antes da confirmação no SQLite, uma repetição ainda é
+possível: SMTP/webhooks não fornecem uma transação conjunta com o banco local.

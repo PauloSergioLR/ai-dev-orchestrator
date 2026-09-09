@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import tomllib
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import (
     AliasChoices,
@@ -208,6 +208,16 @@ class SupervisorConfig(BaseModel):
     retry_without_reset_seconds: float | None = Field(default=None, gt=0)
 
 
+class NotificationConfig(BaseModel):
+    """Canais opcionais; credenciais são lidas somente do ambiente."""
+
+    model_config = ConfigDict(extra="forbid")
+    channels: tuple[Literal["email", "discord", "telegram"], ...] = ()
+    timeout_seconds: float = Field(default=15, gt=0, le=60)
+    retry_seconds: float = Field(default=300, gt=0)
+    max_attempts: int = Field(default=3, gt=0)
+
+
 class CleanupConfig(BaseModel):
     """Política explícita e conservadora para artefatos já concluídos."""
 
@@ -258,6 +268,7 @@ class OrchestratorConfig(BaseSettings):
     review: ReviewConfig = Field(default_factory=ReviewConfig)
     providers: ProviderConfig = Field(default_factory=ProviderConfig)
     supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
+    notifications: NotificationConfig = Field(default_factory=NotificationConfig)
     cleanup: CleanupConfig = Field(default_factory=CleanupConfig)
 
     @classmethod

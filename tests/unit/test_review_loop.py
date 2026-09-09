@@ -214,6 +214,7 @@ def test_pipeline_recovery_correction_preserves_identity_after_restart(tmp_path,
 
     fakes = InterruptedFakes()
     initial = pipeline(tmp_path, fakes)
+    initial.config.supervisor.retry_without_reset_seconds = 60
     database = tmp_path / "state.db"
     initial.execution_store = SqliteExecutionStore(database)
     with pytest.raises(RunPipelineError, match="preservada"):

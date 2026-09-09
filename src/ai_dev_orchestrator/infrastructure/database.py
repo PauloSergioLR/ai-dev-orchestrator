@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 import re
+import os
 import sqlite3
 from uuid import uuid4
 from ai_dev_orchestrator.domain.execution import (
@@ -15,7 +16,7 @@ from ai_dev_orchestrator.domain.execution import (
 )
 from ai_dev_orchestrator.domain.review import ReviewFinding, ReviewVerdict, StructuredReview
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 _SUMMARY_LIMIT = 500
 
 
@@ -59,7 +60,7 @@ class SqliteExecutionStore:
                         "INSERT INTO schema_version(version) VALUES (?)",
                         (SCHEMA_VERSION,),
                     )
-                elif row["version"] in {1, 2}:
+                elif row["version"] in {1, 2, 3}:
                     c.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
                 elif row["version"] != SCHEMA_VERSION:
                     raise SchemaVersionError(
@@ -68,11 +69,15 @@ class SqliteExecutionStore:
                 c.execute(
                     "CREATE TABLE IF NOT EXISTS executions (id TEXT PRIMARY KEY, issue_number INTEGER NOT NULL, project_item_id TEXT, phase TEXT NOT NULL, branch TEXT, worktree_path TEXT, base_ref TEXT, codex_session_id TEXT, pull_request_number INTEGER, pull_request_url TEXT, current_head_sha TEXT, ci_head_sha TEXT, reviewed_head_sha TEXT, review_verdict TEXT, correction_attempts INTEGER NOT NULL DEFAULT 0, merge_commit_sha TEXT, merged_head_sha TEXT, project_status TEXT, last_error TEXT, terminal INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
                 )
+                c.execute("CREATE TABLE IF NOT EXISTS notification_deliveries (execution_id TEXT NOT NULL REFERENCES executions(id), event_key TEXT NOT NULL, channel TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL, attempted_at TEXT NOT NULL, PRIMARY KEY(execution_id, event_key, channel))")
                 existing_columns = {
                     column["name"]
                     for column in c.execute("PRAGMA table_info(executions)").fetchall()
                 }
                 additions = {
+                    "human_reason": "TEXT",
+                    "human_phase": "TEXT",
+                    "human_at": "TEXT",
                     "codex_model": "TEXT NOT NULL DEFAULT 'default'",
                     "gemini_model": "TEXT NOT NULL DEFAULT 'default'",
                     "quota_provider": "TEXT",
@@ -110,6 +115,43 @@ class SqliteExecutionStore:
             raise ExecutionStoreError(
                 f"Não foi possível inicializar o banco de estado: {error}"
             ) from error
+
+    def claim_notification(self, execution_id: str, event_key: str, channel: str,
+                           *, max_attempts: int, retry_seconds: float) -> bool:
+        """Reserva uma tentativa sem repetir efeitos de execução."""
+        now = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM notification_deliveries WHERE execution_id = ? AND event_key = ? AND channel = ?",
+                (execution_id, event_key, channel),
+            ).fetchone()
+            if row and (
+                row["status"] == "SENT" or row["attempts"] >= max_attempts
+                or (now - datetime.fromisoformat(row["attempted_at"])).total_seconds()
+                < (max(300, retry_seconds) if row["status"] == "SENDING" else retry_seconds)
+            ):
+                return False
+            attempts = row["attempts"] + 1 if row else 1
+            connection.execute(
+                "INSERT OR REPLACE INTO notification_deliveries VALUES (?, ?, ?, 'SENDING', ?, ?)",
+                (execution_id, event_key, channel, attempts, now.isoformat()),
+            )
+        return True
+
+    def finish_notification(self, execution_id: str, event_key: str, channel: str, *, sent: bool) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                "UPDATE notification_deliveries SET status = ? WHERE execution_id = ? AND event_key = ? AND channel = ?",
+                ("SENT" if sent else "FAILED", execution_id, event_key, channel),
+            )
+
+    def notification_deliveries(self, execution_id: str) -> tuple[dict, ...]:
+        with self._connection() as connection:
+            return tuple(dict(row) for row in connection.execute(
+                "SELECT * FROM notification_deliveries WHERE execution_id = ? ORDER BY event_key, channel",
+                (execution_id,),
+            ))
 
     def create(self, issue_number: int, **details: object) -> RunRecord:
         if any(run.issue_number == issue_number for run in self.list_historical_candidates()):
@@ -198,22 +240,26 @@ class SqliteExecutionStore:
             raise ExecutionStoreError(f"Não foi possível superseder execução: {error}") from error
         return self.get(execution_id)
 
-    def require_human(self, execution_id: str, *, summary: str) -> RunRecord:
+    def require_human(self, execution_id: str, *, summary: str, reason: str = "REMOTE_AMBIGUOUS") -> RunRecord:
         """Promove uma divergência remota a checkpoint explícito, sem descartá-la."""
-        current = self.get(execution_id)
-        if current.phase in TERMINAL_PHASES:
-            raise ExecutionStoreError("Execução terminal não pode exigir nova intervenção")
-        if current.phase is ExecutionPhase.HUMAN_REQUIRED:
-            return current
         try:
             with self._connection() as c:
+                c.execute("BEGIN IMMEDIATE")
+                row = c.execute("SELECT * FROM executions WHERE id = ?", (execution_id,)).fetchone()
+                if row is None:
+                    raise ExecutionStoreError("Execução persistida não encontrada")
+                current = _record(row)
+                if current.phase in TERMINAL_PHASES:
+                    raise ExecutionStoreError("Execução terminal não pode exigir nova intervenção")
+                if current.phase is ExecutionPhase.HUMAN_REQUIRED and current.human_reason == reason:
+                    return current
                 sequence = c.execute(
                     "SELECT COALESCE(MAX(sequence), 0) + 1 FROM execution_events WHERE execution_id = ?",
                     (execution_id,),
                 ).fetchone()[0]
                 now = _now()
-                c.execute("UPDATE executions SET phase = ?, updated_at = ? WHERE id = ?",
-                          (ExecutionPhase.HUMAN_REQUIRED.value, now, execution_id))
+                c.execute("UPDATE executions SET phase = ?, updated_at = ?, human_reason = ?, human_phase = ?, human_at = ?, last_error = ? WHERE id = ?",
+                          (ExecutionPhase.HUMAN_REQUIRED.value, now, reason, current.human_phase or current.provider_resume_phase or current.phase.value, now, _sanitize(summary), execution_id))
                 c.execute(
                     "INSERT INTO execution_events(execution_id, sequence, previous_phase, phase, created_at, summary, head_sha) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (execution_id, sequence, current.phase.value, ExecutionPhase.HUMAN_REQUIRED.value,
@@ -382,6 +428,8 @@ class SqliteExecutionStore:
             "terminal": int(phase in TERMINAL_PHASES),
             "updated_at": _now(),
         }
+        if current.phase == ExecutionPhase.HUMAN_REQUIRED:
+            fields.update(human_reason=None, human_phase=None, human_at=None)
         try:
             with self._connection() as c:
                 sequence = c.execute(
@@ -607,6 +655,9 @@ def _sanitize(value: str) -> str:
 
 
 def _redact_secrets(value: str) -> str:
+    for name, secret in os.environ.items():
+        if any(part in name.upper() for part in ("TOKEN", "PASSWORD", "SECRET", "WEBHOOK")) and secret:
+            value = value.replace(secret, "[redigido]")
     return re.sub(
         r"(?i)(token|authorization|password|secret)\s*[:=]\s*\S+",
         r"\1=[redigido]",

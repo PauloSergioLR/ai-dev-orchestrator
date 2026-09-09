@@ -65,6 +65,7 @@ def doctor() -> None:
 
 @app.command("init")
 def init_project(
+    notifications: bool = typer.Option(False, "--notifications", help="Pergunta quais canais operacionais configurar."),
     advanced: bool = typer.Option(
         False, "--advanced", help="Permite ajustar polling e timeouts."
     ),
@@ -172,7 +173,20 @@ def init_project(
         "convergence": existing.convergence.model_dump() if existing else {},
         "review": existing.review.model_dump() if existing else {},
         "supervisor": existing.supervisor.model_dump() if existing else {},
+        "notifications": existing.notifications.model_dump() if existing else {},
     }
+    if notifications and typer.confirm("Deseja configurar notificações operacionais?", default=True):
+        from ai_dev_orchestrator.adapters.notifications import missing_environment
+        channels = tuple(value.strip() for value in typer.prompt("Canais separados por vírgula (email, discord, telegram)", default="email").split(",") if value.strip())
+        from ai_dev_orchestrator.config import NotificationConfig
+        try:
+            values["notifications"] = NotificationConfig(channels=channels).model_dump()
+        except ValueError as error:
+            raise typer.BadParameter("Canais válidos: email, discord, telegram") from error
+        missing = missing_environment(channels)
+        typer.echo("Credenciais são lidas do ambiente; não serão gravadas no TOML.")
+        if missing:
+            typer.echo("Variáveis ausentes: " + ", ".join(missing))
     if advanced:
         values["ci"]["poll_interval_seconds"] = typer.prompt(
             "Polling da CI (segundos)",
@@ -281,6 +295,12 @@ def state(
     typer.echo(f"PR: #{record.pull_request_number or '-'}")
     typer.echo(f"HEAD: {record.current_head_sha or '-'}")
     typer.echo(f"Correções: {record.correction_attempts}")
+    if record.human_reason:
+        typer.echo(f"Motivo humano: {record.human_reason} — {record.last_error}")
+        typer.echo(f"Fase interrompida: {record.human_phase}; horário: {record.human_at}")
+        deliveries = SqliteExecutionStore(load_config().state.database_path).notification_deliveries(record.id)
+        for delivery in deliveries:
+            typer.echo(f"Entrega {delivery['channel']}: {delivery['status']} ({delivery['attempts']} tentativas)")
     if record.quota_provider:
         typer.echo(f"Provider em espera: {record.quota_provider}")
         typer.echo(f"Classificação: {record.quota_classification}")

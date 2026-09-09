@@ -67,7 +67,10 @@ def record_provider_failure(store, execution_id: str, failure: ProviderFailure) 
 
 def resume_provider_wait(store, run: RunRecord, *, manual_retry: bool = False,
                          now: datetime | None = None) -> RunRecord:
-    if run.phase not in PROVIDER_WAIT_PHASES:
+    if run.phase == ExecutionPhase.HUMAN_REQUIRED:
+        if not manual_retry or not run.provider_resume_phase:
+            raise ProviderRecoveryError("Intervenção humana necessária antes de retomar o provider")
+    elif run.phase not in PROVIDER_WAIT_PHASES:
         return run
     if run.phase == ExecutionPhase.BLOCKED_PROVIDER and not manual_retry:
         raise ProviderRecoveryError(f"{run.last_error}; intervenção necessária; use --retry-provider após corrigir a causa")
