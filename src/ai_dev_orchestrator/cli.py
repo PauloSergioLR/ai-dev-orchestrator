@@ -1,5 +1,6 @@
 """Interface de linha de comando do AI Dev Orchestrator."""
 
+import json
 import typer
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from ai_dev_orchestrator.adapters.git import GitWorktreeAdapter
 from ai_dev_orchestrator.services.cleanup import CleanupService
 from ai_dev_orchestrator.services.history import HistoryService, format_duration
 from ai_dev_orchestrator.services.supersession import SupersessionError, SupersessionService
+from ai_dev_orchestrator.services.inspect import InspectService, Inspection
 
 app = typer.Typer(
     help="Orquestrador local-first de desenvolvimento com IA.",
@@ -313,6 +315,57 @@ def state(
             typer.echo(f"Falhas consecutivas: {record.provider_retry_attempts}")
             typer.echo(f"Diagnóstico: {record.last_error or '-'}")
     typer.echo(f"Atualizado em: {record.updated_at.isoformat()}")
+
+
+@app.command()
+def inspect(
+    issue: int = typer.Option(..., "--issue", min=1, help="Número positivo da Issue."),
+    as_json: bool = typer.Option(False, "--json", help="Emite o diagnóstico em JSON estável."),
+) -> None:
+    """Diagnostica uma execução local sem alterar SQLite, providers ou Git."""
+    try:
+        diagnosis = InspectService.from_database(load_config().state.database_path).inspect(issue)
+    except (ConfigurationError, ExecutionStoreError) as error:
+        typer.echo(f"Erro: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    if diagnosis is None:
+        typer.echo(f"Nenhuma execução encontrada para a Issue #{issue}.", err=True)
+        raise typer.Exit(code=1)
+    if as_json:
+        typer.echo(json.dumps(diagnosis.as_dict(), ensure_ascii=False, sort_keys=True))
+        return
+    _show_inspection(diagnosis)
+
+
+def _show_inspection(diagnosis: Inspection) -> None:
+    """Renderização humana do mesmo contrato usado pela automação."""
+    typer.echo(f"Issue: #{diagnosis.issue} | execução: {diagnosis.execution_id}")
+    typer.echo(f"Fase: {diagnosis.phase} | terminal: {'sim' if diagnosis.terminal else 'não'}")
+    typer.echo(f"Branch: {diagnosis.branch or '-'} | worktree: {diagnosis.worktree_path or '-'} | base: {diagnosis.base_ref or '-'}")
+    typer.echo(f"Sessão Codex: {diagnosis.codex_session_id or '-'} | modelos: Codex={diagnosis.models['codex']}, Gemini={diagnosis.models['gemini']}")
+    pr = diagnosis.pull_request
+    typer.echo(f"PR: #{pr['number'] or '-'} | URL: {pr['url'] or '-'}")
+    heads = diagnosis.heads
+    typer.echo("HEADs: current={current} | ci={ci} | reviewed={reviewed} | merged={merged} | merge commit={merge_commit}".format(**{key: value or '-' for key, value in heads.items()}))
+    typer.echo(f"Review: {diagnosis.review['verdict'] or '-'} | correções: {diagnosis.review['correction_attempts']}")
+    quota = diagnosis.quota
+    typer.echo("Quota: provider={provider} | classificação={classification} | observado={observed_at} | retry={retry_at}".format(**{key: value or '-' for key, value in quota.items()}))
+    human = diagnosis.human_required
+    typer.echo("Intervenção humana: motivo={reason} | fase={phase} | horário={at}".format(**{key: value or '-' for key, value in human.items()}))
+    typer.echo(f"Erro final: {diagnosis.last_error or '-'}")
+    typer.echo(f"Project: {diagnosis.project_status or '-'} | cleanup: {diagnosis.cleanup['status']} ({diagnosis.cleanup['detail'] or '-'})")
+    typer.echo("Findings do HEAD atual:")
+    for finding in diagnosis.findings:
+        typer.echo("- {severity}: {title} | {path}:{line} | {criterion}".format(**{key: value or '-' for key, value in finding.items()}))
+    if not diagnosis.findings:
+        typer.echo("- nenhum")
+    typer.echo("Últimos eventos:")
+    for event in diagnosis.events:
+        typer.echo("- #{sequence} {phase} ({created_at}): {summary}".format(**event))
+    if diagnosis.inconsistencies:
+        typer.echo("Inconsistências:")
+        for message in diagnosis.inconsistencies:
+            typer.echo(f"- {message}")
 
 
 @app.command()

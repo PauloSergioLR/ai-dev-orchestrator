@@ -68,6 +68,25 @@ faz merge automaticamente quando configurado e conclui o item no Project.
 Os comandos `orch resume --issue N`, `orch state --issue N` e `orch doctor`
 continuam disponíveis para operação e diagnóstico explícitos.
 
+## Diagnóstico de uma execução
+
+Use `orch inspect --issue N` durante um incidente para reunir, em uma consulta
+local, fase, terminalidade, identidade da execução, worktree, sessão e modelos,
+PR, HEADs, review/findings, quota, intervenção humana, Project, cleanup e os
+dez eventos mais recentes do journal. Inconsistências persistidas evidentes são
+sinalizadas ao fim da saída.
+
+```powershell
+orch inspect --issue 64
+orch inspect --issue 64 --json
+```
+
+O comando abre o SQLite em modo somente leitura: não cria ou migra o banco e
+nunca chama Git, providers, GitHub, CI ou Project. A saída JSON tem chaves
+ordenadas e contrato estável para suporte e automação. Textos persistidos são
+redigidos pela mesma política do store; prompts e logs completos de providers
+não fazem parte da saída.
+
 ## Configuração
 
 ## Histórico e cleanup
