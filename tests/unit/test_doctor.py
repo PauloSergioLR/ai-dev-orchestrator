@@ -410,6 +410,37 @@ def test_doctor_appears_in_cli_help() -> None:
     assert "doctor" in result.output
 
 
+def test_cli_rejects_state_without_deep() -> None:
+    result = CliRunner().invoke(app, ["doctor", "--state"])
+
+    assert result.exit_code == 2
+    assert "--state exige --deep" in result.output
+
+
+def test_cli_deep_warns_and_displays_diagnostic_scopes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    received: dict[str, bool] = {}
+
+    def diagnose(self, *, deep=False, state=False):
+        received.update(deep=deep, state=state)
+        return [
+            DoctorCheck("Git", CheckStatus.OK, "disponível", CheckScope.LOCAL_CAPABILITY),
+            DoctorCheck("Codex exec", CheckStatus.OK, "validado", CheckScope.LIVE_PROVIDER),
+            DoctorCheck("Estado SQLite/GitHub", CheckStatus.WARNING, "diverge", CheckScope.STATE_CONSISTENCY),
+        ]
+
+    monkeypatch.setattr("ai_dev_orchestrator.cli.DoctorService.diagnose", diagnose)
+    result = CliRunner().invoke(app, ["doctor", "--deep", "--state"])
+
+    assert result.exit_code == 0
+    assert received == {"deep": True, "state": True}
+    assert "pode consumir quota/tokens" in result.output
+    assert "LOCAL_CAPABILITY" in result.output
+    assert "LIVE_PROVIDER" in result.output
+    assert "STATE_CONSISTENCY" in result.output
+
+
 def test_normal_doctor_does_not_run_deep_provider_probes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
