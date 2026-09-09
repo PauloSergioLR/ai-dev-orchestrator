@@ -48,9 +48,10 @@ class ResumeResult:
 class ResumeService:
     def __init__(self, store: SqliteExecutionStore, observer: RecoveryObserver,
                  planner: RecoveryPlanner, executor: RecoveryExecutor,
-                 codex_model: str | None = None, gemini_model: str | None = None) -> None:
+                 codex_model: str | None = None, gemini_model: str | None = None, escalation=None) -> None:
         self.store, self.observer, self.planner, self.executor = store, observer, planner, executor
         self.codex_model, self.gemini_model = codex_model, gemini_model
+        self.escalation = escalation
 
     @classmethod
     def from_config(cls, config: OrchestratorConfig) -> "ResumeService":
@@ -59,9 +60,26 @@ class ResumeService:
         from ai_dev_orchestrator.services.recovery_observer import RecoveryObserver as RealObserver
         store = SqliteExecutionStore(config.state.database_path)
         policy = RecoveryPolicy(config.github.repository_full_name, config.github.pull_request_base, config.execution.auto_merge, config.review.max_correction_attempts, config.github.done_status)
-        return cls(store, RealObserver(config, store), RecoveryPlanner(policy), RecoveryExecutor(policy, store, RecoveryEffects(config)), config.providers.codex_model, config.providers.gemini_model)
+        from ai_dev_orchestrator.services.escalation import EscalationService
+        from ai_dev_orchestrator.adapters.github import GitHubProjectStatusAdapter
+        return cls(store, RealObserver(config, store), RecoveryPlanner(policy), RecoveryExecutor(policy, store, RecoveryEffects(config)), config.providers.codex_model, config.providers.gemini_model, EscalationService(config, store, GitHubProjectStatusAdapter(config)))
 
     def resume(self, issue_number: int, *, retry_provider: bool = False, recover_failed: bool = False) -> ResumeResult:
+        try:
+            result = self._resume(issue_number, retry_provider=retry_provider, recover_failed=recover_failed)
+        except Exception as error:
+            run = self.store.get_active_for_issue(issue_number)
+            if run and self.escalation:
+                self.escalation.assess(run, error=error)
+            raise
+        if self.escalation:
+            run = self.store.get(result.execution_id)
+            if run.phase in PROVIDER_WAIT_PHASES or run.phase == ExecutionPhase.HUMAN_REQUIRED:
+                run = self.escalation.assess(run)
+                return self._result(run)
+        return result
+
+    def _resume(self, issue_number: int, *, retry_provider: bool = False, recover_failed: bool = False) -> ResumeResult:
         if issue_number <= 0:
             raise ResumeError("A Issue deve ser um inteiro positivo")
         run = self.store.get_active_for_issue(issue_number)
@@ -82,7 +100,7 @@ class ResumeService:
                 raise ResumeError(f"A execução da Issue #{issue_number} já é terminal; use --recover-failed para reconciliar falha transitória")
         if run.phase in TERMINAL_PHASES:
             raise ResumeError(f"A execução da Issue #{issue_number} já é terminal")
-        if run.phase is ExecutionPhase.HUMAN_REQUIRED:
+        if run.phase is ExecutionPhase.HUMAN_REQUIRED and not (retry_provider and run.provider_resume_phase):
             return self._result(run)
         if (
             (self.codex_model is not None and run.codex_model != self.codex_model)
@@ -121,7 +139,18 @@ class ResumeService:
                 raise ResumeError("Retomada sem progresso detectada")
             seen.add(signature)
             if decision.action.value == "BLOCK":
-                self.store.require_human(run.id, summary="Reconciliação remota exige intervenção: " + decision.reason)
+                if self.escalation:
+                    from ai_dev_orchestrator.domain.recovery import CiState
+                    reason = "REMOTE_AMBIGUOUS"
+                    if run.review_verdict == "REJECTED" and run.correction_attempts >= self.planner.policy.max_correction_attempts:
+                        reason = "CORRECTION_LIMIT"
+                    elif run.phase == ExecutionPhase.WAITING_CI and observation.ci.state == CiState.FAILURE:
+                        reason = "CI_TERMINAL"
+                    elif run.phase in {ExecutionPhase.MERGING, ExecutionPhase.MERGE_PENDING}:
+                        reason = "MERGE_BLOCKED"
+                    self.escalation.escalate(run, reason)
+                else:
+                    self.store.require_human(run.id, summary="Reconciliação remota exige intervenção: " + decision.reason)
                 raise ResumeError(decision.reason)
             try:
                 run = self.executor.execute(run, decision, observation)

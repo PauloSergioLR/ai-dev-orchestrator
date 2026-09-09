@@ -105,6 +105,7 @@ for _phase in RESUMABLE_PROVIDER_PHASES:
     _ALLOWED[_phase].update(PROVIDER_WAIT_PHASES)
 for _phase in PROVIDER_WAIT_PHASES:
     _ALLOWED.setdefault(_phase, set()).update(RESUMABLE_PROVIDER_PHASES)
+_ALLOWED[ExecutionPhase.HUMAN_REQUIRED] = set(RESUMABLE_PROVIDER_PHASES)
 
 
 def validate_transition(old: ExecutionPhase, new: ExecutionPhase) -> None:
@@ -136,6 +137,9 @@ class RunRecord:
     merge_commit_sha: str | None = None
     merged_head_sha: str | None = None
     project_status: str | None = None
+    human_reason: str | None = None
+    human_phase: str | None = None
+    human_at: str | None = None
     last_error: str | None = None
     codex_model: str = "default"
     gemini_model: str = "default"
@@ -191,3 +195,11 @@ class ExecutionStore(Protocol):
     ) -> RunRecord: ...
 
     def list_history(self, issue_number: int | None = None) -> tuple[RunRecord, ...]: ...
+
+    def require_human(self, execution_id: str, *, summary: str, reason: str) -> RunRecord: ...
+
+    def claim_notification(self, execution_id: str, event_key: str, channel: str,
+                           *, max_attempts: int, retry_seconds: float) -> bool: ...
+
+    def finish_notification(self, execution_id: str, event_key: str, channel: str,
+                            *, sent: bool) -> None: ...

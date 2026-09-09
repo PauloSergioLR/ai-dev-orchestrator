@@ -58,3 +58,9 @@ max_sleep_seconds = 300
 auto_cleanup = false
 remove_local_branch = false
 remove_remote_branch = false
+[notifications]
+# Nenhum canal ativo por padrão. Opções: "email", "discord", "telegram".
+channels = []
+timeout_seconds = 15
+retry_seconds = 300
+max_attempts = 3

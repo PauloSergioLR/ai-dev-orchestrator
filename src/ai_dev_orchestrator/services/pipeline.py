@@ -61,6 +61,10 @@ from ai_dev_orchestrator.domain.provider import ProviderFailure
 class RunPipelineError(Exception):
     """Indica em qual etapa a execução foi interrompida."""
 
+    def __init__(self, message: str, *, reason: str | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
+
 
 class IssueReader(Protocol):
     def get_issue(self, number: int) -> Issue: ...
@@ -253,7 +257,19 @@ class RunPipeline:
             SqliteExecutionStore(config.state.database_path),
         )
 
-    def run(
+    def run(self, issue_number: int, branch: str, *, base_ref: str | None = None) -> RunResult:
+        self._execution_id = None
+        try:
+            return self._run(issue_number, branch, base_ref=base_ref)
+        except Exception as error:
+            if self.execution_store is not None and self._execution_id is not None:
+                from ai_dev_orchestrator.services.escalation import EscalationService
+                EscalationService(self.config, self.execution_store, self.status_writer).assess(
+                    self.execution_store.get(self._execution_id), error=error
+                )
+            raise
+
+    def _run(
         self, issue_number: int, branch: str, *, base_ref: str | None = None
     ) -> RunResult:
         if issue_number <= 0:
@@ -402,6 +418,11 @@ class RunPipeline:
         try:
             pull_request = self.pull_request_creator.create(
                 issue, worktree.branch, gates
+            )
+            self._checkpoint(
+                "Identidade do Pull Request criado preservada antes da convergência",
+                pull_request_number=pull_request.number,
+                pull_request_url=pull_request.url,
             )
             self._wait_for_pull_request_head(
                 pull_request, worktree.branch, commit_sha, stale_head_sha=None
@@ -597,7 +618,8 @@ class RunPipeline:
             )
         except Exception as error:
             raise RunPipelineError(
-                f"Auto-merge recusado ou não confirmado para Pull Request #{pull_request.number}; nenhum Status Done foi escrito: {error}"
+                f"Auto-merge recusado ou não confirmado para Pull Request #{pull_request.number}; nenhum Status Done foi escrito: {error}",
+                reason="MERGE_BLOCKED",
             ) from error
         try:
             self._transition(
@@ -761,6 +783,7 @@ class RunPipeline:
             )
             self._transition(ExecutionPhase.COMMIT_PENDING, "Commit da correção será publicado")
             new_head = self.git_publisher.commit_correction(worktree.path)
+            self._checkpoint("HEAD da correção preservado", current_head_sha=new_head)
             self._ensure_existing_pull_request(
                 pull_request, worktree.branch, ci_result.expected_head_sha
             )
@@ -838,7 +861,8 @@ class RunPipeline:
             or data.get("state") != "OPEN"
         ):
             raise RunPipelineError(
-                "O Pull Request existente divergiu, foi fechado ou não aponta para o novo HEAD"
+                "O Pull Request existente divergiu, foi fechado ou não aponta para o novo HEAD",
+                reason="REMOTE_AMBIGUOUS",
             )
 
     def _wait_for_pull_request_head(
@@ -909,7 +933,8 @@ class RunPipeline:
         observed_head = self.git_publisher.current_head(worktree)
         if observed_head != expected_head_sha:
             raise RunPipelineError(
-                "O HEAD local divergiu do HEAD revisado; a publicação da correção foi recusada"
+                "O HEAD local divergiu do HEAD revisado; a publicação da correção foi recusada",
+                reason="REMOTE_AMBIGUOUS",
             )
 
     def _find_project_item(self, issue_number: int) -> ProjectItem:

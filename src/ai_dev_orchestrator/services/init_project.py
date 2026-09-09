@@ -277,4 +277,10 @@ max_sleep_seconds = {config.supervisor.max_sleep_seconds}
         f"retry_without_reset_seconds = {config.supervisor.retry_without_reset_seconds}\n"
         if config.supervisor.retry_without_reset_seconds is not None
         else ""
-    )
+    ) + f"""
+[notifications]
+channels = {array(config.notifications.channels)}
+timeout_seconds = {config.notifications.timeout_seconds}
+retry_seconds = {config.notifications.retry_seconds}
+max_attempts = {config.notifications.max_attempts}
+"""

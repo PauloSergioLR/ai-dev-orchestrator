@@ -17,6 +17,7 @@ from ai_dev_orchestrator.services.work import WorkResult, WorkService
 from ai_dev_orchestrator.adapters.git import GitWorktreeAdapter
 from ai_dev_orchestrator.services.cleanup import CleanupService
 from ai_dev_orchestrator.services.history import HistoryService, format_duration
+from ai_dev_orchestrator.services.escalation import EscalationService
 
 
 class SupervisorError(Exception):
@@ -30,6 +31,7 @@ class SupervisorService:
         work_service: WorkService,
         store: SqliteExecutionStore,
         sleep: Callable[[float], None] = time.sleep,
+        escalation: EscalationService | None = None,
     ) -> None:
         self.config, self.work_service, self.store, self.sleep = (
             config,
@@ -37,13 +39,17 @@ class SupervisorService:
             store,
             sleep,
         )
+        self.escalation = escalation or EscalationService(config, store)
 
     @classmethod
     def from_config(cls, config: OrchestratorConfig) -> "SupervisorService":
+        from ai_dev_orchestrator.adapters.github import GitHubProjectStatusAdapter
+        store = SqliteExecutionStore(config.state.database_path)
         return cls(
             config,
             WorkService.from_config(config),
-            SqliteExecutionStore(config.state.database_path),
+            store,
+            escalation=EscalationService(config, store, GitHubProjectStatusAdapter(config)),
         )
 
     def watch(self) -> None:
@@ -53,6 +59,10 @@ class SupervisorService:
                 active = self.store.list_active()
                 if len(active) > 1:
                     raise SupervisorError("Mais de uma execução ativa foi encontrada")
+                if active and (active[0].phase in PROVIDER_WAIT_PHASES or active[0].phase == ExecutionPhase.HUMAN_REQUIRED):
+                    run = self.escalation.assess(active[0])
+                    if run.phase == ExecutionPhase.HUMAN_REQUIRED:
+                        raise SupervisorError("HUMAN_REQUIRED: intervenção humana necessária; consulte orch history")
                 if active and active[0].phase in PROVIDER_WAIT_PHASES:
                     run = active[0]
                     if run.phase == ExecutionPhase.BLOCKED_PROVIDER:

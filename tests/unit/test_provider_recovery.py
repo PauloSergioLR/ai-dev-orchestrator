@@ -241,7 +241,7 @@ def test_supervisor_atravessa_backoff_e_para_no_limite(tmp_path, monkeypatch):
     with pytest.raises(SupervisorError, match="intervenção"):
         SupervisorService(cfg, work, store, sleep).watch()
     assert sleeps == [30, 60, 120] and work.calls == 4
-    assert store.get(run.id).phase == Phase.BLOCKED_PROVIDER
+    assert store.get(run.id).phase == Phase.HUMAN_REQUIRED
     assert len(store.list_history()) == 1
     assert not cfg.state.database_path.with_suffix(".watch.lock").exists()
 
