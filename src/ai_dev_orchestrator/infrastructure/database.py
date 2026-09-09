@@ -35,12 +35,19 @@ class SchemaVersionError(ExecutionStoreError):
 class SqliteExecutionStore:
     """Conexões curtas e transacionais, sem guardar conteúdo de providers."""
 
-    def __init__(self, database_path: Path, timeout_seconds: float = 5) -> None:
-        self.database_path, self.timeout_seconds = database_path, timeout_seconds
+    def __init__(self, database_path: Path, timeout_seconds: float = 5, *, read_only: bool = False) -> None:
+        self.database_path, self.timeout_seconds, self.read_only = database_path, timeout_seconds, read_only
         self._initialize()
 
     def _connection(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, timeout=self.timeout_seconds)
+        if self.read_only:
+            connection = sqlite3.connect(
+                f"{self.database_path.resolve().as_uri()}?mode=ro",
+                uri=True,
+                timeout=self.timeout_seconds,
+            )
+        else:
+            connection = sqlite3.connect(self.database_path, timeout=self.timeout_seconds)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(f"PRAGMA busy_timeout = {int(self.timeout_seconds * 1000)}")
@@ -48,6 +55,13 @@ class SqliteExecutionStore:
 
     def _initialize(self) -> None:
         try:
+            if self.read_only:
+                with self._connection() as c:
+                    row = c.execute("SELECT version FROM schema_version").fetchone()
+                    if row is None or row["version"] != SCHEMA_VERSION:
+                        version = row["version"] if row else "ausente"
+                        raise SchemaVersionError(f"Versão de schema não suportada: {version}")
+                return
             self.database_path.parent.mkdir(parents=True, exist_ok=True)
             with self._connection() as c:
                 c.execute("PRAGMA journal_mode = WAL")
@@ -362,6 +376,19 @@ class SqliteExecutionStore:
                 f"Não foi possível consultar eventos: {error}"
             ) from error
 
+    def terminal_flag(self, execution_id: str) -> bool:
+        """Lê o flag persistido para diagnósticos de consistência."""
+        try:
+            with self._connection() as c:
+                row = c.execute("SELECT terminal FROM executions WHERE id = ?", (execution_id,)).fetchone()
+            if row is None:
+                raise ExecutionStoreError("Execução persistida não encontrada")
+            return bool(row["terminal"])
+        except ExecutionStoreError:
+            raise
+        except sqlite3.Error as error:
+            raise ExecutionStoreError(f"Não foi possível consultar terminalidade: {error}") from error
+
     def transition(
         self,
         execution_id: str,
@@ -658,11 +685,22 @@ def _redact_secrets(value: str) -> str:
     for name, secret in os.environ.items():
         if any(part in name.upper() for part in ("TOKEN", "PASSWORD", "SECRET", "WEBHOOK")) and secret:
             value = value.replace(secret, "[redigido]")
-    return re.sub(
-        r"(?i)(token|authorization|password|secret)\s*[:=]\s*\S+",
+    value = value.replace("\n", " ")
+    value = re.sub(
+        r"(?i)(authorization)\s*[:=]\s*(?:\S+\s+)?\S+",
         r"\1=[redigido]",
-        value.replace("\n", " "),
+        value,
     )
+    return re.sub(
+        r"(?i)(token|password|secret|webhook)\s*[:=]\s*\S+",
+        r"\1=[redigido]",
+        value,
+    )
+
+
+def sanitize_diagnostic_text(value: str | None) -> str | None:
+    """Redige texto persistido antes de expô-lo em uma saída operacional."""
+    return _sanitize(value) if value is not None else None
 
 
 def _sanitize_finding(value: str, limit: int) -> str:
