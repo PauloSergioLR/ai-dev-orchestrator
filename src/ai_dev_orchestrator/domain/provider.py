@@ -34,6 +34,7 @@ class ProviderFailure(Exception):
     session_id: str | None = None
     returncode: int | None = None
     diagnostic_source: str = "provider"
+    diagnostic_context: str | None = None
 
     def __str__(self) -> str:
         return (f"{self.provider}: {self.classification.value}: {self.message} "
@@ -88,6 +89,18 @@ FAILURE_MESSAGES = {
     ProviderFailureKind.ENCODING_ERROR: "Encoding UTF-8 inválido",
     ProviderFailureKind.PROCESS_CLEANUP_ERROR: "Timeout sem prova de encerramento da árvore de processos; retry bloqueado",
 }
+
+
+def sanitized_diagnostic_context(value: object) -> str | None:
+    """Aceita somente o resumo de protocolo sem conteúdo fornecido pela CLI."""
+    if not isinstance(value, str):
+        return None
+    pattern = (
+        r"events=[A-Za-z0-9_.-]+(?:,[A-Za-z0-9_.-]+)*(?:,\+\d+)?; "
+        r"terminal=(?:turn\.completed|turn\.failed|ambiguous|none); "
+        r"count=\d{1,6}; source=(?:JSONL|stderr); exit=(?:-?\d+|none)"
+    )
+    return value if re.fullmatch(pattern, value) else None
 
 
 def classify_process_failure(kind: str | None) -> ProviderFailureKind:

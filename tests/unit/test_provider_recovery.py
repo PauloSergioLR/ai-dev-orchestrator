@@ -98,6 +98,21 @@ def test_sessao_divergente_preserva_original(tmp_path):
     assert result.quota_classification == "PROTOCOL_ERROR"
 
 
+def test_persiste_apenas_diagnostico_de_protocolo_sanitizado(tmp_path):
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    run = running(store)
+    diagnostic = "events=thread.started,error; terminal=none; count=2; source=JSONL; exit=0"
+    provider_failure = ProviderFailure(
+        "codex", Kind.PROTOCOL_ERROR, "token=segredo", NOW,
+        session_id="session", returncode=0, diagnostic_context=diagnostic,
+    )
+
+    recorded = record_provider_failure(store, run.id, provider_failure)
+
+    assert diagnostic in recorded.last_error
+    assert "segredo" not in recorded.last_error
+
+
 @pytest.mark.parametrize("kind", [Kind.NETWORK_ERROR, Kind.TIMEOUT, Kind.TERMINAL_QUOTA])
 def test_recovery_needs_changes_nao_incrementa_correcao_no_retry(tmp_path, kind):
     store = SqliteExecutionStore(tmp_path / "state.db")

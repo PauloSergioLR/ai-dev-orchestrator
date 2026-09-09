@@ -11,7 +11,9 @@ from ai_dev_orchestrator.adapters.codex import (
     CODEX_TIMEOUT_SECONDS,
     CodexAdapter,
     CodexError,
+    CodexProviderFailure,
 )
+from ai_dev_orchestrator.domain.provider import ProviderFailureKind
 from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner, ProcessFailureKind
 
 
@@ -205,3 +207,160 @@ def test_accepts_injected_timeout_for_default_runner() -> None:
 
     assert isinstance(adapter.runner, CommandRunner)
     assert adapter.runner.timeout == 12
+
+
+def test_accepts_intermediate_error_before_completed_turn(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    output = "\n".join(
+        [
+            '{"type":"thread.started","thread_id":"thread-123"}',
+            '{"type":"turn.started"}',
+            '{"type":"error","code":"network","message":"network error token=secret"}',
+            '{"type":"item.completed","item":{"type":"agent_message","text":"Concluído"}}',
+            '{"type":"turn.completed"}',
+        ]
+    )
+
+    execution = CodexAdapter(FakeRunner(CommandResult(0, output))).execute(worktree, "Implemente")
+
+    assert execution.succeeded is True
+    assert execution.final_message == "Concluído"
+
+
+def test_accepts_nested_intermediate_error_before_completed_turn(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    output = "\n".join(
+        [
+            '{"type":"thread.started","thread_id":"thread-123"}',
+            '{"type":"item.completed","error":{"code":"network","message":"network error token=secret"},"item":{"type":"agent_message","text":"Concluído"}}',
+            '{"type":"turn.completed"}',
+        ]
+    )
+
+    execution = CodexAdapter(FakeRunner(CommandResult(0, output))).execute(worktree, "Implemente")
+
+    assert execution.succeeded is True
+
+
+@pytest.mark.parametrize(
+    ("error", "kind"),
+    [
+        ('{"code":"quota_exceeded","message":"quota exceeded"}', ProviderFailureKind.TERMINAL_QUOTA),
+        ('{"code":"network","message":"network error"}', ProviderFailureKind.NETWORK_ERROR),
+    ],
+)
+def test_turn_failed_is_terminal_even_with_exit_zero(tmp_path: Path, error: str,
+                                                     kind: ProviderFailureKind) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    output = "\n".join(
+        [
+            '{"type":"thread.started","thread_id":"thread-123"}',
+            '{"type":"error","error":' + error + '}',
+            '{"type":"turn.failed","error":' + error + '}',
+        ]
+    )
+
+    with pytest.raises(CodexProviderFailure) as raised:
+        CodexAdapter(FakeRunner(CommandResult(0, output))).execute(worktree, "Implemente")
+
+    assert raised.value.classification == kind
+
+
+def test_error_without_terminal_turn_preserves_structured_classification(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    output = "\n".join(
+        [
+            '{"type":"thread.started","thread_id":"thread-123"}',
+            '{"type":"error","code":"quota_exceeded","message":"token=secret"}',
+        ]
+    )
+
+    with pytest.raises(CodexProviderFailure) as raised:
+        CodexAdapter(FakeRunner(CommandResult(0, output))).execute(worktree, "Implemente")
+
+    assert raised.value.classification == ProviderFailureKind.TERMINAL_QUOTA
+    assert "secret" not in raised.value.message
+
+
+def test_incompatible_terminal_events_are_protocol_error(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    output = "\n".join(
+        [
+            '{"type":"thread.started","thread_id":"thread-123"}',
+            '{"type":"turn.completed"}',
+            '{"type":"turn.failed","error":{"message":"token=secret"}}',
+        ]
+    )
+
+    with pytest.raises(CodexProviderFailure) as raised:
+        CodexAdapter(FakeRunner(CommandResult(0, output))).execute(worktree, "Implemente")
+
+    assert raised.value.classification == ProviderFailureKind.PROTOCOL_ERROR
+    assert raised.value.diagnostic_context == (
+        "events=thread.started,turn.completed,turn.failed; terminal=ambiguous; count=3; source=JSONL; exit=0"
+    )
+    assert "secret" not in raised.value.message
+
+
+def test_nonzero_exit_still_uses_structured_failure(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    output = '{"type":"error","code":"quota_exceeded","message":"quota exceeded"}'
+
+    with pytest.raises(CodexProviderFailure) as raised:
+        CodexAdapter(FakeRunner(CommandResult(1, output))).execute(worktree, "Implemente")
+
+    assert raised.value.classification == ProviderFailureKind.TERMINAL_QUOTA
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "\n".join(
+            [
+                '{"type":"thread.started","thread_id":"thread-123"}',
+                '{"type":"turn.completed"}',
+            ]
+        ),
+        "\n".join(
+            [
+                '{"type":"item.completed","item":{"type":"agent_message","text":"Ok"}}',
+                '{"type":"turn.completed"}',
+            ]
+        ),
+    ],
+)
+def test_completed_turn_requires_message_and_session(tmp_path: Path, output: str) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    with pytest.raises(CodexProviderFailure) as raised:
+        CodexAdapter(FakeRunner(CommandResult(0, output))).execute(worktree, "Implemente")
+
+    assert raised.value.classification == ProviderFailureKind.PROTOCOL_ERROR
+
+
+def test_unknown_diagnostic_contains_only_sanitized_protocol_metadata(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    output = "\n".join(
+        [
+            '{"type":"thread.started","thread_id":"thread-123"}',
+            '{"type":"turn.failed","error":{"message":"prompt secreto token=abc"}}',
+        ]
+    )
+
+    with pytest.raises(CodexProviderFailure) as raised:
+        CodexAdapter(FakeRunner(CommandResult(0, output))).execute(worktree, "Implemente")
+
+    assert raised.value.classification == ProviderFailureKind.UNKNOWN
+    assert raised.value.diagnostic_context == (
+        "events=thread.started,turn.failed; terminal=turn.failed; count=2; source=JSONL; exit=0"
+    )
+    assert "prompt secreto" not in raised.value.message
+    assert "token=abc" not in raised.value.message

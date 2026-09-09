@@ -7,7 +7,7 @@ from ai_dev_orchestrator.domain.execution import (
 )
 from ai_dev_orchestrator.domain.provider import (
     FAILURE_MESSAGES, FAILURE_POLICY, FailureDisposition, ProviderFailure,
-    ProviderFailureKind,
+    ProviderFailureKind, sanitized_diagnostic_context,
 )
 
 
@@ -53,6 +53,10 @@ def record_provider_failure(store, execution_id: str, failure: ProviderFailure) 
     } else "provider"
     detail = (f"{kind.value}: {FAILURE_MESSAGES[kind]} "
               f"(exit={failure.returncode}, fonte={source}, tentativa={attempts})")
+    if kind in {ProviderFailureKind.UNKNOWN, ProviderFailureKind.PROTOCOL_ERROR}:
+        diagnostic = sanitized_diagnostic_context(failure.diagnostic_context)
+        if diagnostic is not None:
+            detail += f"; diagnóstico={diagnostic}"
     if failure.provider == "codex" and not session:
         detail += "; sessão não comprovada; criação automática bloqueada"
     return store.transition(

@@ -149,10 +149,14 @@ class CodexAdapter:
                     and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", e["thread_id"])}
         session = expected_session or (next(iter(sessions)) if len(sessions) == 1 else None)
 
-        def fail(kind, source, retry_at=None, message=None):
+        def fail(kind, source, retry_at=None, message=None, diagnostic_context=None):
+            if diagnostic_context is not None and kind in {
+                ProviderFailureKind.UNKNOWN, ProviderFailureKind.PROTOCOL_ERROR,
+            }:
+                message = (message or FAILURE_MESSAGES[kind]) + "; diagnóstico: " + diagnostic_context
             raise CodexProviderFailure(
                 "codex", kind, message or FAILURE_MESSAGES[kind], datetime.now(timezone.utc),
-                retry_at, session, result.returncode, source,
+                retry_at, session, result.returncode, source, diagnostic_context,
             )
 
         if len(sessions) > 1 or (expected_session and sessions - {expected_session}):
@@ -164,19 +168,51 @@ class CodexAdapter:
             fail(classify_process_failure(result.failure_kind), "processo")
         if malformed:
             fail(ProviderFailureKind.MALFORMED_JSON, "stdout", message="Codex retornou JSONL inválido")
+        terminal = self._terminal_state(events)
+        diagnostic = self._diagnostic_context(events, terminal, result.returncode, "JSONL")
+        if terminal == "ambiguous":
+            fail(ProviderFailureKind.PROTOCOL_ERROR, "JSONL",
+                 message="Codex retornou eventos terminais incompatíveis",
+                 diagnostic_context=diagnostic)
+        if result.succeeded:
+            if terminal == "turn.failed":
+                structured = self._structured_failure(events)
+                kind, retry = structured or (ProviderFailureKind.UNKNOWN, None)
+                fail(kind, "JSONL", retry,
+                     diagnostic_context=diagnostic if kind == ProviderFailureKind.UNKNOWN else None)
+            if terminal == "none":
+                structured = self._structured_failure(events)
+                if structured:
+                    kind, retry = structured
+                    fail(kind, "JSONL", retry,
+                         diagnostic_context=diagnostic if kind == ProviderFailureKind.UNKNOWN else None)
+            if terminal != "turn.completed":
+                try:
+                    self._parse_events(events, require_session=True)
+                except CodexError as error:
+                    fail(ProviderFailureKind.PROTOCOL_ERROR, "JSONL", message=str(error),
+                         diagnostic_context=diagnostic)
+                fail(ProviderFailureKind.PROTOCOL_ERROR, "JSONL",
+                     message="Codex não retornou um evento terminal da execução",
+                     diagnostic_context=diagnostic)
+            try:
+                session_id, final_message = self._parse_events(events, require_session=True)
+            except CodexError as error:
+                fail(ProviderFailureKind.PROTOCOL_ERROR, "JSONL", message=str(error),
+                     diagnostic_context=diagnostic)
+            return result, session_id, final_message
+
         structured = self._structured_failure(events)
         if structured or not result.succeeded:
             kind, retry = structured or (classify_provider_text(result.stderr), None)
+            source = "JSONL" if structured else "stderr"
             # stderr pode descrever uma sessão ausente, mas nunca prova sucesso.
             message = None
             if kind == ProviderFailureKind.UNKNOWN:
                 message = f"Codex retornou código {result.returncode} ao {operation}; saída omitida"
-            fail(kind, "JSONL" if structured else "stderr", retry, message)
-        try:
-            session_id, final_message = self._parse_events(events, require_session=True)
-        except CodexError as error:
-            fail(ProviderFailureKind.PROTOCOL_ERROR, "JSONL", message=str(error))
-        return result, session_id, final_message
+            failure_diagnostic = self._diagnostic_context(events, terminal, result.returncode, source)
+            fail(kind, source, retry, message,
+                 failure_diagnostic if kind == ProviderFailureKind.UNKNOWN else None)
 
     @staticmethod
     def _structured_failure(events: list[dict[str, Any]]) -> tuple[ProviderFailureKind, datetime | None] | None:
@@ -209,6 +245,40 @@ class CodexAdapter:
         retries = {r for k, r in signals if k == kind and r is not None}
         # Sinais conflitantes não autorizam escolher uma janela arbitrária.
         return kind, next(iter(retries)) if len(retries) == 1 else None
+
+    @staticmethod
+    def _terminal_state(events: list[dict[str, Any]]) -> str:
+        """Distingue conclusão, falha e protocolo ambíguo sem usar erros intermediários."""
+        completed = any(event.get("type") == "turn.completed" for event in events)
+        failed = any(event.get("type") == "turn.failed" for event in events)
+        if completed and failed:
+            return "ambiguous"
+        if completed:
+            return "turn.completed"
+        if failed:
+            return "turn.failed"
+        return "none"
+
+    @staticmethod
+    def _diagnostic_context(events: list[dict[str, Any]], terminal: str,
+                            returncode: int | None, source: str) -> str:
+        """Resume somente metadados do protocolo; nunca texto, prompts ou stderr."""
+        known_event_types = {
+            "thread.started", "turn.started", "turn.completed", "turn.failed", "item.completed", "error",
+        }
+        event_types = []
+        for event in events[:20]:
+            event_type = event.get("type")
+            if isinstance(event_type, str) and event_type in known_event_types:
+                event_types.append(event_type)
+            else:
+                event_types.append("other")
+        if len(events) > len(event_types):
+            event_types.append(f"+{len(events) - len(event_types)}")
+        rendered_types = ",".join(event_types) or "none"
+        rendered_exit = str(returncode) if returncode is not None else "none"
+        return (f"events={rendered_types}; terminal={terminal}; count={len(events)}; "
+                f"source={source}; exit={rendered_exit}")
 
     @classmethod
     def _parse_events(cls, events: list[dict[str, Any]], require_session: bool) -> tuple[str | None, str]:
