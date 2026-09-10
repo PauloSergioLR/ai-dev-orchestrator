@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Protocol
 
 from ai_dev_orchestrator.adapters.codex import CodexAdapter
 from ai_dev_orchestrator.adapters.git import GitWorktreeAdapter
@@ -32,10 +33,20 @@ from ai_dev_orchestrator.services.convergence import (
 )
 
 
+class ProjectStatusWriter(Protocol):
+    """Atualiza o Status de um item do GitHub Project."""
+
+    def set_status(self, project_item_id: str, status_name: str) -> None: ...
+
+
 class RecoveryEffects:
     """Ponte de alto nível; não decide próximas ações nem persiste checkpoints."""
 
-    def __init__(self, config: OrchestratorConfig) -> None:
+    def __init__(
+        self,
+        config: OrchestratorConfig,
+        projects: "ProjectStatusWriter | None" = None,
+    ) -> None:
         self.config = config
         self.worktrees = GitWorktreeAdapter()
         self.codex = CodexAdapter(model=config.providers.codex_model)
@@ -43,7 +54,7 @@ class RecoveryEffects:
         self.publication = GitPublicationAdapter()
         self.issues = GitHubIssueAdapter(config)
         self.pull_requests = GitHubPullRequestAdapter(config)
-        self.projects = GitHubProjectStatusAdapter(config)
+        self.projects = projects if projects is not None else GitHubProjectStatusAdapter(config)
         self.ai_review_status = config.github.ai_review_status
         self.reviewer = AntigravityAdapter(
             config.review.timeout_seconds, model=config.providers.gemini_model,

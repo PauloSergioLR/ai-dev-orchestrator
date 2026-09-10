@@ -245,7 +245,7 @@ def test_pipeline_recovery_correction_preserves_identity_after_restart(tmp_path,
                 merge=MergeObservation(MergeState.OPEN),
             )
 
-    effects = RecoveryEffects(initial.config)
+    effects = RecoveryEffects(initial.config, projects=fakes)
     effects.codex = fakes
     effects.validation = fakes
     effects.publication = fakes
