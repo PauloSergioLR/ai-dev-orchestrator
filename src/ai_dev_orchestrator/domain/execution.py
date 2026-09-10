@@ -60,7 +60,11 @@ _ALLOWED = {
         ExecutionPhase.WAITING_CI,
         ExecutionPhase.FAILED,
     },
-    ExecutionPhase.WAITING_CI: {ExecutionPhase.GEMINI_REVIEWING, ExecutionPhase.FAILED},
+    ExecutionPhase.WAITING_CI: {
+        ExecutionPhase.CODEX_RUNNING,
+        ExecutionPhase.GEMINI_REVIEWING,
+        ExecutionPhase.FAILED,
+    },
     ExecutionPhase.GEMINI_REVIEWING: {
         ExecutionPhase.WAITING_GEMINI_QUOTA,
         ExecutionPhase.NEEDS_CHANGES,

@@ -97,12 +97,14 @@ class SupervisorService:
                         )
                 try:
                     result = self.work_service.work()
-                except RunPipelineError:
+                except RunPipelineError as error:
                     # O pipeline sinaliza a quota depois de persistir o checkpoint.
                     # Só a evidência inequívoca no store autoriza o supervisor a
                     # converter esse erro em espera; demais falhas continuam terminais.
                     active_after_error = self.store.list_active()
                     if len(active_after_error) == 1 and active_after_error[0].phase in PROVIDER_WAIT_PHASES:
+                        continue
+                    if getattr(error, "reason", None) == "CI_FAILURE_RECOVERY":
                         continue
                     raise
                 if result is None:

@@ -71,6 +71,11 @@ class Projects:
         self.calls += 1
         return self.items
 
+    def set_status(self, project_item_id: str, status_name: str) -> None:
+        self.status_updates.append((project_item_id, status_name))
+
+    status_updates: list[tuple[str, str]] = field(default_factory=list)
+
 
 @dataclass
 class Issues:
@@ -115,7 +120,7 @@ class Synchronizer:
 def service(tmp_path: Path, items: tuple[ProjectItem, ...], *, active: tuple[object, ...] = ()) -> tuple[WorkService, Projects, Issues, Pipeline, Resumer, Synchronizer]:
     projects, issues = Projects(items), Issues()
     pipeline, resumer, sync = Pipeline(), Resumer(), Synchronizer()
-    return WorkService(config(tmp_path), Store(active), projects, issues, pipeline, resumer, sync), projects, issues, pipeline, resumer, sync
+    return WorkService(config(tmp_path), Store(active), projects, issues, pipeline, resumer, sync, projects), projects, issues, pipeline, resumer, sync
 
 
 def test_selects_ready_issue_syncs_base_and_reuses_pipeline(tmp_path: Path) -> None:
@@ -161,6 +166,15 @@ def test_no_eligible_issue_finishes_without_effects(tmp_path: Path) -> None:
 
     assert work.work() is None
     assert pipeline.calls == sync.calls == []
+
+
+def test_promove_proxima_issue_do_backlog_para_ready_antes_do_pipeline(tmp_path: Path) -> None:
+    work, projects, _, pipeline, _, _ = service(tmp_path, (item(8, status="Backlog", priority="P1"),))
+
+    work.work()
+
+    assert projects.status_updates == [("item-8", "Ready")]
+    assert pipeline.calls[0][0] == 8
 
 
 def test_active_execution_resumes_without_reading_project(tmp_path: Path) -> None:

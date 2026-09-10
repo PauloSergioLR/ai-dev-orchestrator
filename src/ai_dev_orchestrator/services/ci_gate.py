@@ -13,6 +13,10 @@ class CiGateError(Exception):
     """Indica uma CI reprovada, expirada ou estruturalmente insegura."""
 
 
+class CiFailureError(CiGateError):
+    """Indica que um check obrigatório falhou para o HEAD esperado."""
+
+
 class PullRequestCiReader(Protocol):
     """Consulta estruturada, sem decidir a política de aprovação."""
 
@@ -81,7 +85,7 @@ class CiGate:
             try:
                 snapshot = self.reader.get_ci_snapshot(pull_request_number)
             except Exception as error:
-                raise CiGateError(
+                raise CiFailureError(
                     f"Falha ao consultar a CI do Pull Request #{pull_request_number} "
                     f"para o HEAD esperado {expected_head_sha}: {error}"
                 ) from error

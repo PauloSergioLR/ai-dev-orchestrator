@@ -24,7 +24,7 @@ from ai_dev_orchestrator.domain.issue import Issue
 from ai_dev_orchestrator.domain.project import ProjectItem, is_eligible_for_execution
 from ai_dev_orchestrator.domain.worktree import GitWorktree
 from ai_dev_orchestrator.services.validation import GateResult, LocalValidationService
-from ai_dev_orchestrator.services.ci_gate import CiGate, PullRequestCiReader
+from ai_dev_orchestrator.services.ci_gate import CiFailureError, CiGate, PullRequestCiReader
 from ai_dev_orchestrator.services.convergence import (
     ConvergencePoller,
     ObservationDecision,
@@ -261,8 +261,18 @@ class RunPipeline:
         self._execution_id = None
         try:
             return self._run(issue_number, branch, base_ref=base_ref)
+        except CiFailureError as error:
+            raise RunPipelineError(
+                f"CI reprovada para a Issue #{issue_number}; a recuperação automática manterá "
+                f"o Status em '{self.config.github.ai_review_status}' e retomará a mesma sessão Codex",
+                reason="CI_FAILURE_RECOVERY",
+            ) from error
         except Exception as error:
-            if self.execution_store is not None and self._execution_id is not None:
+            if (
+                self.execution_store is not None
+                and self._execution_id is not None
+                and getattr(error, "reason", None) != "CI_FAILURE_RECOVERY"
+            ):
                 from ai_dev_orchestrator.services.escalation import EscalationService
                 EscalationService(self.config, self.execution_store, self.status_writer).assess(
                     self.execution_store.get(self._execution_id), error=error
@@ -471,6 +481,8 @@ class RunPipeline:
             ci_result = CiGate(self.ci_reader, self.config.ci).wait(
                 pull_request.number, commit_sha
             )
+        except CiFailureError:
+            raise
         except Exception as error:
             raise RunPipelineError(
                 f"Falha no gate de CI da Issue #{issue.number}, Pull Request #{pull_request.number} "
