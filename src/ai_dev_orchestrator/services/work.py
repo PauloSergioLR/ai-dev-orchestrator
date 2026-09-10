@@ -158,14 +158,6 @@ class WorkService:
         se outro supervisor tiver reservado a mesma Issue, a execução falha
         fechada antes de criar worktree ou iniciar Codex.
         """
-        orphaned = self.store.list_reconciliation_required()
-        if orphaned:
-            raise WorkError("Execução publicada exige reconciliação ou supersessão explícita: "
-                            + ", ".join(f"#{run.issue_number} (--recover-failed ou orch supersede)" for run in orphaned))
-        historical = self.store.list_historical_candidates()
-        if historical:
-            raise WorkError("Execução histórica com falha transitória exige reconciliação: "
-                            + ", ".join(f"#{run.issue_number} (--recover-failed)" for run in historical))
         try:
             selected = self._select_issue(excluded_issue_numbers)
         except Exception as error:

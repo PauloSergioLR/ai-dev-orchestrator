@@ -40,6 +40,7 @@ class SupervisorService:
             sleep,
         )
         self.escalation = escalation or EscalationService(config, store)
+        self._assessed_runs: set[str] = set()
 
     @classmethod
     def from_config(cls, config: OrchestratorConfig) -> "SupervisorService":
@@ -122,15 +123,18 @@ class SupervisorService:
         limit = self.config.execution.max_parallel_runs
         while True:
             active = self.store.list_active()
-            if len(active) > limit:
+            if len([run for run in active if self._occupies_slot(run)]) > limit:
                 raise SupervisorError("Execuções ativas excedem max_parallel_runs; estado não é seguro")
 
             progressed = False
             for run in active:
                 if run.phase == ExecutionPhase.HUMAN_REQUIRED:
-                    self.escalation.assess(run)
+                    self._assess_once(run)
                     continue
                 if run.phase in PROVIDER_WAIT_PHASES:
+                    if run.phase == ExecutionPhase.BLOCKED_PROVIDER:
+                        self._assess_once(run)
+                        continue
                     if not self._provider_ready(run):
                         continue
                 try:
@@ -142,19 +146,39 @@ class SupervisorService:
                     if getattr(error, "reason", None) == "CI_FAILURE_RECOVERY":
                         continue
                     raise
-                progressed = True
+                progressed = not _is_waiting(result)
                 self._show_completion(result)
 
             active = self.store.list_active()
-            while len(active) < limit:
-                result = self.work_service.start_next(frozenset(run.issue_number for run in active))
+            while len([run for run in active if self._occupies_slot(run)]) < limit:
+                try:
+                    result = self.work_service.start_next(
+                        frozenset(run.issue_number for run in active)
+                    )
+                except RunPipelineError as error:
+                    active_after_error = self.store.list_active()
+                    new_run = next(
+                        (run for run in active_after_error if run.issue_number not in {item.issue_number for item in active}),
+                        None,
+                    )
+                    if new_run and (
+                        new_run.phase in PROVIDER_WAIT_PHASES
+                        or new_run.phase == ExecutionPhase.HUMAN_REQUIRED
+                    ):
+                        active = active_after_error
+                        continue
+                    if getattr(error, "reason", None) == "CI_FAILURE_RECOVERY":
+                        active = active_after_error
+                        continue
+                    raise
                 if result is None:
                     break
-                progressed = True
+                progressed = progressed or not _is_waiting(result)
                 self._show_completion(result)
                 active = self.store.list_active()
 
-            if not self.store.list_active() and not progressed:
+            active = self.store.list_active()
+            if not [run for run in active if self._occupies_slot(run)] and not progressed:
                 return
             if not progressed:
                 self.sleep(self.config.supervisor.poll_interval_seconds)
@@ -162,6 +186,7 @@ class SupervisorService:
     def _provider_ready(self, run) -> bool:
         if run.phase == ExecutionPhase.BLOCKED_PROVIDER:
             return False
+        now = datetime.now(timezone.utc)
         retry_at = run.quota_retry_at
         if retry_at is None:
             if run.phase == ExecutionPhase.WAITING_PROVIDER:
@@ -170,8 +195,24 @@ class SupervisorService:
             if interval is None or run.quota_observed_at is None:
                 return False
             retry_at = datetime.fromtimestamp(run.quota_observed_at.timestamp() + interval, timezone.utc)
+            if retry_at > now:
+                return False
             self.store.checkpoint(run.id, summary="Intervalo da política local foi alcançado", quota_retry_at=retry_at.isoformat())
-        return retry_at <= datetime.now(timezone.utc)
+        return retry_at <= now
+
+    def _assess_once(self, run) -> None:
+        """Entrega o escalonamento uma vez por processo, sem polling agressivo."""
+        if run.id not in self._assessed_runs:
+            self.escalation.assess(run)
+            self._assessed_runs.add(run.id)
+
+    @staticmethod
+    def _occupies_slot(run) -> bool:
+        """Bloqueios humanos não consomem capacidade de execução autônoma."""
+        return run.phase not in {
+            ExecutionPhase.HUMAN_REQUIRED,
+            ExecutionPhase.BLOCKED_PROVIDER,
+        }
 
     def _show_completion(self, result: WorkResult) -> None:
         issue = result.run.issue_number if result.run else (result.resume.issue_number if result.resume else None)
