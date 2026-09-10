@@ -146,7 +146,7 @@ class SupervisorService:
                     if getattr(error, "reason", None) == "CI_FAILURE_RECOVERY":
                         continue
                     raise
-                progressed = not _is_waiting(result)
+                progressed = progressed or not _is_waiting(result)
                 self._show_completion(result)
 
             active = self.store.list_active()

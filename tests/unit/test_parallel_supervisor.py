@@ -8,6 +8,7 @@ import pytest
 
 from ai_dev_orchestrator.config import OrchestratorConfig
 from ai_dev_orchestrator.domain.execution import ExecutionPhase
+from ai_dev_orchestrator.domain.review import ReviewVerdict, StructuredReview
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
 from ai_dev_orchestrator.services.supervisor import SupervisorError, SupervisorService, _exclusive_lock
 from ai_dev_orchestrator.services.pipeline import RunPipelineError
@@ -153,6 +154,33 @@ def test_quota_checkpoint_preserves_the_same_run_identity(tmp_path: Path) -> Non
     assert waiting_run.id == run.id
     assert waiting_run.codex_session_id == "session-3"
     assert waiting_run.branch == "work/quota"
+
+
+def test_review_and_merge_proof_never_cross_parallel_execution_heads(tmp_path: Path) -> None:
+    store = SqliteExecutionStore(tmp_path / "state.db")
+
+    def reviewing(issue: int, head: str):
+        run = store.create(issue, branch=f"work/item-{issue}", worktree_path=str(tmp_path / str(issue)), base_ref="main")
+        run = store.transition(run.id, ExecutionPhase.CODEX_RUNNING, summary="Codex", codex_session_id=f"session-{issue}")
+        run = store.transition(run.id, ExecutionPhase.TESTING, summary="gates", current_head_sha=head)
+        run = store.transition(run.id, ExecutionPhase.COMMIT_PENDING, summary="commit")
+        run = store.transition(run.id, ExecutionPhase.PUSH_PENDING, summary="push")
+        run = store.transition(run.id, ExecutionPhase.PR_PENDING, summary="PR", pull_request_number=issue)
+        run = store.transition(run.id, ExecutionPhase.WAITING_CI, summary="CI", ci_head_sha=head)
+        return store.transition(run.id, ExecutionPhase.GEMINI_REVIEWING, summary="review")
+
+    head_first, head_second = "a" * 40, "b" * 40
+    first, second = reviewing(3, head_first), reviewing(9, head_second)
+    first = store.record_review(first.id, StructuredReview(ReviewVerdict.APPROVED, (), head_first, "aprovada"), "review da primeira")
+    second = store.record_review(second.id, StructuredReview(ReviewVerdict.APPROVED, (), head_second, "aprovada"), "review da segunda")
+    first = store.transition(first.id, ExecutionPhase.MERGE_PENDING, summary="merge", reviewed_head_sha=head_first)
+    second = store.transition(second.id, ExecutionPhase.MERGE_PENDING, summary="merge", reviewed_head_sha=head_second)
+    first = store.transition(first.id, ExecutionPhase.PROJECT_DONE_PENDING, summary="prova", merge_commit_sha="c" * 40, merged_head_sha=head_first)
+    second = store.transition(second.id, ExecutionPhase.PROJECT_DONE_PENDING, summary="prova", merge_commit_sha="d" * 40, merged_head_sha=head_second)
+
+    assert first.reviewed_head_sha == first.merged_head_sha == head_first
+    assert second.reviewed_head_sha == second.merged_head_sha == head_second
+    assert first.id != second.id and first.reviewed_head_sha != second.reviewed_head_sha
 
 
 def test_parallel_waiting_resume_sleeps_instead_of_busy_loop(tmp_path: Path) -> None:
