@@ -22,6 +22,20 @@ O reviewer analisa o dossier já coletado sem executar comandos. Se a CLI
 reportar `denied_actions`, a revisão fica bloqueada e recuperável; não amplie
 permissões de shell para contornar esse diagnóstico.
 
+Antes de habilitar `orch watch`, valide os caminhos reais dos providers por
+intenção explícita:
+
+```powershell
+orch doctor --deep
+orch doctor --deep --state
+```
+
+`--deep` pode consumir quota/tokens: cria apenas um diretório temporário e
+sessão sintética, sem Issue, PR, commit, push, merge ou alteração de Project.
+Ele reporta `LOCAL_CAPABILITY` e `LIVE_PROVIDER` separadamente. `--state`
+adiciona a conferência `STATE_CONSISTENCY`, abrindo o SQLite apenas em leitura e
+comparando execuções ativas com PRs e Project, sem corrigir divergências.
+
 ## Configuração inicial e uso diário
 
 ```powershell

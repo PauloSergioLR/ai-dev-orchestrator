@@ -53,13 +53,33 @@ def cli(
 
 
 @app.command()
-def doctor() -> None:
-    """Diagnostica os pré-requisitos locais sem corrigir problemas."""
-    checks = DoctorService().diagnose()
+def doctor(
+    deep: bool = typer.Option(
+        False, "--deep",
+        help="Executa probes reais e sintéticos dos providers; pode consumir quota/tokens.",
+    ),
+    state: bool = typer.Option(
+        False, "--state",
+        help="Com --deep, compara SQLite, PRs e Project somente em leitura.",
+    ),
+) -> None:
+    """Diagnostica pré-requisitos locais; --deep valida providers por intenção explícita."""
+    if state and not deep:
+        raise typer.BadParameter("--state exige --deep")
+    if deep:
+        typer.echo(
+            "Aviso: --deep envia prompts sintéticos aos providers e pode consumir quota/tokens. "
+            "Não usa Issue, PR ou sessão de produção.\n"
+        )
+    checks = (
+        DoctorService().diagnose(deep=True, state=state)
+        if deep else DoctorService().diagnose()
+    )
 
     typer.echo("AI Dev Orchestrator Doctor\n")
     for check in checks:
-        typer.echo(f"{check.name:<18} {check.status.value:<7} {check.message}")
+        scope = f"{check.scope.value:<18} " if deep else ""
+        typer.echo(f"{scope}{check.name:<30} {check.status.value:<7} {check.message}")
 
     if has_errors(checks):
         raise typer.Exit(code=1)
