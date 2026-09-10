@@ -458,6 +458,25 @@ def test_normal_doctor_does_not_run_deep_provider_probes(
     assert all(check.scope is CheckScope.LOCAL_CAPABILITY for check in checks)
 
 
+def test_doctor_reports_the_same_explicit_gate_used_by_pipeline(tmp_path: Path) -> None:
+    config_path = write_valid_config(tmp_path / "orchestrator.toml")
+    repository = tmp_path / "repository"
+    (repository / "tools").mkdir(parents=True)
+    (repository / "tools" / "validate.exe").touch()
+    with config_path.open("a", encoding="utf-8") as config:
+        config.write(
+            "\n[project]\n[[project.gates]]\n"
+            "name = 'official-check'\n"
+            "argv = ['tools/validate.exe', '--all']\n"
+        )
+
+    checks = DoctorService(config_path=config_path)._check_project_contract()
+
+    assert checks[0].status is CheckStatus.OK
+    assert "official-check" in checks[0].message
+    assert checks[1].status is CheckStatus.OK
+
+
 def test_deep_provider_probes_use_a_discarded_synthetic_workspace(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:

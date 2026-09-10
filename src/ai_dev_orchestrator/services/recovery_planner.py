@@ -229,7 +229,7 @@ class RecoveryPlanner:
             return self._decision(RecoveryAction.WAIT_FOR_CI, "CI ainda não concluiu para o HEAD atual.")
         if observed.ci.state == CiState.SUCCESS:
             return self._decision(RecoveryAction.RECORD_CI_SUCCESS, "CI aprovada para o HEAD atual.", ExecutionPhase.GEMINI_REVIEWING)
-        if run.correction_attempts >= self.policy.max_correction_attempts:
+        if run.ci_correction_attempts >= self.policy.max_correction_attempts:
             return self._block("Limite de tentativas de correção atingido após falhas da CI.")
         if not run.codex_session_id:
             return self._block("CI falhou, mas a sessão Codex persistida está ausente.")
@@ -259,7 +259,7 @@ class RecoveryPlanner:
 
     def _needs_changes(self, run: RunRecord, observed: RecoveryObservation) -> RecoveryDecision:
         head = run.current_head_sha
-        if run.correction_attempts >= self.policy.max_correction_attempts:
+        if (run.correction_attempts - run.ci_correction_attempts) >= self.policy.max_correction_attempts:
             return self._block("Limite de tentativas de correção atingido.")
         if not run.codex_session_id or run.review_verdict != ReviewState.REJECTED.value or run.reviewed_head_sha != head or observed.findings_head_sha != head:
             return self._block("Sessão, review e findings devem corresponder ao HEAD atual.")

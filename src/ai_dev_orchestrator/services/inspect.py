@@ -32,6 +32,11 @@ class Inspection:
     last_error: str | None
     project_status: str | None
     cleanup: dict[str, str | None]
+    repository_identity: str | None
+    contract: dict[str, Any]
+    corrections: dict[str, int]
+    gates: tuple[dict[str, Any], ...]
+    ci_checks: tuple[dict[str, Any], ...]
     findings: tuple[dict[str, Any], ...]
     events: tuple[dict[str, Any], ...]
     inconsistencies: tuple[str, ...]
@@ -85,10 +90,29 @@ class InspectService:
             last_error=_safe(record.last_error),
             project_status=_safe(record.project_status),
             cleanup={"status": record.cleanup_status, "detail": _safe(record.cleanup_detail)},
+            repository_identity=record.repository_identity,
+            contract={"fingerprint": record.contract_fingerprint},
+            corrections={
+                "local_gates": record.local_gate_correction_attempts,
+                "ci": record.ci_correction_attempts,
+                "review": record.correction_attempts,
+            },
+            gates=_gate_results(record.gate_results_json),
+            ci_checks=_gate_results(record.ci_checks_json),
             findings=tuple(_finding(finding) for finding in findings),
             events=tuple(_event(event) for event in events[-10:]),
             inconsistencies=tuple(_inconsistencies(record, terminal, findings)),
         )
+
+
+def _gate_results(value: str | None) -> tuple[dict[str, Any], ...]:
+    if not value:
+        return ()
+    try:
+        payload = __import__("json").loads(value)
+    except (ValueError, TypeError):
+        return ()
+    return tuple(item for item in payload if isinstance(item, dict)) if isinstance(payload, list) else ()
 
 
 def _safe(value: str | None) -> str | None:

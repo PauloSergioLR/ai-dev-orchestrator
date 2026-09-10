@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import sqlite3
 import tomllib
 from typing import Any, Literal
 
@@ -14,11 +16,16 @@ from pydantic import (
     StrictBool,
     ValidationError,
     field_validator,
+    model_validator,
 )
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
+)
+from ai_dev_orchestrator.infrastructure.database import (
+    ExecutionStoreError,
+    SqliteExecutionStore,
 )
 
 
@@ -48,6 +55,18 @@ class GitHubConfig(BaseModel):
     )
     protected_branches: tuple[str, ...] = ("main",)
     status_field_name: str = Field(default="Status", min_length=1)
+    status_mapping: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("status_mapping")
+    @classmethod
+    def status_mapping_must_be_semantic(cls, value: dict[str, str]) -> dict[str, str]:
+        allowed = {
+            "queue", "ready", "implementing", "waiting_ci", "ai_review",
+            "human_required", "completed",
+        }
+        if set(value) - allowed or any(not item.strip() for item in value.values()):
+            raise ValueError("deve mapear apenas estados lógicos conhecidos para opções não vazias")
+        return value
 
     @property
     def repository_full_name(self) -> str:
@@ -58,6 +77,18 @@ class GitHubConfig(BaseModel):
     def pull_request_base(self) -> str:
         """Alias de compatibilidade para configurações e integrações antigas."""
         return self.pull_request_target
+
+    def status_for(self, logical_state: str) -> str:
+        """Resolve estado lógico sem depender do nome visual do Project."""
+        legacy = {
+            "ready": self.ready_status,
+            "implementing": self.in_progress_status,
+            "waiting_ci": self.ai_review_status,
+            "ai_review": self.ai_review_status,
+            "human_required": self.in_progress_status,
+            "completed": self.done_status,
+        }
+        return self.status_mapping.get(logical_state, legacy.get(logical_state, self.in_progress_status))
 
     @field_validator("protected_branches")
     @classmethod
@@ -78,6 +109,7 @@ class ExecutionConfig(BaseModel):
     max_parallel_runs: int = Field(gt=0)
     auto_merge: StrictBool
     merge_timeout_seconds: float = Field(default=30, gt=0)
+    max_local_gate_correction_attempts: int = Field(default=2, ge=0, le=10)
 
 
 class StateConfig(BaseModel):
@@ -105,6 +137,7 @@ class CiConfig(BaseModel):
     required_checks: tuple[str, ...] = ("test",)
     poll_interval_seconds: float = Field(default=5, gt=0)
     timeout_seconds: float = Field(default=900, gt=0)
+    auto_discover: StrictBool = True
 
     @field_validator("required_checks")
     @classmethod
@@ -228,6 +261,40 @@ class CleanupConfig(BaseModel):
     remove_remote_branch: StrictBool = False
 
 
+class ProjectGateConfig(BaseModel):
+    """Override opcional de uma capacidade, sempre em argv estruturado."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    name: str = Field(min_length=1)
+    capability: str = Field(default="project-validation", min_length=1)
+    argv: tuple[str, ...]
+    cwd: str = "."
+    timeout_seconds: float = Field(default=900, gt=0)
+    required: StrictBool = True
+
+    @field_validator("argv")
+    @classmethod
+    def argv_must_be_structured(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value or any(not part or "\x00" in part for part in value):
+            raise ValueError("deve conter argumentos não vazios")
+        return value
+
+    @field_validator("cwd")
+    @classmethod
+    def cwd_must_stay_relative(cls, value: str) -> str:
+        path = Path(value)
+        if path.is_absolute() or ".." in path.parts:
+            raise ValueError("deve permanecer dentro do worktree")
+        return value
+
+
+class ProjectConfig(BaseModel):
+    """Somente overrides; stack e comandos não são campos obrigatórios."""
+
+    model_config = ConfigDict(extra="forbid")
+    gates: tuple[ProjectGateConfig, ...] = ()
+
+
 class _EnvironmentSettingsSource(PydanticBaseSettingsSource):
     """Converte o booleano textual de ambiente sem relaxar o TOML."""
 
@@ -270,6 +337,14 @@ class OrchestratorConfig(BaseSettings):
     supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
     notifications: NotificationConfig = Field(default_factory=NotificationConfig)
     cleanup: CleanupConfig = Field(default_factory=CleanupConfig)
+    project: ProjectConfig = Field(default_factory=ProjectConfig)
+
+    @model_validator(mode="after")
+    def namespace_default_state(self) -> "OrchestratorConfig":
+        default = Path.home() / ".ai-dev-orchestrator" / "orchestrator.db"
+        if self.state.database_path == default and "database_path" not in self.state.model_fields_set:
+            self.state.database_path = default.parent / self.github.owner / self.github.repository / default.name
+        return self
 
     @classmethod
     def settings_customise_sources(
@@ -309,7 +384,7 @@ def load_config(path: Path | str | None = None) -> OrchestratorConfig:
         ) from error
 
     try:
-        return OrchestratorConfig(**toml_data)
+        config = OrchestratorConfig(**toml_data)
     except ValidationError as error:
         first_error = error.errors()[0]
         field = ".".join(str(part) for part in first_error["loc"])
@@ -317,3 +392,130 @@ def load_config(path: Path | str | None = None) -> OrchestratorConfig:
         raise ConfigurationError(
             f"Configuração inválida no campo '{field}': {detail}"
         ) from error
+    _migrate_legacy_state(config, config_path)
+    return config
+
+
+def _migrate_legacy_state(config: OrchestratorConfig, config_path: Path) -> None:
+    """Copia uma vez o banco global legado para o namespace do repositorio.
+
+    O original e preservado. Um marcador no proprio banco legado impede que
+    historico sem identidade seja silenciosamente atribuido a dois projetos.
+    """
+    legacy = Path.home() / ".ai-dev-orchestrator" / "orchestrator.db"
+    target = config.state.database_path
+    expected = legacy.parent / config.github.owner / config.github.repository / legacy.name
+    if (
+        target != expected
+        or target.exists()
+        or not legacy.exists()
+        or config_path.resolve().parent != config.workspace.repository_path.resolve()
+        or not (config.workspace.repository_path / ".git").exists()
+    ):
+        return
+
+    identity = config.github.repository_full_name
+    temporary = target.with_name(f".{target.name}.migration.tmp")
+    created_target = False
+    try:
+        with sqlite3.connect(legacy) as source:
+            source.row_factory = sqlite3.Row
+            tables = {
+                row["name"]
+                for row in source.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            if "executions" not in tables:
+                raise ConfigurationError(
+                    "Banco de estado legado invalido: tabela executions ausente"
+                )
+            columns = {
+                row["name"] for row in source.execute("PRAGMA table_info(executions)")
+            }
+            identities = set()
+            if "repository_identity" in columns:
+                identities = {
+                    row[0]
+                    for row in source.execute(
+                        "SELECT DISTINCT repository_identity FROM executions "
+                        "WHERE repository_identity IS NOT NULL"
+                    )
+                }
+            if len(identities) > 1:
+                raise ConfigurationError(
+                    "Migracao ambigua: o banco legado mistura mais de um repositorio"
+                )
+            if identities and identity not in identities:
+                return
+            count = source.execute("SELECT COUNT(*) FROM executions").fetchone()[0]
+            if not count:
+                return
+
+            source.execute("BEGIN IMMEDIATE")
+            source.execute(
+                "CREATE TABLE IF NOT EXISTS repository_migrations ("
+                "repository_identity TEXT PRIMARY KEY, scoped_path TEXT NOT NULL UNIQUE, "
+                "migrated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+            )
+            claims = source.execute(
+                "SELECT repository_identity, scoped_path FROM repository_migrations"
+            ).fetchall()
+            own_claim = next(
+                (row for row in claims if row["repository_identity"] == identity), None
+            )
+            if own_claim is not None and Path(own_claim["scoped_path"]) != target:
+                raise ConfigurationError(
+                    "Migracao ambigua: o repositorio ja possui outro destino registrado"
+                )
+            if claims and own_claim is None:
+                # O legado ja pertence inequivocamente a outro repositorio. Este
+                # projeto inicia seu proprio banco vazio, sem copiar historico.
+                return
+            source.execute(
+                "INSERT OR IGNORE INTO repository_migrations "
+                "(repository_identity, scoped_path) VALUES (?, ?)",
+                (identity, str(target)),
+            )
+            source.commit()
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if temporary.exists():
+                temporary.unlink()
+            destination = sqlite3.connect(temporary)
+            try:
+                source.backup(destination)
+            finally:
+                destination.close()
+
+        os.replace(temporary, target)
+        created_target = True
+        # A inicializacao tambem promove schemas antigos antes de carimbar a identidade.
+        SqliteExecutionStore(target)
+        migrated = sqlite3.connect(target)
+        try:
+            migrated.execute(
+                "UPDATE executions SET repository_identity = ? "
+                "WHERE repository_identity IS NULL",
+                (identity,),
+            )
+            migrated.commit()
+        finally:
+            migrated.close()
+    except ConfigurationError:
+        raise
+    except (OSError, sqlite3.Error, ExecutionStoreError) as error:
+        if created_target and target.exists():
+            try:
+                target.unlink()
+            except OSError:
+                pass
+        raise ConfigurationError(
+            f"Nao foi possivel migrar o banco de estado legado: {error}"
+        ) from error
+    finally:
+        if temporary.exists():
+            try:
+                temporary.unlink()
+            except OSError:
+                pass

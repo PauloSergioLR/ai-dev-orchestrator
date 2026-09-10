@@ -36,6 +36,41 @@ Ele reporta `LOCAL_CAPABILITY` e `LIVE_PROVIDER` separadamente. `--state`
 adiciona a conferência `STATE_CONSISTENCY`, abrindo o SQLite apenas em leitura e
 comparando execuções ativas com PRs e Project, sem corrigir divergências.
 
+## Descoberta agnóstica do projeto
+
+O orquestrador não pede linguagem, framework ou package manager. `orch init`
+analisa o repositório em modo somente leitura e combina evidências do CI
+versionado, scripts, `AGENTS.md`, `CONTRIBUTING.md`, README e documentação. O
+resultado é um `ProjectContract` com comandos em `argv`, diretório de trabalho,
+timeout, categoria, risco e evidência de origem.
+
+```powershell
+cd C:\caminho\do\projeto
+orch init
+orch doctor
+orch watch
+```
+
+Comandos usados pelo CI oficial têm precedência sobre scripts e documentação.
+Quando não há prova suficiente, `init` pede um único override estruturado e o
+grava; ele nunca transforma texto livre em shell. Deploy, release, publicação,
+migração remota e outras operações mutáveis são exibidos pelo `doctor`, mas não
+entram nos gates automáticos.
+
+O contrato recebe um fingerprint e é congelado no run. `resume` reutiliza o JSON
+persistido, de modo que alterações posteriores da branch base não mudam
+retrospectivamente os gates. Após cada execução Codex, o control plane roda por
+conta própria todos os gates obrigatórios. Falha determinística pode retomar a
+mesma sessão no mesmo worktree; falha de ambiente, timeout ou executable ausente
+é classificada separadamente.
+
+Repositórios com vários componentes são representados por múltiplos `cwd`.
+Ferramentas customizadas funcionam da mesma forma, desde que documentação e
+automação versionadas provem o comando. `ci.required_checks` continua aceito
+como override; no modo automático, a CI é sempre conferida no HEAD exato do PR.
+O SQLite padrão é namespaced por `owner/repository`, e `history`/`inspect`
+mostram identidade, fingerprint e contadores separados de correções.
+
 ## Configuração inicial e uso diário
 
 ```powershell

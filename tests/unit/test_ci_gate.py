@@ -54,6 +54,29 @@ class Reader:
 
 
 @dataclass
+class ProtectedReader(Reader):
+    required: tuple[str, ...] = ()
+
+    def discover_required_checks(self) -> tuple[str, ...]:
+        return self.required
+
+
+def test_branch_protection_precedes_versioned_workflow_when_no_override() -> None:
+    reader = ProtectedReader(
+        [PullRequestCiSnapshot(SHA, (check("protected"),))],
+        required=("protected",),
+    )
+    clock = FakeTime()
+
+    result = CiGate(
+        reader, CiConfig(), clock.monotonic, clock.sleep,
+        discovered_checks=("workflow",),
+    ).wait(42, SHA)
+
+    assert result.status is CiStatus.SUCCESS
+
+
+@dataclass
 class FakeTime:
     value: float = 0
     sleeps: list[float] = field(default_factory=list)

@@ -21,6 +21,7 @@ from ai_dev_orchestrator.domain.recovery import (
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
 from ai_dev_orchestrator.infrastructure.process import CommandRunner, OutputPolicy
 from ai_dev_orchestrator.services.ci_gate import classify_required_checks
+from ai_dev_orchestrator.domain.project_contract import ProjectContract
 
 
 class RecoveryObservationError(Exception):
@@ -153,7 +154,19 @@ class RecoveryObserver:
             return CiObservation()
         try:
             snapshot = self.ci_reader.get_ci_snapshot(prs[0].number)
-            state, _ = classify_required_checks(snapshot.checks, self.config.ci.required_checks)
+            required = self.config.ci.required_checks
+            if "required_checks" not in self.config.ci.model_fields_set:
+                discover = getattr(self.ci_reader, "discover_required_checks", None)
+                protected = discover() if discover else ()
+                if protected:
+                    required = protected
+                elif run.project_contract_json:
+                    required = ProjectContract.from_json(run.project_contract_json).expected_ci
+                elif discover:
+                    required = ()
+            if not required:
+                raise RecoveryObservationError("Checks obrigatórios da CI não foram comprovados")
+            state, _ = classify_required_checks(snapshot.checks, required)
             return CiObservation(CiState(state.value), snapshot.head_sha)
         except Exception as error:
             raise RecoveryObservationError("Não foi possível consultar CI") from error
@@ -194,6 +207,6 @@ class RecoveryObserver:
             matches = [item for item in self.projects.list_items() if item.id == run.project_item_id]
             if len(matches) != 1 or matches[0].status is None:
                 return ProjectState.UNKNOWN
-            return ProjectState.DONE if matches[0].status == self.config.github.done_status else ProjectState.NOT_DONE
+            return ProjectState.DONE if matches[0].status == self.config.github.status_for("completed") else ProjectState.NOT_DONE
         except Exception:
             return ProjectState.UNKNOWN

@@ -20,6 +20,7 @@ from ai_dev_orchestrator.domain.worktree import GitWorktree
 from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner, OutputPolicy
 from ai_dev_orchestrator.services.pipeline import RunPipeline
 from ai_dev_orchestrator.services.validation import LocalValidationError, LocalValidationService
+from ai_dev_orchestrator.domain.project_contract import CommandPlan
 
 
 class ScriptedRunner:
@@ -167,8 +168,10 @@ def test_gates_locais_preservam_return_code_mesmo_com_saida_cp1252(tmp_path: Pat
         def run(self, arguments, cwd=None):
             return result
 
-    with pytest.raises(LocalValidationError, match="ruff"):
-        LocalValidationService(GateRunner()).validate(tmp_path)
+    with pytest.raises(LocalValidationError, match="quality"):
+        LocalValidationService(
+            GateRunner(), (CommandPlan("quality", "lint", "Quality", ("tool",)),)
+        ).validate(tmp_path)
 
 
 def test_decoding_estrito_nao_mascara_return_code(tmp_path: Path) -> None:

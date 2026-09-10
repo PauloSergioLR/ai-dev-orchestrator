@@ -47,6 +47,7 @@ _ALLOWED = {
         ExecutionPhase.TESTING, ExecutionPhase.WAITING_CODEX_QUOTA, ExecutionPhase.FAILED,
     },
     ExecutionPhase.TESTING: {
+        ExecutionPhase.CODEX_RUNNING,
         ExecutionPhase.COMMIT_PENDING,
         ExecutionPhase.PUBLISHING,
         ExecutionPhase.FAILED,
@@ -162,6 +163,13 @@ class RunRecord:
     gemini_tokens: int | None = None
     codex_cost: float | None = None
     gemini_cost: float | None = None
+    repository_identity: str | None = None
+    contract_fingerprint: str | None = None
+    project_contract_json: str | None = None
+    local_gate_correction_attempts: int = 0
+    ci_correction_attempts: int = 0
+    gate_results_json: str | None = None
+    ci_checks_json: str | None = None
 
 
 @dataclass(frozen=True)

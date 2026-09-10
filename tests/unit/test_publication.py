@@ -8,6 +8,14 @@ import pytest
 from ai_dev_orchestrator.adapters.publication import GitPublicationAdapter, GitPublicationError
 from ai_dev_orchestrator.infrastructure.process import CommandResult
 from ai_dev_orchestrator.services.validation import LocalValidationError, LocalValidationService
+from ai_dev_orchestrator.domain.project_contract import CommandPlan
+
+
+PLANS = (
+    CommandPlan("lint", "lint", "Lint", ("quality", "--lint")),
+    CommandPlan("unit", "unit", "Unit", ("quality", "--unit")),
+    CommandPlan("diff_check", "format/check", "Diff", ("quality", "--diff")),
+)
 
 
 @dataclass
@@ -20,15 +28,16 @@ class FakeRunner:
         return self.results.pop(0)
 
 
-def test_gates_run_in_worktree_in_required_order() -> None:
-    worktree = Path("C:/worktrees/issue")
+def test_gates_run_in_worktree_in_required_order(tmp_path: Path) -> None:
+    worktree = tmp_path / "issue"
     runner = FakeRunner([CommandResult(0), CommandResult(0), CommandResult(0)])
 
-    results = LocalValidationService(runner).validate(worktree)
+    worktree.mkdir(parents=True)
+    results = LocalValidationService(runner, PLANS).validate(worktree)
 
-    assert [result.name for result in results] == ["ruff", "pytest", "diff_check"]
+    assert [result.name for result in results] == ["lint", "unit", "diff_check"]
     assert [call[0] for call in runner.calls] == [
-        ("uv", "run", "ruff", "check", "."), ("uv", "run", "pytest"), ("git", "diff", "--check"),
+        ("quality", "--lint"), ("quality", "--unit"), ("quality", "--diff"),
     ]
     assert all(cwd == worktree for _, cwd in runner.calls)
 
@@ -36,8 +45,9 @@ def test_gates_run_in_worktree_in_required_order() -> None:
 def test_failed_gate_is_fail_fast_and_keeps_diagnostic() -> None:
     runner = FakeRunner([CommandResult(1, stderr="erro do ruff")])
 
-    with pytest.raises(LocalValidationError, match="ruff.*erro do ruff"):
-        LocalValidationService(runner).validate(Path("C:/worktree"))
+    worktree = Path.cwd()
+    with pytest.raises(LocalValidationError, match="lint.*erro do ruff"):
+        LocalValidationService(runner, PLANS).validate(worktree)
 
     assert len(runner.calls) == 1
 
@@ -46,7 +56,7 @@ def test_truncates_large_gate_diagnostic() -> None:
     runner = FakeRunner([CommandResult(1, stderr="x" * 1000)])
 
     with pytest.raises(LocalValidationError, match="saída truncada"):
-        LocalValidationService(runner).validate(Path("C:/worktree"))
+        LocalValidationService(runner, PLANS).validate(Path.cwd())
 
 
 def test_publication_stages_validates_commits_and_pushes_without_force() -> None:

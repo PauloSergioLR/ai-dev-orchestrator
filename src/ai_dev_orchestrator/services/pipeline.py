@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path, PureWindowsPath
 import re
 from typing import Protocol
@@ -56,6 +57,9 @@ from ai_dev_orchestrator.services.merge import (
 from ai_dev_orchestrator.domain.execution import ExecutionPhase, ExecutionStore
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
 from ai_dev_orchestrator.domain.provider import ProviderFailure
+from ai_dev_orchestrator.domain.project_contract import CommandPlan, ProjectContract, SourceEvidence
+from ai_dev_orchestrator.services.project_discovery import ProjectCapabilityResolver
+from ai_dev_orchestrator.services.validation import LocalValidationError
 
 
 class RunPipelineError(Exception):
@@ -216,6 +220,7 @@ class RunPipeline:
         pull_request_merger: PullRequestMerger | None = None,
         execution_store: ExecutionStore | None = None,
         convergence: ConvergencePoller | None = None,
+        project_contract: ProjectContract | None = None,
     ) -> None:
         self.config = config
         self.issue_reader = issue_reader
@@ -232,11 +237,37 @@ class RunPipeline:
         self.pull_request_merger = pull_request_merger
         self.execution_store = execution_store
         self.convergence = convergence or ConvergencePoller(config.convergence)
+        self.project_contract = project_contract
         self._execution_id: str | None = None
 
     @classmethod
     def from_config(cls, config: OrchestratorConfig) -> RunPipeline:
         pull_requests = GitHubPullRequestAdapter(config)
+        overrides = tuple(
+            CommandPlan(
+                gate.name,
+                gate.capability,
+                gate.name,
+                gate.argv,
+                gate.cwd,
+                gate.timeout_seconds,
+                gate.required,
+                (SourceEvidence("orchestrator.toml", "explicit_override", gate.name),),
+                1.0,
+                ProjectCapabilityResolver._risk(" ".join(gate.argv)),
+            )
+            for gate in config.project.gates
+        )
+        contract = ProjectCapabilityResolver().resolve(
+            config.workspace.repository_path,
+            repository_identity=config.github.repository_full_name,
+            base_branch=config.workspace.base_ref,
+            pull_request_target=config.github.pull_request_base,
+            protected_branches=config.github.protected_branches,
+            overrides=overrides,
+        )
+        if contract.ambiguities:
+            raise RunPipelineError("Contrato do projeto ambíguo: " + "; ".join(contract.ambiguities))
         return cls(
             config,
             GitHubIssueAdapter(config),
@@ -255,6 +286,7 @@ class RunPipeline:
             ),
             pull_requests,
             SqliteExecutionStore(config.state.database_path),
+            project_contract=contract,
         )
 
     def run(self, issue_number: int, branch: str, *, base_ref: str | None = None) -> RunResult:
@@ -264,7 +296,7 @@ class RunPipeline:
         except CiFailureError as error:
             raise RunPipelineError(
                 f"CI reprovada para a Issue #{issue_number}; a recuperação automática manterá "
-                f"o Status em '{self.config.github.ai_review_status}' e retomará a mesma sessão Codex",
+                f"o Status em '{self.config.github.status_for('ai_review')}' e retomará a mesma sessão Codex",
                 reason="CI_FAILURE_RECOVERY",
             ) from error
         except Exception as error:
@@ -298,11 +330,11 @@ class RunPipeline:
             if not is_eligible_for_execution(
                 item,
                 self.config.github.repository_full_name,
-                self.config.github.ready_status,
+                self.config.github.status_for("ready"),
             ):
                 raise RunPipelineError(
                     f"A etapa de validar elegibilidade falhou: a Issue #{issue_number} não está em "
-                    f"'{self.config.github.ready_status}' no repositório configurado"
+                    f"'{self.config.github.status_for('ready')}' no repositório configurado"
                 )
             selected_base_ref = base_ref or self.config.workspace.base_ref
             worktree_path = derive_worktree_path(
@@ -324,6 +356,9 @@ class RunPipeline:
                     base_ref=selected_base_ref,
                     codex_model=self.config.providers.codex_model,
                     gemini_model=self.config.providers.gemini_model,
+                    repository_identity=self.config.github.repository_full_name,
+                    contract_fingerprint=(self.project_contract.fingerprint if self.project_contract else None),
+                    project_contract_json=(self.project_contract.to_json() if self.project_contract else None),
                 )
                 self._execution_id = record.id
             except Exception as error:
@@ -352,17 +387,17 @@ class RunPipeline:
         )
         try:
             self.status_writer.set_status(
-                item.id, self.config.github.in_progress_status
+                item.id, self.config.github.status_for("implementing")
             )
         except Exception as error:
             raise RunPipelineError(
-                f"Falha ao alterar o Status para '{self.config.github.in_progress_status}'; "
+                f"Falha ao alterar o Status para '{self.config.github.status_for('implementing')}'; "
                 "worktree e branch foram preservados em "
                 f"{worktree.path}: {error}"
             ) from error
         self._checkpoint(
             "Project marcado como em andamento",
-            project_status=self.config.github.in_progress_status,
+            project_status=self.config.github.status_for("implementing"),
         )
         self._checkpoint("Primeira chamada Codex iniciada", codex_start_attempted=True)
         try:
@@ -376,7 +411,7 @@ class RunPipeline:
             ) from error
         except Exception as error:
             raise RunPipelineError(
-                f"Falha ao executar o Codex; o Status está em '{self.config.github.in_progress_status}' "
+                f"Falha ao executar o Codex; o Status está em '{self.config.github.status_for('implementing')}' "
                 "e o worktree foi preservado em "
                 f"{worktree.path}: {error}"
             ) from error
@@ -394,17 +429,19 @@ class RunPipeline:
                 worktree.base_ref,
                 execution.session_id,
                 execution.final_message,
-                self.config.github.in_progress_status,
+                self.config.github.status_for("implementing"),
             )
         self._transition(ExecutionPhase.TESTING, "Gates locais serão executados")
         try:
-            gates = self.local_validator.validate(worktree.path)
+            gates, final_message = self._validate_with_recovery(
+                issue, worktree, execution.session_id, execution.final_message
+            )
         except ProviderFailure as error:
             self._record_provider_wait(error, ExecutionPhase.WAITING_PROVIDER)
             raise RunPipelineError("Falha de processo local; checkpoint preservado") from error
         except Exception as error:
             raise RunPipelineError(
-                f"Falha nos gates locais; o Status está em '{self.config.github.in_progress_status}' "
+                f"Falha nos gates locais; o Status está em '{self.config.github.status_for('implementing')}' "
                 f"e o worktree foi preservado em {worktree.path}: {error}"
             ) from error
         self._transition(ExecutionPhase.COMMIT_PENDING, "Commit será publicado")
@@ -450,15 +487,15 @@ class RunPipeline:
             pull_request_url=pull_request.url,
         )
         try:
-            self.status_writer.set_status(item.id, self.config.github.ai_review_status)
+            self.status_writer.set_status(item.id, self.config.github.status_for("ai_review"))
         except Exception as error:
             raise RunPipelineError(
                 f"Pull Request #{pull_request.number} já criado em {pull_request.url}, mas falhou ao alterar "
-                f"o Status para '{self.config.github.ai_review_status}': {error}"
+                f"o Status para '{self.config.github.status_for('ai_review')}': {error}"
             ) from error
         self._checkpoint(
             "Project marcado para revisão IA",
-            project_status=self.config.github.ai_review_status,
+            project_status=self.config.github.status_for("ai_review"),
         )
         if self.ci_reader is None:
             return RunResult(
@@ -468,8 +505,8 @@ class RunPipeline:
                 worktree.path,
                 worktree.base_ref,
                 execution.session_id,
-                execution.final_message,
-                self.config.github.ai_review_status,
+            final_message,
+                self.config.github.status_for("ai_review"),
                 gates,
                 commit_sha,
                 self.config.workspace.remote_name,
@@ -478,7 +515,11 @@ class RunPipeline:
                 pull_request.base,
             )
         try:
-            ci_result = CiGate(self.ci_reader, self.config.ci).wait(
+            ci_result = CiGate(
+                self.ci_reader,
+                self.config.ci,
+                discovered_checks=(self.project_contract.expected_ci if self.project_contract else ()),
+            ).wait(
                 pull_request.number, commit_sha
             )
         except CiFailureError:
@@ -486,7 +527,7 @@ class RunPipeline:
         except Exception as error:
             raise RunPipelineError(
                 f"Falha no gate de CI da Issue #{issue.number}, Pull Request #{pull_request.number} "
-                f"em {pull_request.url}; Status permanece em '{self.config.github.ai_review_status}', "
+                f"em {pull_request.url}; Status permanece em '{self.config.github.status_for('ai_review')}', "
                 f"branch {worktree.branch}, commit {commit_sha} e worktree {worktree.path} foram preservados: {error}"
             ) from error
         base_result = RunResult(
@@ -496,8 +537,8 @@ class RunPipeline:
             worktree.path,
             worktree.base_ref,
             execution.session_id,
-            execution.final_message,
-            self.config.github.ai_review_status,
+                final_message,
+            self.config.github.status_for("ai_review"),
             gates,
             commit_sha,
             self.config.workspace.remote_name,
@@ -515,6 +556,7 @@ class RunPipeline:
             "Revisão independente será executada",
             head_sha=ci_result.expected_head_sha,
             ci_head_sha=ci_result.expected_head_sha,
+            ci_checks_json=self._ci_checks_json(ci_result.checks),
         )
         try:
             review, ci_result, gates, final_message, corrections, prior_findings = (
@@ -525,7 +567,7 @@ class RunPipeline:
                     execution.session_id,
                     ci_result,
                     gates,
-                    execution.final_message,
+                    final_message,
                 )
             )
         except ProviderFailure as error:
@@ -541,7 +583,7 @@ class RunPipeline:
         except Exception as error:
             raise RunPipelineError(
                 f"Falha na revisão Gemini da Issue #{issue.number}, Pull Request #{pull_request.number} em {pull_request.url}; "
-                f"Status permanece em '{self.config.github.ai_review_status}', branch {worktree.branch}, worktree {worktree.path} "
+                f"Status permanece em '{self.config.github.status_for('ai_review')}', branch {worktree.branch}, worktree {worktree.path} "
                 f"e sessão Codex {execution.session_id} foram preservados; nenhum merge foi executado: {error}"
             ) from error
         result = RunResult(
@@ -647,7 +689,7 @@ class RunPipeline:
             ) from error
         try:
             self.status_writer.set_status(
-                result.project_item_id, self.config.github.done_status
+                result.project_item_id, self.config.github.status_for("completed")
             )
         except Exception as error:
             raise RunPipelineError(
@@ -657,7 +699,7 @@ class RunPipeline:
             self._transition(
                 ExecutionPhase.COMPLETED,
                 "Merge e Project Done confirmados",
-                project_status=self.config.github.done_status,
+                project_status=self.config.github.status_for("completed"),
                 merge_commit_sha=merge.merge_commit_sha,
                 merged_head_sha=merge.merged_head_sha,
             )
@@ -669,7 +711,7 @@ class RunPipeline:
         return RunResult(
             **{
                 **result.__dict__,
-                "project_status": self.config.github.done_status,
+                "project_status": self.config.github.status_for("completed"),
                 "merge_status": "SUCCESS",
                 "merged": True,
                 "merge_commit_sha": merge.merge_commit_sha,
@@ -786,7 +828,9 @@ class RunPipeline:
                 ExecutionPhase.TESTING, "Gates locais da correção serão executados",
                 provider_retry_attempts=0
             )
-            gates = self.local_validator.validate(worktree.path)
+            gates, final_message = self._validate_with_recovery(
+                issue, worktree, session_id, final_message
+            )
             self._ensure_existing_pull_request(
                 pull_request, worktree.branch, ci_result.expected_head_sha
             )
@@ -826,7 +870,11 @@ class RunPipeline:
                 current_head_sha=new_head,
                 correction_attempts=corrections,
             )
-            ci_result = CiGate(self.ci_reader, self.config.ci).wait(
+            ci_result = CiGate(
+                self.ci_reader,
+                self.config.ci,
+                discovered_checks=(self.project_contract.expected_ci if self.project_contract else ()),
+            ).wait(
                 pull_request.number,
                 new_head,
                 stale_head_sha=review.reviewed_head_sha,
@@ -836,6 +884,7 @@ class RunPipeline:
                 "Nova revisão independente será executada",
                 head_sha=new_head,
                 ci_head_sha=ci_result.expected_head_sha,
+                ci_checks_json=self._ci_checks_json(ci_result.checks),
             )
             review = self._review_head(
                 issue,
@@ -848,6 +897,139 @@ class RunPipeline:
             )
             self._record_review(review)
         return review, ci_result, gates, final_message, corrections, prior_findings
+
+    def _validate_with_recovery(
+        self,
+        issue: Issue,
+        worktree: GitWorktree,
+        session_id: str,
+        final_message: str,
+    ) -> tuple[tuple[GateResult, ...], str]:
+        """Corrige falha determinística no mesmo run, sessão, worktree e branch."""
+        assert self.local_validator is not None
+        self._ensure_contract_is_frozen(worktree)
+        attempts = 0
+        if self.execution_store is not None and self._execution_id is not None:
+            attempts = self.execution_store.get(self._execution_id).local_gate_correction_attempts
+        while True:
+            try:
+                if self.project_contract is None:
+                    gates = self.local_validator.validate(worktree.path)
+                else:
+                    gates = self.local_validator.validate(worktree.path, self.project_contract)
+                self._record_gate_results(gates, attempts)
+                return gates, final_message
+            except LocalValidationError as error:
+                if isinstance(error, ProviderFailure):
+                    raise
+                if error.result is not None:
+                    self._record_gate_results((error.result,), attempts)
+                limit = self.config.execution.max_local_gate_correction_attempts
+                if attempts >= limit:
+                    message = (
+                        f"Limite de correções de gates locais atingido ({attempts}/{limit}); "
+                        f"execução {self._execution_id or '-'} e sessão {session_id} preservadas"
+                    )
+                    if self.execution_store is not None and self._execution_id is not None:
+                        self.execution_store.require_human(
+                            self._execution_id, summary=message, reason="LOCAL_GATE_CORRECTION_LIMIT"
+                        )
+                    raise RunPipelineError(message, reason="LOCAL_GATE_CORRECTION_LIMIT") from error
+                attempts += 1
+                self._transition(
+                    ExecutionPhase.CODEX_RUNNING,
+                    "Gate local falhou; mesma sessão Codex será retomada",
+                    local_gate_correction_attempts=attempts,
+                )
+                diagnostic = str(error)[:500]
+                resumed = self.codex_executor.resume(
+                    worktree.path,
+                    session_id,
+                    "Corrija somente a falha determinística dos gates locais abaixo. "
+                    "Mantenha o escopo da Issue e não faça commit, push ou PR.\n\n"
+                    + diagnostic,
+                )
+                if resumed.session_id != session_id:
+                    raise RunPipelineError("Codex retomou uma sessão diferente da sessão original")
+                final_message = resumed.final_message
+                self._transition(
+                    ExecutionPhase.TESTING,
+                    "Correção local concluída; o mesmo plano congelado será reexecutado",
+                    local_gate_correction_attempts=attempts,
+                )
+
+    def _record_gate_results(self, gates: tuple[GateResult, ...], attempt: int) -> None:
+        if self.execution_store is None or self._execution_id is None:
+            return
+        record = self.execution_store.get(self._execution_id)
+        history: list[dict[str, object]] = []
+        if record.gate_results_json:
+            try:
+                parsed = json.loads(record.gate_results_json)
+                if isinstance(parsed, list):
+                    history = [item for item in parsed if isinstance(item, dict)]
+            except json.JSONDecodeError:
+                history = []
+        history.extend(
+            {
+                "name": gate.name,
+                "category": gate.category,
+                "succeeded": gate.succeeded,
+                "returncode": gate.returncode,
+                "duration_seconds": round(gate.duration_seconds, 6),
+                "attempt": attempt,
+            }
+            for gate in gates
+        )
+        self._checkpoint(
+            "Resultado de gate local persistido",
+            local_gate_correction_attempts=attempt,
+            gate_results_json=json.dumps(history[-100:], ensure_ascii=False, separators=(",", ":")),
+        )
+
+    @staticmethod
+    def _ci_checks_json(checks: tuple[StatusCheck, ...]) -> str:
+        return json.dumps(
+            [
+                {"name": check.name, "status": check.status, "conclusion": check.conclusion}
+                for check in checks
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    def _ensure_contract_is_frozen(self, worktree: GitWorktree) -> None:
+        """Mudança do contrato durante a Issue exige decisão auditável, nunca silêncio."""
+        if self.project_contract is None:
+            return
+        uses_override = any(
+            evidence.kind == "explicit_override"
+            for plan in (*self.project_contract.bootstrap, *self.project_contract.gates)
+            for evidence in plan.source_evidence
+        )
+        current = ProjectCapabilityResolver().resolve(
+            worktree.path,
+            repository_identity=self.project_contract.repository_identity,
+            base_branch=self.project_contract.base_branch,
+            pull_request_target=self.project_contract.pull_request_target,
+            protected_branches=self.project_contract.protected_branches,
+            overrides=(
+                (*self.project_contract.bootstrap, *self.project_contract.gates)
+                if uses_override
+                else ()
+            ),
+        )
+        if current.fingerprint == self.project_contract.fingerprint:
+            return
+        message = (
+            "Arquivos que definem build/testes/CI alteraram o contrato durante o run; "
+            f"congelado={self.project_contract.fingerprint}, observado={current.fingerprint}"
+        )
+        if self.execution_store is not None and self._execution_id is not None:
+            self.execution_store.require_human(
+                self._execution_id, summary=message, reason="PROJECT_CONTRACT_CHANGED"
+            )
+        raise RunPipelineError(message, reason="PROJECT_CONTRACT_CHANGED")
 
     def _record_review(self, review: StructuredReview) -> None:
         """Persiste o veredito antes de qualquer transição dependente dele."""

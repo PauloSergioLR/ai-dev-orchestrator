@@ -1,6 +1,7 @@
 """Interface de linha de comando do AI Dev Orchestrator."""
 
 import json
+from dataclasses import replace
 import typer
 from pathlib import Path
 
@@ -26,6 +27,12 @@ from ai_dev_orchestrator.services.cleanup import CleanupService
 from ai_dev_orchestrator.services.history import HistoryService, format_duration
 from ai_dev_orchestrator.services.supersession import SupersessionError, SupersessionService
 from ai_dev_orchestrator.services.inspect import InspectService, Inspection
+from ai_dev_orchestrator.domain.project import ProjectStatusOption, infer_status_mapping
+from ai_dev_orchestrator.domain.project_contract import ProjectContract
+from ai_dev_orchestrator.services.project_discovery import (
+    AiProjectContractInterpreter,
+    ProjectCapabilityResolver,
+)
 
 app = typer.Typer(
     help="Orquestrador local-first de desenvolvimento com IA.",
@@ -37,6 +44,21 @@ def _show_version(value: bool) -> None:
     if value:
         typer.echo(__version__)
         raise typer.Exit()
+
+
+def _gate_overrides_from_contract(contract: ProjectContract) -> list[dict[str, object]]:
+    """Serializa a decisao da IA como override estruturado e auditavel."""
+    return [
+        {
+            "name": gate.name,
+            "capability": gate.capability,
+            "argv": gate.argv,
+            "cwd": gate.cwd,
+            "timeout_seconds": gate.timeout_seconds,
+            "required": gate.required,
+        }
+        for gate in (*contract.bootstrap, *contract.gates)
+    ]
 
 
 @app.callback()
@@ -120,6 +142,53 @@ def init_project(
     typer.echo(f"Branches relevantes: {', '.join(found.branches) or 'nenhuma detectada'}")
     for evidence in found.evidence:
         typer.echo(f"Interpretação: {evidence}")
+    ai_resolved_contract = False
+    if found.contract is not None and found.contract.ambiguities:
+        try:
+            from ai_dev_orchestrator.adapters.antigravity import AntigravityAdapter
+
+            interpreter = AiProjectContractInterpreter(
+                AntigravityAdapter(120), found.repository_path
+            )
+            interpreted = ProjectCapabilityResolver(interpreter).resolve(
+                found.repository_path,
+                repository_identity=found.contract.repository_identity,
+                base_branch=found.contract.base_branch,
+                pull_request_target=found.contract.pull_request_target,
+                protected_branches=found.contract.protected_branches,
+            )
+            if not interpreted.ambiguities:
+                found = replace(found, contract=interpreted)
+                ai_resolved_contract = True
+                typer.echo("A IA resolveu a ambiguidade com evidências versionadas verificadas.")
+        except Exception as error:
+            typer.echo(f"IA não resolveu o contrato com segurança: {error}")
+    discovered_gates: list[dict[str, object]] = []
+    if found.contract is not None:
+        if ai_resolved_contract:
+            discovered_gates.extend(_gate_overrides_from_contract(found.contract))
+        typer.echo("\nContrato operacional descoberto")
+        typer.echo(f"- confiança: {found.contract.confidence}")
+        typer.echo(f"- fingerprint: {found.contract.fingerprint}")
+        typer.echo(
+            "- gates: "
+            + (", ".join(gate.display_name for gate in found.contract.gates) or "nenhum")
+        )
+        typer.echo("- CI esperada: " + (", ".join(found.contract.expected_ci) or "não comprovada"))
+        for operation in found.contract.excluded_operations:
+            typer.echo(f"- não automática ({operation.risk_class}): {operation.display_name}")
+        if found.contract.ambiguities:
+            typer.echo("Contrato de validação ambíguo: " + "; ".join(found.contract.ambiguities))
+            raw_argv = typer.prompt(
+                "Informe uma única vez o argv do gate como JSON (ex.: [\"tools/validate\", \"--all\"])"
+            )
+            try:
+                argv = json.loads(raw_argv)
+            except json.JSONDecodeError as error:
+                raise typer.BadParameter("argv deve ser um array JSON válido") from error
+            if not isinstance(argv, list) or not argv or any(not isinstance(part, str) or not part for part in argv):
+                raise typer.BadParameter("argv deve ser um array JSON de textos não vazios")
+            discovered_gates.append({"name": "validation-override", "argv": tuple(argv)})
     remote_name = (
         existing.workspace.remote_name
         if existing and existing.workspace.remote_name in found.remote_names
@@ -144,9 +213,14 @@ def init_project(
     base_default = existing.workspace.base_branch if existing else (
         found.suggested_base_branch or (choices[0] if len(choices) == 1 else None)
     )
-    base = _prompt_branch("Base das novas branches", choices, base_default)
-    target_default = existing.github.pull_request_target if existing else base
-    target = _prompt_branch("Destino dos Pull Requests", choices, target_default)
+    if not existing and found.evidence and found.suggested_base_branch:
+        base = found.suggested_base_branch
+        target = base
+        typer.echo(f"Base e destino comprovados pela documentação: {base}")
+    else:
+        base = _prompt_branch("Base das novas branches", choices, base_default)
+        target_default = existing.github.pull_request_target if existing else base
+        target = _prompt_branch("Destino dos Pull Requests", choices, target_default)
     protected_default = existing.github.protected_branches if existing else (
         ("main",) if "main" in choices else ()
     )
@@ -160,6 +234,30 @@ def init_project(
         if len(found.github_projects) == 1
         else typer.prompt("Número do GitHub Project", type=int)
     )
+    inferred_status_mapping: dict[str, str] = {}
+    if found.contract is not None and not (existing and existing.github.status_mapping):
+        option_names = service.discover_status_options(owner, project_number, found.repository_path)
+        inferred = infer_status_mapping(tuple(
+            ProjectStatusOption(str(index), name) for index, name in enumerate(option_names)
+        ))
+        if inferred is not None:
+            inferred_status_mapping = inferred
+            typer.echo("Mapeamento semântico do Status: " + ", ".join(
+                f"{logical} → {visual}" for logical, visual in inferred.items()
+            ))
+        elif option_names:
+            typer.echo("Opções de Status ambíguas: " + ", ".join(option_names))
+            raw_mapping = typer.prompt("Mapeamento semântico como objeto JSON")
+            try:
+                parsed_mapping = json.loads(raw_mapping)
+            except json.JSONDecodeError as error:
+                raise typer.BadParameter("mapeamento deve ser um objeto JSON válido") from error
+            if not isinstance(parsed_mapping, dict) or any(
+                not isinstance(key, str) or not isinstance(value, str)
+                or value not in option_names for key, value in parsed_mapping.items()
+            ):
+                raise typer.BadParameter("mapeamento usa estado lógico ou opção visual inválida")
+            inferred_status_mapping = parsed_mapping
     codex_model = typer.prompt(
         "Modelo Codex (default/auto ou identificador explícito)",
         default=existing.providers.codex_model if existing else "default",
@@ -182,6 +280,7 @@ def init_project(
             "done_status": existing.github.done_status if existing else "Done",
             "pull_request_target": target, "protected_branches": protected,
             "status_field_name": existing.github.status_field_name if existing else "Status",
+            "status_mapping": existing.github.status_mapping if existing else inferred_status_mapping,
         },
         "workspace": {
             "repository_path": found.repository_path,
@@ -191,11 +290,12 @@ def init_project(
         "providers": {"codex_model": codex_model, "gemini_model": gemini_model},
         "execution": existing.execution.model_dump() if existing else {"max_attempts": 2, "max_parallel_runs": 1, "auto_merge": False},
         "state": existing.state.model_dump() if existing else {},
-        "ci": existing.ci.model_dump() if existing else {},
+        "ci": existing.ci.model_dump(exclude_unset=True) if existing else {},
         "convergence": existing.convergence.model_dump() if existing else {},
         "review": existing.review.model_dump() if existing else {},
         "supervisor": existing.supervisor.model_dump() if existing else {},
         "notifications": existing.notifications.model_dump() if existing else {},
+        "project": existing.project.model_dump() if existing else {"gates": discovered_gates},
     }
     if notifications and typer.confirm("Deseja configurar notificações operacionais?", default=True):
         from ai_dev_orchestrator.adapters.notifications import missing_environment
@@ -231,7 +331,7 @@ def init_project(
         f"{', '.join(protected) or 'nenhuma'}; Project={project_number}; "
         f"auto-merge={values['execution']['auto_merge']}; "
         f"correções={values['review'].get('max_correction_attempts', 3)}; "
-        f"checks={', '.join(values['ci'].get('required_checks', ('test',)))}; "
+        f"checks={', '.join(values['ci'].get('required_checks', ())) or 'automático'}; "
         f"worktrees={values['workspace']['worktrees_dir']}"
     )
     typer.confirm("Salvar configuração?", default=True, abort=True)
@@ -368,6 +468,20 @@ def _show_inspection(diagnosis: Inspection) -> None:
     heads = diagnosis.heads
     typer.echo("HEADs: current={current} | ci={ci} | reviewed={reviewed} | merged={merged} | merge commit={merge_commit}".format(**{key: value or '-' for key, value in heads.items()}))
     typer.echo(f"Review: {diagnosis.review['verdict'] or '-'} | correções: {diagnosis.review['correction_attempts']}")
+    typer.echo(
+        f"Repositório: {diagnosis.repository_identity or '-'} | contrato: "
+        f"{diagnosis.contract['fingerprint'] or '-'}"
+    )
+    typer.echo(
+        "Correções: locais={local_gates} | CI={ci} | review={review}".format(
+            **diagnosis.corrections
+        )
+    )
+    for gate in diagnosis.gates:
+        typer.echo(
+            f"Gate: {gate.get('name', '-')} | {gate.get('category', '-')} | "
+            f"resultado={gate.get('succeeded')} | duração={gate.get('duration_seconds', 0)}s"
+        )
     quota = diagnosis.quota
     typer.echo("Quota: provider={provider} | classificação={classification} | observado={observed_at} | retry={retry_at}".format(**{key: value or '-' for key, value in quota.items()}))
     human = diagnosis.human_required
@@ -412,7 +526,9 @@ def history(
             f"branch {run.branch or '-'} | PR {pr} | correções {run.correction_attempts} | "
             f"reviews {entry.reviews} | CI {format_duration(entry.ci_wait)} | quota {format_duration(entry.quota_wait)} | "
             f"Codex {run.codex_model}; Gemini {run.gemini_model} | merge {run.merge_commit_sha or '-'} | "
-            f"Project {run.project_status or '-'} | cleanup {run.cleanup_status} | tokens {tokens} | motivo {reason}"
+            f"Project {run.project_status or '-'} | repo {run.repository_identity or '-'} | "
+            f"contrato {run.contract_fingerprint or '-'} | correções locais {run.local_gate_correction_attempts} | "
+            f"correções CI {run.ci_correction_attempts} | cleanup {run.cleanup_status} | tokens {tokens} | motivo {reason}"
         )
 
 

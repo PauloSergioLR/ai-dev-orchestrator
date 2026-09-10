@@ -24,6 +24,7 @@ gemini_model = "default"
 max_attempts = 2
 max_parallel_runs = 1
 auto_merge = false
+max_local_gate_correction_attempts = 2
 merge_timeout_seconds = 30
 
 [state]
@@ -31,6 +32,7 @@ database_path = "C:/caminho/para/ai-dev-orchestrator/state/orchestrator.db"
 
 [ci]
 required_checks = ["test"]
+auto_discover = true
 poll_interval_seconds = 5
 timeout_seconds = 900
 
