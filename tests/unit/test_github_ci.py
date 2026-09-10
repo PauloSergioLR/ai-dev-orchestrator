@@ -30,6 +30,20 @@ def test_reads_head_and_rollup_from_configured_pr_and_repository() -> None:
     assert runner.calls == [["gh", "pr", "view", "42", "--repo", "acme/repo", "--json", "headRefOid,statusCheckRollup"]]
 
 
+def test_discovers_required_checks_from_branch_protection() -> None:
+    runner = Runner([CommandResult(0, '{"contexts":["quality"],"checks":[{"context":"tests","app_id":1}]}')])
+    adapter = GitHubCiAdapter(
+        GitHubConfig(
+            owner="acme", repository="repo", project_number=1,
+            ready_status="Ready", pull_request_target="develop",
+        ),
+        runner,
+    )
+
+    assert adapter.discover_required_checks() == ("quality", "tests")
+    assert "/branches/develop/protection/required_status_checks" in runner.calls[0][-1]
+
+
 @pytest.mark.parametrize(
     ("state", "status", "conclusion"),
     [

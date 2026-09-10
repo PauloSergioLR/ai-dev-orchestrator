@@ -393,6 +393,35 @@ class GitHubCiAdapter:
             raise GitHubCiError("GitHub CLI retornou JSON inválido para a CI do Pull Request") from error
         return self._parse_snapshot(payload)
 
+    def discover_required_checks(self) -> tuple[str, ...]:
+        """Consulta branch protection; indisponibilidade permite fallback versionado."""
+        result = self.runner.run(
+            [
+                "gh", "api",
+                f"repos/{self.config.repository_full_name}/branches/{self.config.pull_request_base}/protection/required_status_checks",
+            ],
+            stdout_policy=OutputPolicy.UTF8_STRICT,
+        )
+        if not result.succeeded:
+            return ()
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return ()
+        if not isinstance(payload, dict):
+            return ()
+        names: list[str] = []
+        contexts = payload.get("contexts", [])
+        checks = payload.get("checks", [])
+        if isinstance(contexts, list):
+            names.extend(value for value in contexts if isinstance(value, str) and value)
+        if isinstance(checks, list):
+            names.extend(
+                value["context"] for value in checks
+                if isinstance(value, dict) and isinstance(value.get("context"), str) and value["context"]
+            )
+        return tuple(dict.fromkeys(names))
+
     @classmethod
     def _parse_snapshot(cls, payload: Any) -> PullRequestCiSnapshot:
         if not isinstance(payload, dict):

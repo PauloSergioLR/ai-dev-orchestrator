@@ -88,10 +88,12 @@ nesses nomes. Os três papéis são independentes. Paths
 relativos são rejeitados para que a execução não dependa do diretório atual. Em
 `[github]`, `in_progress_status` tem como padrão `In Progress`.
 
-Em `[ci]`, `required_checks` define os checks que devem existir e terminar com
-`SUCCESS` para liberar o fluxo. O padrão é `["test"]`; a lista não pode ser
-vazia. `poll_interval_seconds` (padrão `5`) e `timeout_seconds` (padrão `900`)
-devem ser positivos. Checks fora da lista não bloqueiam o gate.
+Em `[ci]`, `required_checks` define um override dos checks que devem existir e
+terminar com sucesso para liberar o fluxo. Com `auto_discover = true`, o
+contrato descoberto fornece os checks aplicáveis; o override continua disponível
+para migração ou ambiguidade. A lista explícita não pode ser vazia.
+`poll_interval_seconds` (padrão `5`) e `timeout_seconds` (padrão `900`) devem ser
+positivos. Checks fora da lista resolvida não bloqueiam o gate.
 
 Em `[convergence]`, `poll_interval_seconds` (padrão `1`) controla o intervalo
 entre leituras do GitHub após uma mutação remota, e `timeout_seconds` (padrão
@@ -109,9 +111,16 @@ ser um inteiro positivo.
 
 Em `[state]`, `database_path` é o caminho absoluto do banco SQLite local. O
 diretório pai é criado quando necessário. Se omitido, o caminho determinístico
-é `~/.ai-dev-orchestrator/orchestrator.db`, fora do repositório e dos worktrees.
-O banco contém apenas checkpoints resumidos; prompts, diffs e credenciais não
-são persistidos.
+é `~/.ai-dev-orchestrator/<owner>/<repository>/orchestrator.db`, fora do
+repositório e dos worktrees. Um caminho explicitamente configurado continua
+válido para preservar bancos legados. O banco contém apenas checkpoints
+resumidos; prompts, diffs e credenciais não são persistidos.
+
+`[project]` é opcional. `project.gates` aceita overrides estruturados com
+`name`, `capability`, `argv`, `cwd`, `timeout_seconds` e `required`. Não há campos
+de linguagem, framework ou package manager. Sem override, `orch init` descobre
+as capacidades usando CI, scripts e documentação versionados. O contrato e seu
+fingerprint ficam congelados no run para uso por restart e resume.
 
 Em `[providers]`, `default` (ou `auto`) preserva a seleção feita pela CLI.
 Identificadores explícitos são encaminhados ao início e à retomada. Os modelos

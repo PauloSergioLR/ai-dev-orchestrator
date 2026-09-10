@@ -14,6 +14,7 @@ from pydantic import (
     StrictBool,
     ValidationError,
     field_validator,
+    model_validator,
 )
 from pydantic_settings import (
     BaseSettings,
@@ -48,6 +49,18 @@ class GitHubConfig(BaseModel):
     )
     protected_branches: tuple[str, ...] = ("main",)
     status_field_name: str = Field(default="Status", min_length=1)
+    status_mapping: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("status_mapping")
+    @classmethod
+    def status_mapping_must_be_semantic(cls, value: dict[str, str]) -> dict[str, str]:
+        allowed = {
+            "queue", "ready", "implementing", "waiting_ci", "ai_review",
+            "human_required", "completed",
+        }
+        if set(value) - allowed or any(not item.strip() for item in value.values()):
+            raise ValueError("deve mapear apenas estados lógicos conhecidos para opções não vazias")
+        return value
 
     @property
     def repository_full_name(self) -> str:
@@ -58,6 +71,18 @@ class GitHubConfig(BaseModel):
     def pull_request_base(self) -> str:
         """Alias de compatibilidade para configurações e integrações antigas."""
         return self.pull_request_target
+
+    def status_for(self, logical_state: str) -> str:
+        """Resolve estado lógico sem depender do nome visual do Project."""
+        legacy = {
+            "ready": self.ready_status,
+            "implementing": self.in_progress_status,
+            "waiting_ci": self.ai_review_status,
+            "ai_review": self.ai_review_status,
+            "human_required": self.in_progress_status,
+            "completed": self.done_status,
+        }
+        return self.status_mapping.get(logical_state, legacy.get(logical_state, self.in_progress_status))
 
     @field_validator("protected_branches")
     @classmethod
@@ -78,6 +103,7 @@ class ExecutionConfig(BaseModel):
     max_parallel_runs: int = Field(gt=0)
     auto_merge: StrictBool
     merge_timeout_seconds: float = Field(default=30, gt=0)
+    max_local_gate_correction_attempts: int = Field(default=2, ge=0, le=10)
 
 
 class StateConfig(BaseModel):
@@ -105,6 +131,7 @@ class CiConfig(BaseModel):
     required_checks: tuple[str, ...] = ("test",)
     poll_interval_seconds: float = Field(default=5, gt=0)
     timeout_seconds: float = Field(default=900, gt=0)
+    auto_discover: StrictBool = True
 
     @field_validator("required_checks")
     @classmethod
@@ -228,6 +255,40 @@ class CleanupConfig(BaseModel):
     remove_remote_branch: StrictBool = False
 
 
+class ProjectGateConfig(BaseModel):
+    """Override opcional de uma capacidade, sempre em argv estruturado."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    name: str = Field(min_length=1)
+    capability: str = Field(default="project-validation", min_length=1)
+    argv: tuple[str, ...]
+    cwd: str = "."
+    timeout_seconds: float = Field(default=900, gt=0)
+    required: StrictBool = True
+
+    @field_validator("argv")
+    @classmethod
+    def argv_must_be_structured(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value or any(not part or "\x00" in part for part in value):
+            raise ValueError("deve conter argumentos não vazios")
+        return value
+
+    @field_validator("cwd")
+    @classmethod
+    def cwd_must_stay_relative(cls, value: str) -> str:
+        path = Path(value)
+        if path.is_absolute() or ".." in path.parts:
+            raise ValueError("deve permanecer dentro do worktree")
+        return value
+
+
+class ProjectConfig(BaseModel):
+    """Somente overrides; stack e comandos não são campos obrigatórios."""
+
+    model_config = ConfigDict(extra="forbid")
+    gates: tuple[ProjectGateConfig, ...] = ()
+
+
 class _EnvironmentSettingsSource(PydanticBaseSettingsSource):
     """Converte o booleano textual de ambiente sem relaxar o TOML."""
 
@@ -270,6 +331,14 @@ class OrchestratorConfig(BaseSettings):
     supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
     notifications: NotificationConfig = Field(default_factory=NotificationConfig)
     cleanup: CleanupConfig = Field(default_factory=CleanupConfig)
+    project: ProjectConfig = Field(default_factory=ProjectConfig)
+
+    @model_validator(mode="after")
+    def namespace_default_state(self) -> "OrchestratorConfig":
+        default = Path.home() / ".ai-dev-orchestrator" / "orchestrator.db"
+        if self.state.database_path == default and "database_path" not in self.state.model_fields_set:
+            self.state.database_path = default.parent / self.github.owner / self.github.repository / default.name
+        return self
 
     @classmethod
     def settings_customise_sources(

@@ -12,6 +12,7 @@ from ai_dev_orchestrator.infrastructure.process import (
     CommandRunner, OutputPolicy, ProcessFailureKind,
 )
 from ai_dev_orchestrator.services.validation import LocalValidationService
+from ai_dev_orchestrator.domain.project_contract import CommandPlan
 
 
 def process(monkeypatch, stdout, stderr=b"", code=0):
@@ -66,10 +67,11 @@ def test_texto_sem_codepage_compativel_preserva_byte_visivel(monkeypatch):
 
 def test_gate_pytest_com_byte_real_e7(monkeypatch, tmp_path):
     process(monkeypatch, b"valida\xe7\xe3o: 12 passed")
-    gates = LocalValidationService(CommandRunner(system_encoding="cp1252")).validate(tmp_path)
-    assert len(gates) == 3
-    assert gates[1].name == "pytest" and gates[1].succeeded
-    assert gates[1].diagnostic == "validação: 12 passed"
+    plans = (CommandPlan("tests", "unit", "Tests", ("pytest",)),)
+    gates = LocalValidationService(CommandRunner(system_encoding="cp1252"), plans).validate(tmp_path)
+    assert len(gates) == 1
+    assert gates[0].name == "tests" and gates[0].succeeded
+    assert gates[0].diagnostic == "validação: 12 passed"
 
 
 def test_subprocesso_real_stdin_grande_caminho_acentuado(tmp_path):

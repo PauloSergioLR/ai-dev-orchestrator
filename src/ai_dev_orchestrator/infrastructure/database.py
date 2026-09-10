@@ -16,7 +16,7 @@ from ai_dev_orchestrator.domain.execution import (
 )
 from ai_dev_orchestrator.domain.review import ReviewFinding, ReviewVerdict, StructuredReview
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 _SUMMARY_LIMIT = 500
 
 
@@ -74,7 +74,7 @@ class SqliteExecutionStore:
                         "INSERT INTO schema_version(version) VALUES (?)",
                         (SCHEMA_VERSION,),
                     )
-                elif row["version"] in {1, 2, 3}:
+                elif row["version"] in {1, 2, 3, 4}:
                     c.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
                 elif row["version"] != SCHEMA_VERSION:
                     raise SchemaVersionError(
@@ -107,6 +107,13 @@ class SqliteExecutionStore:
                     "gemini_tokens": "INTEGER",
                     "codex_cost": "REAL",
                     "gemini_cost": "REAL",
+                    "repository_identity": "TEXT",
+                    "contract_fingerprint": "TEXT",
+                    "project_contract_json": "TEXT",
+                    "local_gate_correction_attempts": "INTEGER NOT NULL DEFAULT 0",
+                    "ci_correction_attempts": "INTEGER NOT NULL DEFAULT 0",
+                    "gate_results_json": "TEXT",
+                    "ci_checks_json": "TEXT",
                 }
                 for name, declaration in additions.items():
                     if name not in existing_columns:
@@ -174,7 +181,7 @@ class SqliteExecutionStore:
         try:
             with self._connection() as c:
                 c.execute(
-                    "INSERT INTO executions(id, issue_number, project_item_id, phase, branch, worktree_path, base_ref, codex_model, gemini_model, terminal, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                    "INSERT INTO executions(id, issue_number, project_item_id, phase, branch, worktree_path, base_ref, codex_model, gemini_model, repository_identity, contract_fingerprint, project_contract_json, terminal, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
                     (
                         execution_id,
                         issue_number,
@@ -185,6 +192,9 @@ class SqliteExecutionStore:
                         details.get("base_ref"),
                         details.get("codex_model", "default"),
                         details.get("gemini_model", "default"),
+                        details.get("repository_identity"),
+                        details.get("contract_fingerprint"),
+                        details.get("project_contract_json"),
                         now,
                         now,
                     ),
@@ -443,6 +453,13 @@ class SqliteExecutionStore:
             "gemini_tokens",
             "codex_cost",
             "gemini_cost",
+            "repository_identity",
+            "contract_fingerprint",
+            "project_contract_json",
+            "local_gate_correction_attempts",
+            "ci_correction_attempts",
+            "gate_results_json",
+            "ci_checks_json",
         }
         if invalid := set(updates) - allowed:
             raise ExecutionStoreError(
@@ -535,6 +552,13 @@ class SqliteExecutionStore:
             "gemini_tokens",
             "codex_cost",
             "gemini_cost",
+            "repository_identity",
+            "contract_fingerprint",
+            "project_contract_json",
+            "local_gate_correction_attempts",
+            "ci_correction_attempts",
+            "gate_results_json",
+            "ci_checks_json",
         }
         if invalid := set(updates) - allowed:
             raise ExecutionStoreError(

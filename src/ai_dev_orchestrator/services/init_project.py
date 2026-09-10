@@ -11,6 +11,8 @@ import tempfile
 
 from ai_dev_orchestrator.config import OrchestratorConfig
 from ai_dev_orchestrator.infrastructure.process import CommandRunner
+from ai_dev_orchestrator.domain.project_contract import ProjectContract
+from ai_dev_orchestrator.services.project_discovery import ProjectCapabilityResolver
 
 
 class ProjectInitError(Exception):
@@ -31,6 +33,7 @@ class ProjectDiscovery:
     github_projects: tuple[int, ...] = ()
     remote_names: tuple[str, ...] = ()
     gemini_models: tuple[str, ...] = ()
+    contract: ProjectContract | None = None
 
 
 class ProjectInitService:
@@ -149,6 +152,15 @@ class ProjectInitService:
         gemini_models = (
             _parse_model_listing(model_result.stdout) if model_result.succeeded else ()
         )
+        contract = None
+        selected_base = suggested or default_branch
+        if selected_base:
+            contract = ProjectCapabilityResolver().resolve(
+                root,
+                repository_identity=(f"{owner}/{repository}" if owner and repository else root.name),
+                base_branch=selected_base,
+                pull_request_target=selected_base,
+            )
         return ProjectDiscovery(
             root,
             remote_name,
@@ -162,6 +174,27 @@ class ProjectInitService:
             github_projects,
             remote_names,
             gemini_models,
+            contract,
+        )
+
+    def discover_status_options(self, owner: str, project_number: int, cwd: Path) -> tuple[str, ...]:
+        """Lê opções do campo Status sem depender da view board/table/list."""
+        result = self.runner.run(
+            ["gh", "project", "field-list", str(project_number), "--owner", owner, "--format", "json"],
+            cwd=cwd,
+        )
+        if not result.succeeded:
+            return ()
+        try:
+            fields = json.loads(result.stdout).get("fields", [])
+        except (json.JSONDecodeError, AttributeError):
+            return ()
+        matches = [field for field in fields if isinstance(field, dict) and field.get("name") == "Status"]
+        if len(matches) != 1 or not isinstance(matches[0].get("options"), list):
+            return ()
+        return tuple(
+            option["name"] for option in matches[0]["options"]
+            if isinstance(option, dict) and isinstance(option.get("name"), str) and option["name"]
         )
 
     def write(self, path: Path, config: OrchestratorConfig) -> None:
@@ -224,6 +257,15 @@ def render_toml(config: OrchestratorConfig) -> str:
     def array(values: tuple[str, ...]) -> str:
         return "[" + ", ".join(q(value) for value in values) + "]"
 
+    def mapping(values: dict[str, str]) -> str:
+        return "{" + ", ".join(f"{q(key)} = {q(value)}" for key, value in values.items()) + "}"
+
+    required_checks = (
+        f"required_checks = {array(config.ci.required_checks)}\n"
+        if "required_checks" in config.ci.model_fields_set
+        else ""
+    )
+
     return f"""[github]
 owner = {q(config.github.owner)}
 repository = {q(config.github.repository)}
@@ -235,6 +277,7 @@ done_status = {q(config.github.done_status)}
 pull_request_target = {q(config.github.pull_request_target)}
 protected_branches = {array(config.github.protected_branches)}
 status_field_name = {q(config.github.status_field_name)}
+status_mapping = {mapping(config.github.status_mapping)}
 
 [workspace]
 repository_path = {q(config.workspace.repository_path.as_posix())}
@@ -251,14 +294,15 @@ max_attempts = {config.execution.max_attempts}
 max_parallel_runs = {config.execution.max_parallel_runs}
 auto_merge = {str(config.execution.auto_merge).lower()}
 merge_timeout_seconds = {config.execution.merge_timeout_seconds}
+max_local_gate_correction_attempts = {config.execution.max_local_gate_correction_attempts}
 
 [state]
 database_path = {q(config.state.database_path.as_posix())}
 
 [ci]
-required_checks = {array(config.ci.required_checks)}
-poll_interval_seconds = {config.ci.poll_interval_seconds}
+{required_checks}poll_interval_seconds = {config.ci.poll_interval_seconds}
 timeout_seconds = {config.ci.timeout_seconds}
+auto_discover = {str(config.ci.auto_discover).lower()}
 
 [convergence]
 poll_interval_seconds = {config.convergence.poll_interval_seconds}
@@ -283,4 +327,11 @@ channels = {array(config.notifications.channels)}
 timeout_seconds = {config.notifications.timeout_seconds}
 retry_seconds = {config.notifications.retry_seconds}
 max_attempts = {config.notifications.max_attempts}
+""" + ("" if not config.project.gates else "\n[project]\n" + "\n".join(
+        "[[project.gates]]\n"
+        f"name = {q(gate.name)}\ncapability = {q(gate.capability)}\n"
+        f"argv = {array(gate.argv)}\ncwd = {q(gate.cwd)}\n"
+        f"timeout_seconds = {gate.timeout_seconds}\nrequired = {str(gate.required).lower()}"
+        for gate in config.project.gates
+    ) + "\n") + """
 """

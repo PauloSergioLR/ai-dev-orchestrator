@@ -31,6 +31,8 @@ from ai_dev_orchestrator.services.convergence import (
     ConvergencePoller,
     ObservationDecision,
 )
+from ai_dev_orchestrator.domain.project_contract import ProjectContract
+from ai_dev_orchestrator.services.project_discovery import ProjectCapabilityResolver
 
 
 class ProjectStatusWriter(Protocol):
@@ -55,7 +57,8 @@ class RecoveryEffects:
         self.issues = GitHubIssueAdapter(config)
         self.pull_requests = GitHubPullRequestAdapter(config)
         self.projects = projects if projects is not None else GitHubProjectStatusAdapter(config)
-        self.ai_review_status = config.github.ai_review_status
+        self.ai_review_status = config.github.status_for("ai_review")
+        self.max_local_gate_correction_attempts = config.execution.max_local_gate_correction_attempts
         self.reviewer = AntigravityAdapter(
             config.review.timeout_seconds, model=config.providers.gemini_model,
             executable=config.review.executable,
@@ -75,8 +78,15 @@ class RecoveryEffects:
     def resume_codex(self, run: RunRecord) -> str:
         return self.codex.resume(run.worktree_path or "", run.codex_session_id or "", f"Continue a Issue #{run.issue_number} no mesmo worktree.").session_id
 
-    def run_local_gates(self, run: RunRecord) -> None:
-        self.validation.validate(run.worktree_path or "")
+    def resume_local_failure(self, run: RunRecord, diagnostic: str) -> str:
+        prompt = (
+            "Corrija somente a falha determinística dos gates locais abaixo, no mesmo "
+            "worktree. Não faça commit, push, PR ou merge.\n\n" + diagnostic[:500]
+        )
+        return self.codex.resume(run.worktree_path or "", run.codex_session_id or "", prompt).session_id
+
+    def run_local_gates(self, run: RunRecord):
+        return self._validate(run)
 
     def create_commit(self, run: RunRecord) -> CommitResult:
         parent = self.publication.current_head(run.worktree_path or "")
@@ -90,7 +100,7 @@ class RecoveryEffects:
 
     def create_pull_request(self, run: RunRecord) -> PullRequestObservation:
         issue = self.issues.get_issue(run.issue_number)
-        gates = self.validation.validate(run.worktree_path or "")
+        gates = self._validate(run)
         created = self.pull_requests.create(issue, run.branch or "", gates)
         current = self._wait_pull_request_snapshot(created.number, run)
         try:
@@ -125,21 +135,51 @@ class RecoveryEffects:
     def _wait_ci_result(self, run: RunRecord):
         from ai_dev_orchestrator.adapters.github import GitHubCiAdapter
         from ai_dev_orchestrator.services.ci_gate import CiGate
-        return CiGate(GitHubCiAdapter(self.config), self.config.ci).wait(run.pull_request_number or 0, run.current_head_sha or "")
+        contract = self._contract(run) if run.project_contract_json else None
+        return CiGate(
+            GitHubCiAdapter(self.config), self.config.ci,
+            discovered_checks=contract.expected_ci if contract else (),
+        ).wait(run.pull_request_number or 0, run.current_head_sha or "")
 
     def review_head(self, run: RunRecord, prior_findings: tuple[ReviewFinding, ...]) -> StructuredReview:
         if not run.pull_request_number or not run.pull_request_url or not run.current_head_sha:
             raise ValueError("Identidade de review incompleta")
         issue = self.issues.get_issue(run.issue_number)
-        gates = self.validation.validate(run.worktree_path or "")
+        contract = self._contract(run) if run.project_contract_json else None
+        gates = self._validate(run)
         ci_result = self._wait_ci_result(run)
         pipeline = RunPipeline(self.config, self.issues, self.projects, self.projects,
                                self.worktrees, self.codex, self.validation, self.publication,
                                self.pull_requests, self.pull_requests, self.pull_requests,
-                               self.reviewer, self.pull_requests)
+                               self.reviewer, self.pull_requests, project_contract=contract)
         worktree = GitWorktree(self.config.workspace.repository_path, Path(run.worktree_path or ""), run.branch or "", run.base_ref or "")
         pull = PullRequest(run.pull_request_number, run.pull_request_url, issue.title, self.config.github.pull_request_base, run.branch or "")
         return pipeline._review_head(issue, worktree, pull, run.current_head_sha, gates, ci_result, prior_findings)
+
+    def _validate(self, run: RunRecord):
+        if run.project_contract_json:
+            return self.validation.validate(run.worktree_path or "", self._contract(run))
+        if isinstance(self.validation, LocalValidationService):
+            contract = self._contract(run)
+            if contract.ambiguities:
+                raise ValueError("Run legado não possui contrato e a migração é ambígua")
+            return self.validation.validate(run.worktree_path or "", contract)
+        return self.validation.validate(run.worktree_path or "")
+
+    def _contract(self, run: RunRecord) -> ProjectContract:
+        """Resume usa exatamente o contrato persistido; runs legados migram uma vez."""
+        if run.project_contract_json:
+            contract = ProjectContract.from_json(run.project_contract_json)
+            if run.contract_fingerprint and contract.fingerprint != run.contract_fingerprint:
+                raise ValueError("Fingerprint do contrato persistido diverge; retomada recusada")
+            return contract
+        return ProjectCapabilityResolver().resolve(
+            Path(run.worktree_path or self.config.workspace.repository_path),
+            repository_identity=run.repository_identity or self.config.github.repository_full_name,
+            base_branch=run.base_ref or self.config.workspace.base_ref,
+            pull_request_target=self.config.github.pull_request_base,
+            protected_branches=self.config.github.protected_branches,
+        )
 
     def resume_correction(self, run: RunRecord, findings: tuple[ReviewFinding, ...]) -> str:
         if not findings or not run.pull_request_number or not run.pull_request_url or not run.reviewed_head_sha or not run.codex_session_id:
@@ -174,12 +214,12 @@ class RecoveryEffects:
         return MergeObservation(MergeState.MERGED, result.merged_head_sha, result.merge_commit_sha)
 
     def mark_project_done(self, run: RunRecord) -> None:
-        self.projects.set_status(run.project_item_id or "", self.config.github.done_status)
+        self.projects.set_status(run.project_item_id or "", self.config.github.status_for("completed"))
 
     def mark_project_ai_review(self, run: RunRecord) -> None:
         if not run.project_item_id:
             raise ValueError("Item do Project ausente para AI Review")
-        self.projects.set_status(run.project_item_id, self.config.github.ai_review_status)
+        self.projects.set_status(run.project_item_id, self.config.github.status_for("ai_review"))
 
     def _poller(self) -> ConvergencePoller:
         """Mantém compatibilidade com instâncias construídas por testes sem __init__."""

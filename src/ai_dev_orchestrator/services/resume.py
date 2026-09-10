@@ -59,7 +59,7 @@ class ResumeService:
         from ai_dev_orchestrator.services.recovery_effects import RecoveryEffects
         from ai_dev_orchestrator.services.recovery_observer import RecoveryObserver as RealObserver
         store = SqliteExecutionStore(config.state.database_path)
-        policy = RecoveryPolicy(config.github.repository_full_name, config.github.pull_request_base, config.execution.auto_merge, config.review.max_correction_attempts, config.github.done_status)
+        policy = RecoveryPolicy(config.github.repository_full_name, config.github.pull_request_base, config.execution.auto_merge, config.review.max_correction_attempts, config.github.status_for("completed"))
         from ai_dev_orchestrator.services.escalation import EscalationService
         from ai_dev_orchestrator.adapters.github import GitHubProjectStatusAdapter
         return cls(store, RealObserver(config, store), RecoveryPlanner(policy), RecoveryExecutor(policy, store, RecoveryEffects(config)), config.providers.codex_model, config.providers.gemini_model, EscalationService(config, store, GitHubProjectStatusAdapter(config)))

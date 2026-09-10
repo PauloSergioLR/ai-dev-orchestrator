@@ -187,7 +187,7 @@ class WorkService:
             if is_eligible_for_execution(
                 item,
                 self.config.github.repository_full_name,
-                self.config.github.ready_status,
+                self.config.github.status_for("ready"),
             )
             and (not item.agent or item.agent.strip().casefold() == "codex")
             and item.issue_number is not None
@@ -222,6 +222,6 @@ class WorkService:
                 continue
             if self.status_writer is None:
                 raise WorkError("Promoção automática Backlog → Ready exige gravador de Status")
-            self.status_writer.set_status(item.id, self.config.github.ready_status)
+            self.status_writer.set_status(item.id, self.config.github.status_for("ready"))
             return item, issue
         return None

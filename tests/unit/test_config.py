@@ -60,6 +60,27 @@ def test_allows_valid_direct_instantiation(tmp_path: Path) -> None:
     )
 
     assert config.github.owner == "acme"
+    assert config.state.database_path.parts[-3:] == ("acme", "orchestrator", "orchestrator.db")
+
+
+def test_default_state_is_isolated_by_repository(tmp_path: Path) -> None:
+    common = {
+        "execution": {"max_attempts": 1, "max_parallel_runs": 1, "auto_merge": False},
+        "workspace": {
+            "repository_path": tmp_path / "repo", "worktrees_dir": tmp_path / "worktrees",
+            "base_ref": "main",
+        },
+    }
+    first = OrchestratorConfig(
+        github={"owner": "acme", "repository": "first", "project_number": 1, "ready_status": "Ready"},
+        **common,
+    )
+    second = OrchestratorConfig(
+        github={"owner": "acme", "repository": "second", "project_number": 1, "ready_status": "Ready"},
+        **common,
+    )
+
+    assert first.state.database_path != second.state.database_path
 
 
 def test_rejects_extra_argument_in_direct_instantiation(tmp_path: Path) -> None:

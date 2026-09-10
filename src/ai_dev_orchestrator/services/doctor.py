@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+import shutil
 import sys
 from tempfile import TemporaryDirectory
 from typing import Sequence
@@ -32,6 +33,8 @@ from ai_dev_orchestrator.services.review import (
     parse_review_plan,
     parse_structured_review,
 )
+from ai_dev_orchestrator.domain.project_contract import ContractConfidence
+from ai_dev_orchestrator.services.project_discovery import ProjectCapabilityResolver
 
 
 class CheckStatus(StrEnum):
@@ -82,11 +85,56 @@ class DoctorService:
             self._check_repository(),
             self._check_configuration(),
         ]
+        checks.extend(self._check_project_contract())
         if not deep:
             return checks
         checks.extend(self._deep_provider_checks())
         if state:
             checks.append(self._check_state_consistency())
+        return checks
+
+    def _check_project_contract(self) -> list[DoctorCheck]:
+        """Mostra contrato e executáveis sem rodar gates nem consumir provider."""
+        try:
+            config = load_config(self.config_path)
+        except ConfigurationError:
+            return []
+        root = config.workspace.repository_path
+        # Mantém o diagnóstico de instalações ainda não inicializadas compatível.
+        if not root.is_dir():
+            return []
+        try:
+            contract = ProjectCapabilityResolver().resolve(
+                root,
+                repository_identity=config.github.repository_full_name,
+                base_branch=config.workspace.base_ref,
+                pull_request_target=config.github.pull_request_base,
+                protected_branches=config.github.protected_branches,
+            )
+        except Exception as error:
+            return [DoctorCheck("Contrato do projeto", CheckStatus.ERROR, self._safe_message(error))]
+        status = CheckStatus.OK if contract.confidence is ContractConfidence.PROVEN else CheckStatus.ERROR
+        summary = (
+            f"{contract.confidence}; fingerprint={contract.fingerprint}; "
+            f"base={contract.base_branch}; target={contract.pull_request_target}; "
+            f"gates={', '.join(gate.name for gate in contract.gates) or 'nenhum'}; "
+            f"CI={', '.join(contract.expected_ci) or 'não comprovada'}; "
+            f"Status={config.github.status_mapping or 'mapeamento legado'}"
+        )
+        checks = [DoctorCheck("Contrato do projeto", status, summary)]
+        for plan in (*contract.bootstrap, *contract.gates):
+            local = (root / plan.cwd / plan.argv[0]).resolve()
+            found = shutil.which(plan.argv[0]) is not None or (local.is_file() and root in local.parents)
+            checks.append(DoctorCheck(
+                f"Gate {plan.name}", CheckStatus.OK if found else CheckStatus.ERROR,
+                f"cwd={plan.cwd}; timeout={plan.timeout_seconds:g}s; executável "
+                + ("encontrado" if found else f"ausente: {plan.argv[0]}"),
+            ))
+        for plan in contract.excluded_operations:
+            checks.append(DoctorCheck(
+                f"Operação não automática {plan.name}", CheckStatus.WARNING,
+                f"risco={plan.risk_class}; evidência={plan.source_evidence[0].path}",
+            ))
         return checks
 
     def _deep_provider_checks(self) -> list[DoctorCheck]:

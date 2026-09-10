@@ -52,7 +52,9 @@ def _classify_check(check: StatusCheck) -> CiStatus:
         return CiStatus.PENDING
     if status != "COMPLETED":
         return CiStatus.FAILURE
-    return CiStatus.SUCCESS if conclusion == "SUCCESS" else CiStatus.FAILURE
+    # GitHub considera conclusões neutras/skipped como terminais não bloqueantes
+    # para jobs condicionais; ausência do check continua PENDING/fail-closed.
+    return CiStatus.SUCCESS if conclusion in {"SUCCESS", "SKIPPED", "NEUTRAL"} else CiStatus.FAILURE
 
 
 class CiGate:
@@ -64,11 +66,26 @@ class CiGate:
         config: CiConfig,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        discovered_checks: tuple[str, ...] = (),
     ) -> None:
         self.reader = reader
         self.config = config
         self.monotonic = monotonic
         self.sleep = sleep
+        protected_checks: tuple[str, ...] = ()
+        discover = getattr(reader, "discover_required_checks", None)
+        if config.auto_discover and "required_checks" not in config.model_fields_set and discover:
+            protected_checks = discover()
+        if "required_checks" in config.model_fields_set:
+            self.required_checks = config.required_checks
+        elif config.auto_discover and protected_checks:
+            self.required_checks = protected_checks
+        elif config.auto_discover and discovered_checks:
+            self.required_checks = discovered_checks
+        elif config.auto_discover and discover:
+            self.required_checks = ()
+        else:
+            self.required_checks = config.required_checks
 
     def wait(
         self,
@@ -76,6 +93,8 @@ class CiGate:
         expected_head_sha: str,
         stale_head_sha: str | None = None,
     ) -> CiResult:
+        if not self.required_checks:
+            raise CiGateError("Não foi possível provar quais checks de CI são obrigatórios")
         started_at = self.monotonic()
         deadline = started_at + self.config.timeout_seconds
         first_query = True
@@ -101,10 +120,10 @@ class CiGate:
                     f"O HEAD do Pull Request mudou de {expected_head_sha} para {snapshot.head_sha}"
                 )
             status, failed_check = classify_required_checks(
-                snapshot.checks, self.config.required_checks
+                snapshot.checks, self.required_checks
             )
             required_observed = tuple(
-                check for check in snapshot.checks if check.name in self.config.required_checks
+                check for check in snapshot.checks if check.name in self.required_checks
             )
             result = CiResult(expected_head_sha, required_observed, status)
             if status is CiStatus.SUCCESS:

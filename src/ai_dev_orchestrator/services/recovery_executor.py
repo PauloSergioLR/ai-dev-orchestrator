@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Protocol
 
 from ai_dev_orchestrator.domain.execution import ExecutionPhase, RunRecord, validate_transition
@@ -12,6 +13,8 @@ from ai_dev_orchestrator.domain.recovery import (
 )
 from ai_dev_orchestrator.domain.review import ReviewFinding, StructuredReview
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
+from ai_dev_orchestrator.services.validation import LocalValidationError
+from ai_dev_orchestrator.domain.provider import ProviderFailure
 
 
 class RecoveryExecutionError(Exception):
@@ -28,7 +31,7 @@ class RecoveryEffects(Protocol):
     def prepare_worktree(self, run: RunRecord) -> str: ...
     def start_codex(self, run: RunRecord) -> str: ...
     def resume_codex(self, run: RunRecord) -> str: ...
-    def run_local_gates(self, run: RunRecord) -> None: ...
+    def run_local_gates(self, run: RunRecord): ...
     def create_commit(self, run: RunRecord) -> CommitResult: ...
     def push_branch(self, run: RunRecord) -> None: ...
     def create_pull_request(self, run: RunRecord) -> PullRequestObservation: ...
@@ -86,8 +89,57 @@ class RecoveryExecutor:
                 raise RecoveryExecutionError("Provider retornou sessão Codex divergente")
             return self.store.transition(run.id, ExecutionPhase.TESTING, summary=decision.reason, provider_retry_attempts=0)
         if action == RecoveryAction.RUN_LOCAL_GATES:
-            self.effects.run_local_gates(run)
-            return self.store.transition(run.id, ExecutionPhase.COMMIT_PENDING, summary=decision.reason, provider_retry_attempts=0)
+            try:
+                gate_results = self.effects.run_local_gates(run)
+            except LocalValidationError as error:
+                if isinstance(error, ProviderFailure):
+                    raise
+                limit = getattr(self.effects, "max_local_gate_correction_attempts", 0)
+                if run.local_gate_correction_attempts >= limit:
+                    return self.store.require_human(
+                        run.id,
+                        summary="Limite de correções locais atingido; identidade preservada",
+                        reason="LOCAL_GATE_CORRECTION_LIMIT",
+                    )
+                audited = self.store.transition(
+                    run.id,
+                    ExecutionPhase.CODEX_RUNNING,
+                    summary="Falha determinística de gate; retomada da mesma sessão Codex",
+                    local_gate_correction_attempts=run.local_gate_correction_attempts + 1,
+                )
+                resume_local = getattr(self.effects, "resume_local_failure", None)
+                session = (
+                    resume_local(audited, str(error)[:500])
+                    if resume_local is not None
+                    else self.effects.resume_codex(audited)
+                )
+                if session != audited.codex_session_id:
+                    raise RecoveryExecutionError("Provider retornou sessão Codex divergente")
+                return self.store.transition(
+                    run.id, ExecutionPhase.TESTING,
+                    summary="Correção local concluída; plano congelado será reexecutado",
+                )
+            updates: dict[str, object] = {"provider_retry_attempts": 0}
+            if isinstance(gate_results, tuple):
+                updates["gate_results_json"] = json.dumps(
+                    [
+                        {
+                            "name": gate.name,
+                            "category": gate.category,
+                            "succeeded": gate.succeeded,
+                            "returncode": gate.returncode,
+                            "duration_seconds": round(gate.duration_seconds, 6),
+                            "attempt": run.local_gate_correction_attempts,
+                        }
+                        for gate in gate_results
+                    ],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            return self.store.transition(
+                run.id, ExecutionPhase.COMMIT_PENDING,
+                summary=decision.reason, **updates,
+            )
         if action in {RecoveryAction.CREATE_COMMIT, RecoveryAction.RECORD_EXISTING_COMMIT}:
             result = self.effects.create_commit(run) if action == RecoveryAction.CREATE_COMMIT else CommitResult(observation.local_head_sha or "", observation.local_head_parent_sha or "")
             if not result.new_head_sha or result.new_head_sha == run.current_head_sha or result.parent_head_sha != run.current_head_sha:
@@ -129,7 +181,7 @@ class RecoveryExecutor:
                 raise RecoveryExecutionError("CI não confirmou o HEAD atual")
             return self.store.transition(run.id, ExecutionPhase.GEMINI_REVIEWING, summary=decision.reason, ci_head_sha=ci.head_sha)
         if action == RecoveryAction.RESUME_CI_FAILURE:
-            if run.correction_attempts >= self.policy.max_correction_attempts:
+            if run.ci_correction_attempts >= self.policy.max_correction_attempts:
                 raise RecoveryExecutionError("Limite de correções atingido")
             self._required(run.codex_session_id, "Sessão Codex")
             audited = self.store.transition(
@@ -137,6 +189,7 @@ class RecoveryExecutor:
                 ExecutionPhase.CODEX_RUNNING,
                 summary="Falha da CI observada; retomada Codex iniciada",
                 correction_attempts=run.correction_attempts + 1,
+                ci_correction_attempts=run.ci_correction_attempts + 1,
             )
             if self.effects.resume_ci_failure(audited) != audited.codex_session_id:
                 raise RecoveryExecutionError("Provider retornou sessão Codex divergente")
@@ -152,7 +205,7 @@ class RecoveryExecutor:
                 raise RecoveryExecutionError("Review retornou HEAD divergente")
             return self.store.record_review(run.id, review, decision.reason)
         if action == RecoveryAction.RESUME_CORRECTION:
-            if run.correction_attempts >= self.policy.max_correction_attempts:
+            if (run.correction_attempts - run.ci_correction_attempts) >= self.policy.max_correction_attempts:
                 raise RecoveryExecutionError("Limite de correções atingido")
             findings = self.store.review_findings(run.id, run.reviewed_head_sha)
             if not findings or not run.codex_session_id:
