@@ -61,11 +61,14 @@ confirma somente escolhas ambíguas e grava atomicamente o perfil humano em
 `orchestrator.toml`. `AGENTS.md` melhora as sugestões, mas não é obrigatório e
 seu texto nunca é executado como comando.
 
-`orch watch` usa o mesmo `WorkService` e recovery em modo sequencial. Quando um
-provider informa de forma confiável a próxima tentativa, aguarda sem busy-loop e
-retoma a mesma execução, sessão, worktree, branch, PR e HEAD. Sem esse horário (ou
-uma política local explícita), para de modo seguro e pede intervenção. `Ctrl+C`
-encerra o supervisor sem apagar checkpoints.
+`orch watch` usa o mesmo `WorkService` e recovery. Por padrão,
+`max_parallel_runs = 1` preserva o modo sequencial. Com valor maior, o supervisor
+mantém até esse número de execuções independentes, em ordem determinística de
+prioridade e Issue; cada uma conserva seu próprio checkpoint, sessão, worktree,
+branch, PR e HEAD. Uma espera de quota ocupa seu slot lógico, mas não bloqueia os
+outros slots. O lock local ao lado do SQLite e o claim transacional por Issue
+recusam disputa entre supervisores. `Ctrl+C` encerra o supervisor sem apagar
+checkpoints.
 
 ## Execução manual de Issue
 
