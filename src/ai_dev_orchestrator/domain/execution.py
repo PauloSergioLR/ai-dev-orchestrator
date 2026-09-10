@@ -109,7 +109,10 @@ for _phase in RESUMABLE_PROVIDER_PHASES:
     _ALLOWED[_phase].update(PROVIDER_WAIT_PHASES)
 for _phase in PROVIDER_WAIT_PHASES:
     _ALLOWED.setdefault(_phase, set()).update(RESUMABLE_PROVIDER_PHASES)
-_ALLOWED[ExecutionPhase.HUMAN_REQUIRED] = set(RESUMABLE_PROVIDER_PHASES)
+_ALLOWED[ExecutionPhase.HUMAN_REQUIRED] = {
+    *RESUMABLE_PROVIDER_PHASES,
+    ExecutionPhase.WAITING_CI,
+}
 
 
 def validate_transition(old: ExecutionPhase, new: ExecutionPhase) -> None:
