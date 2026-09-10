@@ -120,6 +120,7 @@ class WorkService:
         )
 
     def work(self) -> WorkResult | None:
+        """Mantém o contrato sequencial de ``orch work``."""
         orphaned = self.store.list_reconciliation_required()
         if orphaned:
             raise WorkError("Execução publicada exige reconciliação ou supersessão explícita: "
@@ -140,8 +141,25 @@ class WorkService:
                 resume=self.resume_service.resume(active[0].issue_number),
             )
 
+        return self.start_next()
+
+    def resume_issue(self, issue_number: int) -> WorkResult:
+        """Retoma somente a execução indicada pelo supervisor.
+
+        A identidade (sessão, worktree e PR) é sempre lida do checkpoint pelo
+        ResumeService; esta operação não seleciona nem cria outra Issue.
+        """
+        return WorkResult(resumed=True, resume=self.resume_service.resume(issue_number))
+
+    def start_next(self, excluded_issue_numbers: frozenset[int] = frozenset()) -> WorkResult | None:
+        """Inicia a próxima Issue Ready fora do conjunto já ocupado.
+
+        O ``create`` transacional do pipeline continua sendo o claim durável:
+        se outro supervisor tiver reservado a mesma Issue, a execução falha
+        fechada antes de criar worktree ou iniciar Codex.
+        """
         try:
-            selected = self._select_issue()
+            selected = self._select_issue(excluded_issue_numbers)
         except Exception as error:
             raise WorkError(f"Falha ao selecionar a próxima Issue: {error}") from error
         if selected is None:
@@ -161,7 +179,7 @@ class WorkService:
         result = self.pipeline.run(item.issue_number or issue.number, branch, base_ref=remote_base)
         return WorkResult(resumed=False, run=result)
 
-    def _select_issue(self) -> tuple[ProjectItem, Issue] | None:
+    def _select_issue(self, excluded_issue_numbers: frozenset[int] = frozenset()) -> tuple[ProjectItem, Issue] | None:
         items = self.project_reader.list_items()
         candidates = [
             item
@@ -173,6 +191,7 @@ class WorkService:
             )
             and (not item.agent or item.agent.strip().casefold() == "codex")
             and item.issue_number is not None
+            and item.issue_number not in excluded_issue_numbers
         ]
         candidates.sort(
             key=lambda item: (
@@ -192,6 +211,7 @@ class WorkService:
             and item.status == "Backlog"
             and (not item.agent or item.agent.strip().casefold() == "codex")
             and item.issue_number is not None
+            and item.issue_number not in excluded_issue_numbers
         ]
         backlog.sort(
             key=lambda item: (_PRIORITIES.get((item.priority or "").upper(), 4), item.issue_number or 0)
