@@ -1,7 +1,9 @@
 """Cobertura do agendamento opcional de execuções independentes."""
 
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 from types import SimpleNamespace
 
 import pytest
@@ -9,7 +11,7 @@ import pytest
 from ai_dev_orchestrator.config import OrchestratorConfig
 from ai_dev_orchestrator.domain.execution import ExecutionPhase
 from ai_dev_orchestrator.domain.review import ReviewVerdict, StructuredReview
-from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
+from ai_dev_orchestrator.infrastructure.database import ActiveExecutionError, SqliteExecutionStore
 from ai_dev_orchestrator.services.supervisor import SupervisorError, SupervisorService, _exclusive_lock
 from ai_dev_orchestrator.services.pipeline import RunPipelineError
 from ai_dev_orchestrator.services.work import WorkResult
@@ -108,6 +110,27 @@ def test_watch_lock_fails_closed_for_second_supervisor(tmp_path: Path) -> None:
             with _exclusive_lock(lock):
                 pass
     assert not lock.exists()
+
+
+def test_sqlite_claim_allows_only_one_concurrent_execution_for_same_issue(tmp_path: Path) -> None:
+    """O índice parcial do SQLite é a prova durável além do lock do watch."""
+    database = tmp_path / "state.db"
+    first, second = SqliteExecutionStore(database), SqliteExecutionStore(database)
+    barrier = Barrier(2)
+
+    def claim(store: SqliteExecutionStore):
+        barrier.wait(timeout=2)
+        try:
+            return store.create(47, branch="work/concorrencia", worktree_path=str(tmp_path / "work"), base_ref="main")
+        except ActiveExecutionError as error:
+            return error
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(claim, (first, second)))
+
+    assert sum(not isinstance(outcome, Exception) for outcome in outcomes) == 1
+    assert sum(isinstance(outcome, ActiveExecutionError) for outcome in outcomes) == 1
+    assert len(first.list_active()) == 1
 
 
 def test_default_sequential_mode_uses_legacy_single_work_call(tmp_path: Path) -> None:
