@@ -442,10 +442,12 @@ def _migrate_legacy_state(config: OrchestratorConfig, config_path: Path) -> None
                         "WHERE repository_identity IS NOT NULL"
                     )
                 }
-            if identities - {identity}:
+            if len(identities) > 1:
                 raise ConfigurationError(
-                    "Migracao ambigua: o banco legado contem execucoes de outro repositorio"
+                    "Migracao ambigua: o banco legado mistura mais de um repositorio"
                 )
+            if identities and identity not in identities:
+                return
             count = source.execute("SELECT COUNT(*) FROM executions").fetchone()[0]
             if not count:
                 return
@@ -459,19 +461,17 @@ def _migrate_legacy_state(config: OrchestratorConfig, config_path: Path) -> None
             claims = source.execute(
                 "SELECT repository_identity, scoped_path FROM repository_migrations"
             ).fetchall()
-            other_claims = [row for row in claims if row["repository_identity"] != identity]
             own_claim = next(
                 (row for row in claims if row["repository_identity"] == identity), None
             )
-            if other_claims:
-                raise ConfigurationError(
-                    "Migracao ambigua: o historico legado sem namespace ja foi "
-                    "associado a outro repositorio"
-                )
             if own_claim is not None and Path(own_claim["scoped_path"]) != target:
                 raise ConfigurationError(
                     "Migracao ambigua: o repositorio ja possui outro destino registrado"
                 )
+            if claims and own_claim is None:
+                # O legado ja pertence inequivocamente a outro repositorio. Este
+                # projeto inicia seu proprio banco vazio, sem copiar historico.
+                return
             source.execute(
                 "INSERT OR IGNORE INTO repository_migrations "
                 "(repository_identity, scoped_path) VALUES (?, ?)",

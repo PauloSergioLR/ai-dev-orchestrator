@@ -221,18 +221,56 @@ class ProjectCapabilityResolver:
                 jobs.extend(self._workflow_job_names(lines))
             step_name = path.stem
             cwd = "."
+            step_indent: int | None = None
+            pending_commands: list[tuple[str, int]] = []
+
+            def flush_step() -> None:
+                for command, command_line in pending_commands:
+                    semantic_evidence = f"{step_name} {command}"
+                    if not any(
+                        pattern.search(semantic_evidence)
+                        for pattern in (_VALIDATION_WORDS, _BOOTSTRAP_WORDS, _REMOTE_WORDS)
+                    ):
+                        continue
+                    candidates.append(_Candidate(
+                        step_name, command, cwd,
+                        SourceEvidence(
+                            path.relative_to(root).as_posix(), "official_ci",
+                            command[:300], command_line,
+                        ),
+                    ))
+                pending_commands.clear()
+
             number = 0
             while number < len(lines):
                 line = lines[number]
                 number += 1
+                new_step = re.match(
+                    r"^(\s*)-\s+(?:name|working-directory|run|uses|id|if|env|shell|with|continue-on-error|timeout-minutes)\s*:",
+                    line,
+                )
+                line_indent = len(line) - len(line.lstrip())
+                if new_step:
+                    flush_step()
+                    step_name = path.stem
+                    cwd = "."
+                    step_indent = len(new_step.group(1))
+                elif (
+                    step_indent is not None
+                    and line.strip()
+                    and line_indent <= step_indent
+                ):
+                    flush_step()
+                    step_name = path.stem
+                    cwd = "."
+                    step_indent = None
                 stripped = line.strip()
                 if stripped == "jobs:":
                     continue
                 name = re.match(r"^-?\s*name:\s*[\"']?(.+?)[\"']?\s*$", stripped)
                 if name:
                     step_name = name.group(1)
-                    cwd = "."
-                working = re.match(r"working-directory:\s*[\"']?(.+?)[\"']?\s*$", stripped)
+                working = re.match(r"-?\s*working-directory:\s*[\"']?(.+?)[\"']?\s*$", stripped)
                 if working:
                     cwd = working.group(1)
                 run = re.match(r"-?\s*run:\s*[\"']?(.+?)[\"']?\s*$", stripped)
@@ -258,16 +296,8 @@ class ProjectCapabilityResolver:
                         )]
                 else:
                     commands.append((value, number))
-                for command, command_line in commands:
-                    semantic_evidence = f"{step_name} {command}"
-                    if not any(
-                        pattern.search(semantic_evidence)
-                        for pattern in (_VALIDATION_WORDS, _BOOTSTRAP_WORDS, _REMOTE_WORDS)
-                    ):
-                        continue
-                    candidates.append(_Candidate(step_name, command, cwd, SourceEvidence(
-                        path.relative_to(root).as_posix(), "official_ci", command[:300], command_line
-                    )))
+                pending_commands.extend(commands)
+            flush_step()
         return candidates, jobs
 
     @staticmethod
@@ -383,10 +413,10 @@ class ProjectCapabilityResolver:
         return result
 
     def _select(self, ci: list[_Candidate], scripts: list[_Candidate], docs: list[_Candidate]) -> list[_Candidate]:
-        # CI oficial tem precedência. Documentação só promove comandos que também
-        # aparecem em automação ou apontam para um executável versionado.
+        # CI oficial tem precedencia. Sem CI, scripts versionados prevalecem;
+        # documentacao so e usada quando o repositorio nao declara scripts.
         if not ci:
-            return [*scripts, *docs]
+            return scripts if scripts else docs
         selected = list(ci)
         ci_commands = {item.command.strip() for item in ci}
         selected.extend(item for item in scripts if item.command.strip() in ci_commands)

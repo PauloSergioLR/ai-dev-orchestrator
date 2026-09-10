@@ -63,6 +63,26 @@ def test_monorepo_preserves_multiple_working_directories(tmp_path: Path) -> None
     assert {gate.cwd for gate in contract.gates} == {"frontend", "backend"}
 
 
+def test_workflow_step_cwd_is_order_independent_and_does_not_leak(tmp_path: Path) -> None:
+    (tmp_path / "backend").mkdir()
+    workflow(tmp_path, """jobs:
+  validate:
+    steps:
+      - working-directory: backend
+        name: Test backend
+        run: ./check --all
+      - run: ./test-root --all
+        name: Test root
+""")
+
+    contract = resolve(tmp_path)
+
+    assert [(gate.argv, gate.cwd) for gate in contract.gates] == [
+        (("./check", "--all"), "backend"),
+        (("./test-root", "--all"), "."),
+    ]
+
+
 def test_deploy_is_audited_but_never_becomes_local_gate(tmp_path: Path) -> None:
     workflow(tmp_path, """jobs:
   ci:
@@ -362,6 +382,22 @@ def test_versioned_script_is_evidence_without_versioned_ci(tmp_path: Path) -> No
     contract = resolve(tmp_path)
 
     assert contract.gates[0].argv == ("custom-runner", "--all")
+    assert contract.gates[0].source_evidence[0].kind == "versioned_script"
+
+
+def test_versioned_scripts_precede_conflicting_documentation_without_ci(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "package.json").write_text(
+        '{"scripts":{"test":"canonical-check --all"}}', encoding="utf-8"
+    )
+    (tmp_path / "README.md").write_text(
+        "Execute os testes antigos com `obsolete-check --all`.", encoding="utf-8"
+    )
+
+    contract = resolve(tmp_path)
+
+    assert [gate.argv for gate in contract.gates] == [("canonical-check", "--all")]
     assert contract.gates[0].source_evidence[0].kind == "versioned_script"
 
 

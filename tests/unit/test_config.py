@@ -291,7 +291,7 @@ def test_migrates_legacy_database_to_repository_namespace_without_deleting_histo
     assert migrated.issue_number == 78
 
 
-def test_legacy_migration_fails_closed_when_another_repository_claimed_history(
+def test_claimed_legacy_history_does_not_block_a_new_repository(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
@@ -313,7 +313,10 @@ def test_legacy_migration_fails_closed_when_another_repository_claimed_history(
         first.as_posix(), second.as_posix()
     )
 
-    with pytest.raises(ConfigurationError, match="outro reposit"):
-        load_config(write_config(second / "orchestrator.toml", second_content))
+    second_config = load_config(
+        write_config(second / "orchestrator.toml", second_content)
+    )
+    second_store = SqliteExecutionStore(second_config.state.database_path)
 
     assert legacy.exists()
+    assert second_store.list_history() == ()
