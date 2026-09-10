@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Protocol
 
 from ai_dev_orchestrator.adapters.codex import CodexAdapter
 from ai_dev_orchestrator.adapters.git import GitWorktreeAdapter
@@ -32,10 +33,20 @@ from ai_dev_orchestrator.services.convergence import (
 )
 
 
+class ProjectStatusWriter(Protocol):
+    """Atualiza o Status de um item do GitHub Project."""
+
+    def set_status(self, project_item_id: str, status_name: str) -> None: ...
+
+
 class RecoveryEffects:
     """Ponte de alto nível; não decide próximas ações nem persiste checkpoints."""
 
-    def __init__(self, config: OrchestratorConfig) -> None:
+    def __init__(
+        self,
+        config: OrchestratorConfig,
+        projects: "ProjectStatusWriter | None" = None,
+    ) -> None:
         self.config = config
         self.worktrees = GitWorktreeAdapter()
         self.codex = CodexAdapter(model=config.providers.codex_model)
@@ -43,7 +54,8 @@ class RecoveryEffects:
         self.publication = GitPublicationAdapter()
         self.issues = GitHubIssueAdapter(config)
         self.pull_requests = GitHubPullRequestAdapter(config)
-        self.projects = GitHubProjectStatusAdapter(config)
+        self.projects = projects if projects is not None else GitHubProjectStatusAdapter(config)
+        self.ai_review_status = config.github.ai_review_status
         self.reviewer = AntigravityAdapter(
             config.review.timeout_seconds, model=config.providers.gemini_model,
             executable=config.review.executable,
@@ -99,6 +111,17 @@ class RecoveryEffects:
         result = self._wait_ci_result(run)
         return CiObservation(CiState(result.status.value), result.expected_head_sha)
 
+    def resume_ci_failure(self, run: RunRecord) -> str:
+        if not run.codex_session_id or not run.pull_request_number or not run.current_head_sha:
+            raise ValueError("Contexto de recuperação da CI incompleto")
+        prompt = (
+            f"A CI do Pull Request #{run.pull_request_number} falhou para o HEAD "
+            f"{run.current_head_sha}. Investigue a falha no Pull Request, corrija somente "
+            "a causa no mesmo worktree e execute os gates locais. Não crie outro PR, "
+            "não faça merge e mantenha esta mesma sessão Codex."
+        )
+        return self.codex.resume(run.worktree_path or "", run.codex_session_id, prompt).session_id
+
     def _wait_ci_result(self, run: RunRecord):
         from ai_dev_orchestrator.adapters.github import GitHubCiAdapter
         from ai_dev_orchestrator.services.ci_gate import CiGate
@@ -152,6 +175,11 @@ class RecoveryEffects:
 
     def mark_project_done(self, run: RunRecord) -> None:
         self.projects.set_status(run.project_item_id or "", self.config.github.done_status)
+
+    def mark_project_ai_review(self, run: RunRecord) -> None:
+        if not run.project_item_id:
+            raise ValueError("Item do Project ausente para AI Review")
+        self.projects.set_status(run.project_item_id, self.config.github.ai_review_status)
 
     def _poller(self) -> ConvergencePoller:
         """Mantém compatibilidade com instâncias construídas por testes sem __init__."""

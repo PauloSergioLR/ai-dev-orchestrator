@@ -75,6 +75,11 @@ class Effects:
         self._called("ci")
         return self.ci_result
 
+    def resume_ci_failure(self, run: RunRecord) -> str:
+        self._called("ci_failure")
+        self.correction_runs.append(run)
+        return self.correction_result
+
     def review_head(self, run: RunRecord, prior_findings: tuple[ReviewFinding, ...]) -> StructuredReview:
         self._called("review")
         self.review_prior_findings = prior_findings
@@ -343,6 +348,22 @@ def test_wait_and_record_ci_success(tmp_path: Path) -> None:
     store_record, effects_record, executor_record, _ = context(tmp_path / "record")
     recorded = executor_record.execute(at(store_record, ExecutionPhase.WAITING_CI), decision(RecoveryAction.RECORD_CI_SUCCESS), RecoveryObservation(WorktreeState.CONVERGENT, local_head_sha=HEAD, ci=CiObservation(CiState.SUCCESS, HEAD)))
     assert (recorded.phase, effects_record.calls) == (ExecutionPhase.GEMINI_REVIEWING, {})
+
+
+def test_ci_failure_resumes_the_same_codex_session(tmp_path: Path) -> None:
+    store, effects, executor, _ = context(tmp_path)
+    run = at(store, ExecutionPhase.WAITING_CI)
+
+    result = executor.execute(
+        run,
+        decision(RecoveryAction.RESUME_CI_FAILURE),
+        RecoveryObservation(WorktreeState.CONVERGENT, local_head_sha=HEAD),
+    )
+
+    assert result.phase == ExecutionPhase.TESTING
+    assert result.correction_attempts == 1
+    assert effects.calls == {"ci_failure": 1}
+    assert effects.correction_runs[0].codex_session_id == "session"
 
 
 def test_review_persists_findings_and_prior_findings(tmp_path: Path) -> None:

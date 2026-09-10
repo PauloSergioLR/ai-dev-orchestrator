@@ -66,6 +66,10 @@ class Effects:
         self.called("ci")
         return CiObservation(CiState.SUCCESS, run.current_head_sha)
 
+    def resume_ci_failure(self, run: RunRecord) -> str:
+        self.called("ci_failure")
+        return run.codex_session_id or ""
+
     def review_head(self, run: RunRecord, prior_findings: tuple[object, ...]) -> StructuredReview:
         self.called("review")
         return StructuredReview(ReviewVerdict.APPROVED, (), run.current_head_sha or "", "ok")
@@ -145,6 +149,55 @@ def test_resume_rejects_missing_and_terminal_runs(tmp_path: Path) -> None:
 
     with pytest.raises(ResumeError, match="terminal"):
         value.resume(37)
+
+
+def test_legacy_ci_terminal_resumes_same_execution_and_codex_session(tmp_path: Path) -> None:
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    original = advance(store, ExecutionPhase.WAITING_CI)
+    legacy = store.require_human(original.id, summary="CI falhou", reason="CI_TERMINAL")
+    effects = Effects()
+
+    def snapshot(run: RunRecord) -> RecoveryObservation:
+        if run.phase is ExecutionPhase.WAITING_CI:
+            return RecoveryObservation(
+                WorktreeState.CONVERGENT,
+                local_head_sha=HEAD,
+                remote_head_sha=HEAD,
+                pull_requests=(pr(),),
+                ci=CiObservation(CiState.FAILURE, HEAD),
+            )
+        raise RuntimeError("correção da CI iniciada")
+
+    with pytest.raises(ResumeError, match="correção da CI iniciada"):
+        service(store, Observer(snapshot), effects).resume(37)
+
+    resumed = store.get(original.id)
+    assert resumed.phase is ExecutionPhase.TESTING
+    assert resumed.id == legacy.id
+    assert (resumed.branch, resumed.worktree_path, resumed.codex_session_id) == (
+        original.branch,
+        original.worktree_path,
+        original.codex_session_id,
+    )
+    assert (resumed.pull_request_number, resumed.pull_request_url) == (
+        original.pull_request_number,
+        original.pull_request_url,
+    )
+    assert resumed.human_reason is resumed.human_phase is None
+    assert effects.calls == {"ci_failure": 1}
+
+
+def test_other_human_required_run_remains_closed(tmp_path: Path) -> None:
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    run = advance(store, ExecutionPhase.WAITING_CI)
+    legacy = store.require_human(run.id, summary="CI falhou", reason="REMOTE_AMBIGUOUS")
+    effects = Effects()
+
+    result = service(store, Observer(lambda _run: pytest.fail("não deve observar")), effects).resume(37)
+
+    assert result.phase == ExecutionPhase.HUMAN_REQUIRED.value
+    assert store.get(legacy.id).phase is ExecutionPhase.HUMAN_REQUIRED
+    assert effects.calls == {}
 
 
 def test_preparing_existing_worktree_keeps_execution_and_does_not_prepare_again(tmp_path: Path) -> None:

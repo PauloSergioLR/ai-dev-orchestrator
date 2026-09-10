@@ -184,6 +184,13 @@ def test_waiting_ci_with_convergent_pr_plans_from_ci(ci: CiObservation, action: 
     assert plan(published_run(ExecutionPhase.WAITING_CI), with_pr(ci=ci)).action == action
 
 
+def test_waiting_ci_failure_resumes_same_codex_session() -> None:
+    record = published_run(ExecutionPhase.WAITING_CI, codex_session_id="session")
+    decision = plan(record, with_pr(ci=CiObservation(CiState.FAILURE, HEAD)))
+
+    assert decision.action == RecoveryAction.RESUME_CI_FAILURE
+
+
 @pytest.mark.parametrize(
     "phase, record_changes",
     [

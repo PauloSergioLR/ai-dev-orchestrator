@@ -33,6 +33,7 @@ class RecoveryEffects(Protocol):
     def push_branch(self, run: RunRecord) -> None: ...
     def create_pull_request(self, run: RunRecord) -> PullRequestObservation: ...
     def wait_for_ci(self, run: RunRecord): ...
+    def resume_ci_failure(self, run: RunRecord) -> str: ...
     def review_head(self, run: RunRecord, prior_findings: tuple[ReviewFinding, ...]) -> StructuredReview: ...
     def resume_correction(self, run: RunRecord, findings: tuple[ReviewFinding, ...]) -> str: ...
     def merge_pull_request(self, run: RunRecord) -> MergeObservation: ...
@@ -106,7 +107,20 @@ class RecoveryExecutor:
                 raise RecoveryExecutionError("Pull Request já possui identidade persistida")
             pr = self.effects.create_pull_request(run) if action == RecoveryAction.CREATE_PULL_REQUEST else self._observed_pr(run, observation)
             self._validate_pr(run, pr)
-            return self.store.transition(run.id, ExecutionPhase.WAITING_CI, summary=decision.reason, pull_request_number=pr.number, pull_request_url=pr.url)
+            mark_ai_review = getattr(self.effects, "mark_project_ai_review", None)
+            updates: dict[str, object] = {
+                "pull_request_number": pr.number,
+                "pull_request_url": pr.url,
+            }
+            if mark_ai_review is not None:
+                mark_ai_review(run)
+                updates["project_status"] = getattr(self.effects, "ai_review_status")
+            return self.store.transition(
+                run.id,
+                ExecutionPhase.WAITING_CI,
+                summary=decision.reason,
+                **updates,
+            )
         if action in {RecoveryAction.WAIT_FOR_CI, RecoveryAction.RECORD_CI_SUCCESS}:
             ci = self.effects.wait_for_ci(run) if action == RecoveryAction.WAIT_FOR_CI else observation.ci
             if ci.state in {CiState.ABSENT, CiState.PENDING} and action == RecoveryAction.WAIT_FOR_CI:
@@ -114,6 +128,24 @@ class RecoveryExecutor:
             if ci.state != CiState.SUCCESS or ci.head_sha != run.current_head_sha:
                 raise RecoveryExecutionError("CI não confirmou o HEAD atual")
             return self.store.transition(run.id, ExecutionPhase.GEMINI_REVIEWING, summary=decision.reason, ci_head_sha=ci.head_sha)
+        if action == RecoveryAction.RESUME_CI_FAILURE:
+            if run.correction_attempts >= self.policy.max_correction_attempts:
+                raise RecoveryExecutionError("Limite de correções atingido")
+            self._required(run.codex_session_id, "Sessão Codex")
+            audited = self.store.transition(
+                run.id,
+                ExecutionPhase.CODEX_RUNNING,
+                summary="Falha da CI observada; retomada Codex iniciada",
+                correction_attempts=run.correction_attempts + 1,
+            )
+            if self.effects.resume_ci_failure(audited) != audited.codex_session_id:
+                raise RecoveryExecutionError("Provider retornou sessão Codex divergente")
+            return self.store.transition(
+                audited.id,
+                ExecutionPhase.TESTING,
+                summary=decision.reason,
+                provider_retry_attempts=0,
+            )
         if action == RecoveryAction.REVIEW_HEAD:
             review = self.effects.review_head(run, self.store.review_findings(run.id))
             if review.reviewed_head_sha != run.current_head_sha:
@@ -183,6 +215,7 @@ class RecoveryExecutor:
             RecoveryAction.ADOPT_PULL_REQUEST: {ExecutionPhase.PR_PENDING},
             RecoveryAction.WAIT_FOR_CI: {ExecutionPhase.WAITING_CI},
             RecoveryAction.RECORD_CI_SUCCESS: {ExecutionPhase.WAITING_CI},
+            RecoveryAction.RESUME_CI_FAILURE: {ExecutionPhase.WAITING_CI},
             RecoveryAction.REVIEW_HEAD: {ExecutionPhase.GEMINI_REVIEWING},
             RecoveryAction.RESUME_CORRECTION: {ExecutionPhase.NEEDS_CHANGES},
             RecoveryAction.MERGE_PULL_REQUEST: {

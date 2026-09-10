@@ -100,8 +100,15 @@ class ResumeService:
                 raise ResumeError(f"A execução da Issue #{issue_number} já é terminal; use --recover-failed para reconciliar falha transitória")
         if run.phase in TERMINAL_PHASES:
             raise ResumeError(f"A execução da Issue #{issue_number} já é terminal")
-        if run.phase is ExecutionPhase.HUMAN_REQUIRED and not (retry_provider and run.provider_resume_phase):
-            return self._result(run)
+        if run.phase is ExecutionPhase.HUMAN_REQUIRED:
+            if self._is_legacy_ci_terminal(run):
+                run = self.store.transition(
+                    run.id,
+                    ExecutionPhase.WAITING_CI,
+                    summary="Retomada de CI legada autorizada; identidade persistida será revalidada",
+                )
+            elif not (retry_provider and run.provider_resume_phase):
+                return self._result(run)
         if (
             (self.codex_model is not None and run.codex_model != self.codex_model)
             or (self.gemini_model is not None and run.gemini_model != self.gemini_model)
@@ -184,6 +191,23 @@ class ResumeService:
             merge_status="SUCCESS" if run.merge_commit_sha else "NOT_REQUESTED",
             project_status=run.project_status,
             quota_retry_at=run.quota_retry_at,
+        )
+
+    @staticmethod
+    def _is_legacy_ci_terminal(run: RunRecord) -> bool:
+        """Autoriza somente o bloqueio legado comprovadamente causado pela CI."""
+        return (
+            run.human_reason == "CI_TERMINAL"
+            and run.human_phase == ExecutionPhase.WAITING_CI.value
+            and bool(
+                run.branch
+                and run.worktree_path
+                and run.base_ref
+                and run.codex_session_id
+                and run.pull_request_number
+                and run.pull_request_url
+                and run.current_head_sha
+            )
         )
 
     def _record_provider_wait(self, run: RunRecord, failure: ProviderFailure) -> RunRecord:

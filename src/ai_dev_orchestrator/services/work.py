@@ -8,7 +8,11 @@ import unicodedata
 from typing import Protocol
 
 from ai_dev_orchestrator.adapters.git import GitWorktreeAdapter
-from ai_dev_orchestrator.adapters.github import GitHubIssueAdapter, GitHubProjectAdapter
+from ai_dev_orchestrator.adapters.github import (
+    GitHubIssueAdapter,
+    GitHubProjectAdapter,
+    GitHubProjectStatusAdapter,
+)
 from ai_dev_orchestrator.config import OrchestratorConfig
 from ai_dev_orchestrator.domain.execution import RunRecord
 from ai_dev_orchestrator.domain.issue import Issue
@@ -30,6 +34,10 @@ class ActiveExecutionReader(Protocol):
 
 class ProjectReader(Protocol):
     def list_items(self) -> tuple[ProjectItem, ...]: ...
+
+
+class ProjectStatusWriter(Protocol):
+    def set_status(self, project_item_id: str, status_name: str) -> None: ...
 
 
 class IssueReader(Protocol):
@@ -86,6 +94,7 @@ class WorkService:
         pipeline: PipelineRunner,
         resume_service: ExecutionResumer,
         base_synchronizer: BaseSynchronizer,
+        status_writer: ProjectStatusWriter | None = None,
     ) -> None:
         self.config = config
         self.store = store
@@ -94,9 +103,11 @@ class WorkService:
         self.pipeline = pipeline
         self.resume_service = resume_service
         self.base_synchronizer = base_synchronizer
+        self.status_writer = status_writer
 
     @classmethod
     def from_config(cls, config: OrchestratorConfig) -> "WorkService":
+        status_writer = GitHubProjectStatusAdapter(config)
         return cls(
             config,
             SqliteExecutionStore(config.state.database_path),
@@ -105,6 +116,7 @@ class WorkService:
             RunPipeline.from_config(config),
             ResumeService.from_config(config),
             GitWorktreeAdapter(),
+            status_writer,
         )
 
     def work(self) -> WorkResult | None:
@@ -150,9 +162,10 @@ class WorkService:
         return WorkResult(resumed=False, run=result)
 
     def _select_issue(self) -> tuple[ProjectItem, Issue] | None:
+        items = self.project_reader.list_items()
         candidates = [
             item
-            for item in self.project_reader.list_items()
+            for item in items
             if is_eligible_for_execution(
                 item,
                 self.config.github.repository_full_name,
@@ -171,4 +184,24 @@ class WorkService:
             issue = self.issue_reader.get_issue(item.issue_number or 0)
             if issue.state == "OPEN":
                 return item, issue
+        backlog = [
+            item
+            for item in items
+            if item.is_issue
+            and item.repository == self.config.github.repository_full_name
+            and item.status == "Backlog"
+            and (not item.agent or item.agent.strip().casefold() == "codex")
+            and item.issue_number is not None
+        ]
+        backlog.sort(
+            key=lambda item: (_PRIORITIES.get((item.priority or "").upper(), 4), item.issue_number or 0)
+        )
+        for item in backlog:
+            issue = self.issue_reader.get_issue(item.issue_number or 0)
+            if issue.state != "OPEN":
+                continue
+            if self.status_writer is None:
+                raise WorkError("Promoção automática Backlog → Ready exige gravador de Status")
+            self.status_writer.set_status(item.id, self.config.github.ready_status)
+            return item, issue
         return None
