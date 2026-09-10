@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import sqlite3
 import tomllib
 from typing import Any, Literal
 
@@ -20,6 +22,10 @@ from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
+)
+from ai_dev_orchestrator.infrastructure.database import (
+    ExecutionStoreError,
+    SqliteExecutionStore,
 )
 
 
@@ -378,7 +384,7 @@ def load_config(path: Path | str | None = None) -> OrchestratorConfig:
         ) from error
 
     try:
-        return OrchestratorConfig(**toml_data)
+        config = OrchestratorConfig(**toml_data)
     except ValidationError as error:
         first_error = error.errors()[0]
         field = ".".join(str(part) for part in first_error["loc"])
@@ -386,3 +392,130 @@ def load_config(path: Path | str | None = None) -> OrchestratorConfig:
         raise ConfigurationError(
             f"Configuração inválida no campo '{field}': {detail}"
         ) from error
+    _migrate_legacy_state(config, config_path)
+    return config
+
+
+def _migrate_legacy_state(config: OrchestratorConfig, config_path: Path) -> None:
+    """Copia uma vez o banco global legado para o namespace do repositorio.
+
+    O original e preservado. Um marcador no proprio banco legado impede que
+    historico sem identidade seja silenciosamente atribuido a dois projetos.
+    """
+    legacy = Path.home() / ".ai-dev-orchestrator" / "orchestrator.db"
+    target = config.state.database_path
+    expected = legacy.parent / config.github.owner / config.github.repository / legacy.name
+    if (
+        target != expected
+        or target.exists()
+        or not legacy.exists()
+        or config_path.resolve().parent != config.workspace.repository_path.resolve()
+        or not (config.workspace.repository_path / ".git").exists()
+    ):
+        return
+
+    identity = config.github.repository_full_name
+    temporary = target.with_name(f".{target.name}.migration.tmp")
+    created_target = False
+    try:
+        with sqlite3.connect(legacy) as source:
+            source.row_factory = sqlite3.Row
+            tables = {
+                row["name"]
+                for row in source.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            if "executions" not in tables:
+                raise ConfigurationError(
+                    "Banco de estado legado invalido: tabela executions ausente"
+                )
+            columns = {
+                row["name"] for row in source.execute("PRAGMA table_info(executions)")
+            }
+            identities = set()
+            if "repository_identity" in columns:
+                identities = {
+                    row[0]
+                    for row in source.execute(
+                        "SELECT DISTINCT repository_identity FROM executions "
+                        "WHERE repository_identity IS NOT NULL"
+                    )
+                }
+            if identities - {identity}:
+                raise ConfigurationError(
+                    "Migracao ambigua: o banco legado contem execucoes de outro repositorio"
+                )
+            count = source.execute("SELECT COUNT(*) FROM executions").fetchone()[0]
+            if not count:
+                return
+
+            source.execute("BEGIN IMMEDIATE")
+            source.execute(
+                "CREATE TABLE IF NOT EXISTS repository_migrations ("
+                "repository_identity TEXT PRIMARY KEY, scoped_path TEXT NOT NULL UNIQUE, "
+                "migrated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+            )
+            claims = source.execute(
+                "SELECT repository_identity, scoped_path FROM repository_migrations"
+            ).fetchall()
+            other_claims = [row for row in claims if row["repository_identity"] != identity]
+            own_claim = next(
+                (row for row in claims if row["repository_identity"] == identity), None
+            )
+            if other_claims:
+                raise ConfigurationError(
+                    "Migracao ambigua: o historico legado sem namespace ja foi "
+                    "associado a outro repositorio"
+                )
+            if own_claim is not None and Path(own_claim["scoped_path"]) != target:
+                raise ConfigurationError(
+                    "Migracao ambigua: o repositorio ja possui outro destino registrado"
+                )
+            source.execute(
+                "INSERT OR IGNORE INTO repository_migrations "
+                "(repository_identity, scoped_path) VALUES (?, ?)",
+                (identity, str(target)),
+            )
+            source.commit()
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if temporary.exists():
+                temporary.unlink()
+            destination = sqlite3.connect(temporary)
+            try:
+                source.backup(destination)
+            finally:
+                destination.close()
+
+        os.replace(temporary, target)
+        created_target = True
+        # A inicializacao tambem promove schemas antigos antes de carimbar a identidade.
+        SqliteExecutionStore(target)
+        migrated = sqlite3.connect(target)
+        try:
+            migrated.execute(
+                "UPDATE executions SET repository_identity = ? "
+                "WHERE repository_identity IS NULL",
+                (identity,),
+            )
+            migrated.commit()
+        finally:
+            migrated.close()
+    except ConfigurationError:
+        raise
+    except (OSError, sqlite3.Error, ExecutionStoreError) as error:
+        if created_target and target.exists():
+            try:
+                target.unlink()
+            except OSError:
+                pass
+        raise ConfigurationError(
+            f"Nao foi possivel migrar o banco de estado legado: {error}"
+        ) from error
+    finally:
+        if temporary.exists():
+            try:
+                temporary.unlink()
+            except OSError:
+                pass

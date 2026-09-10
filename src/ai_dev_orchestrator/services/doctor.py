@@ -33,7 +33,9 @@ from ai_dev_orchestrator.services.review import (
     parse_review_plan,
     parse_structured_review,
 )
-from ai_dev_orchestrator.domain.project_contract import ContractConfidence
+from ai_dev_orchestrator.domain.project_contract import (
+    CommandPlan, ContractConfidence, SourceEvidence,
+)
 from ai_dev_orchestrator.services.project_discovery import ProjectCapabilityResolver
 
 
@@ -104,12 +106,22 @@ class DoctorService:
         if not root.is_dir():
             return []
         try:
+            overrides = tuple(
+                CommandPlan(
+                    gate.name, gate.capability, gate.name, gate.argv, gate.cwd,
+                    gate.timeout_seconds, gate.required,
+                    (SourceEvidence("orchestrator.toml", "explicit_override", gate.name),),
+                    risk_class=ProjectCapabilityResolver._risk(" ".join(gate.argv)),
+                )
+                for gate in config.project.gates
+            )
             contract = ProjectCapabilityResolver().resolve(
                 root,
                 repository_identity=config.github.repository_full_name,
                 base_branch=config.workspace.base_ref,
                 pull_request_target=config.github.pull_request_base,
                 protected_branches=config.github.protected_branches,
+                overrides=overrides,
             )
         except Exception as error:
             return [DoctorCheck("Contrato do projeto", CheckStatus.ERROR, self._safe_message(error))]

@@ -28,6 +28,7 @@ from ai_dev_orchestrator.services.history import HistoryService, format_duration
 from ai_dev_orchestrator.services.supersession import SupersessionError, SupersessionService
 from ai_dev_orchestrator.services.inspect import InspectService, Inspection
 from ai_dev_orchestrator.domain.project import ProjectStatusOption, infer_status_mapping
+from ai_dev_orchestrator.domain.project_contract import ProjectContract
 from ai_dev_orchestrator.services.project_discovery import (
     AiProjectContractInterpreter,
     ProjectCapabilityResolver,
@@ -43,6 +44,21 @@ def _show_version(value: bool) -> None:
     if value:
         typer.echo(__version__)
         raise typer.Exit()
+
+
+def _gate_overrides_from_contract(contract: ProjectContract) -> list[dict[str, object]]:
+    """Serializa a decisao da IA como override estruturado e auditavel."""
+    return [
+        {
+            "name": gate.name,
+            "capability": gate.capability,
+            "argv": gate.argv,
+            "cwd": gate.cwd,
+            "timeout_seconds": gate.timeout_seconds,
+            "required": gate.required,
+        }
+        for gate in (*contract.bootstrap, *contract.gates)
+    ]
 
 
 @app.callback()
@@ -126,6 +142,7 @@ def init_project(
     typer.echo(f"Branches relevantes: {', '.join(found.branches) or 'nenhuma detectada'}")
     for evidence in found.evidence:
         typer.echo(f"Interpretação: {evidence}")
+    ai_resolved_contract = False
     if found.contract is not None and found.contract.ambiguities:
         try:
             from ai_dev_orchestrator.adapters.antigravity import AntigravityAdapter
@@ -142,11 +159,14 @@ def init_project(
             )
             if not interpreted.ambiguities:
                 found = replace(found, contract=interpreted)
+                ai_resolved_contract = True
                 typer.echo("A IA resolveu a ambiguidade com evidências versionadas verificadas.")
         except Exception as error:
             typer.echo(f"IA não resolveu o contrato com segurança: {error}")
     discovered_gates: list[dict[str, object]] = []
     if found.contract is not None:
+        if ai_resolved_contract:
+            discovered_gates.extend(_gate_overrides_from_contract(found.contract))
         typer.echo("\nContrato operacional descoberto")
         typer.echo(f"- confiança: {found.contract.confidence}")
         typer.echo(f"- fingerprint: {found.contract.fingerprint}")

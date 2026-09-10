@@ -26,12 +26,14 @@ class ContractResolutionError(Exception):
 
 _SHELL_OPERATORS = re.compile(r"[;&|<>`\r\n]|\$\(")
 _REMOTE_WORDS = re.compile(
-    r"(?i)(?:^|[-_ :/])(deploy|publish|release|migration|migrate|terraform|secret|infrastructure|cloud)(?:$|[-_ :/])"
+    r"(?i)(?:^|[-_ :/])(deploy|publish|release|migrations?|migrate|terraform|secret|infrastructure|cloud|remote|staging|production)(?:$|[-_ :/])"
 )
 _BOOTSTRAP_WORDS = re.compile(
     r"(?i)\b(install|instalar|restore|restaurar|bootstrap|setup|sync|prepare|preparar|dependenc(?:y|ies)|depend[eê]ncias?)\b"
 )
-_VALIDATION_WORDS = re.compile(r"(?i)\b(test|check|lint|format|verify|validate|build|quality|e2e|unit|integration)\b")
+_VALIDATION_WORDS = re.compile(
+    r"(?i)\b(test(?:s|es)?|check|lint|format|verify|valida(?:te|r|cao|\u00e7\u00e3o)|build|quality|e2e|unit|integration)\b"
+)
 _IGNORED_DIRS = {".git", ".venv", "node_modules", "vendor", "dist", "build", ".tox"}
 
 
@@ -215,7 +217,8 @@ class ProjectCapabilityResolver:
                 lines = path.read_text(encoding="utf-8").splitlines()
             except (OSError, UnicodeError):
                 continue
-            jobs.extend(self._workflow_job_names(lines))
+            if self._workflow_applies_to_pull_request(lines):
+                jobs.extend(self._workflow_job_names(lines))
             step_name = path.stem
             cwd = "."
             number = 0
@@ -248,13 +251,44 @@ class ProjectCapabilityResolver:
                         command = block_line.strip()
                         if command and not command.startswith("#"):
                             commands.append((command, number))
+                    if value.startswith(">") and commands:
+                        commands = [(
+                            " ".join(command for command, _ in commands),
+                            commands[0][1],
+                        )]
                 else:
                     commands.append((value, number))
                 for command, command_line in commands:
+                    semantic_evidence = f"{step_name} {command}"
+                    if not any(
+                        pattern.search(semantic_evidence)
+                        for pattern in (_VALIDATION_WORDS, _BOOTSTRAP_WORDS, _REMOTE_WORDS)
+                    ):
+                        continue
                     candidates.append(_Candidate(step_name, command, cwd, SourceEvidence(
                         path.relative_to(root).as_posix(), "official_ci", command[:300], command_line
                     )))
         return candidates, jobs
+
+    @staticmethod
+    def _workflow_applies_to_pull_request(lines: list[str]) -> bool:
+        """Considera checks apenas de workflows que podem observar um Pull Request."""
+        jobs_start = next(
+            (index for index, line in enumerate(lines) if line.strip() == "jobs:"),
+            len(lines),
+        )
+        header = lines[:jobs_start]
+        on_start = next(
+            (index for index, line in enumerate(header) if re.match(r"^on\s*:", line)),
+            None,
+        )
+        if on_start is None:
+            return True
+        triggers = "\n".join(header[on_start:])
+        return re.search(
+            r"(?m)(?:^\s*|[\[, ]\s*)(pull_request(?:_target)?|merge_group)(?:\s*:|\s*[,\]])",
+            triggers,
+        ) is not None
 
     @staticmethod
     def _workflow_job_names(lines: list[str]) -> list[str]:
@@ -351,10 +385,12 @@ class ProjectCapabilityResolver:
     def _select(self, ci: list[_Candidate], scripts: list[_Candidate], docs: list[_Candidate]) -> list[_Candidate]:
         # CI oficial tem precedência. Documentação só promove comandos que também
         # aparecem em automação ou apontam para um executável versionado.
+        if not ci:
+            return [*scripts, *docs]
         selected = list(ci)
         ci_commands = {item.command.strip() for item in ci}
         selected.extend(item for item in scripts if item.command.strip() in ci_commands)
-        selected.extend(item for item in docs if item.command.strip() in ci_commands or self._looks_versioned(item.command))
+        selected.extend(item for item in docs if item.command.strip() in ci_commands)
         return selected
 
     def _to_plan(self, candidate: _Candidate) -> CommandPlan:
@@ -376,7 +412,13 @@ class ProjectCapabilityResolver:
         if re.search(r"(?i)(?:token|secret|password)\s*=|https?://[^/\s]+@", command):
             raise ContractResolutionError("comando contém credencial ou URL sensível")
         try:
-            argv = tuple(shlex.split(command, posix=True))
+            raw = shlex.split(command, posix=False)
+            argv = tuple(
+                value[1:-1]
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in {"\"", "'"}
+                else value
+                for value in raw
+            )
         except ValueError as error:
             raise ContractResolutionError("comando versionado possui quoting inválido") from error
         if not argv or any("${{" in value or "${" in value or "%(" in value for value in argv):

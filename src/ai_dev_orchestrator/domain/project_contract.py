@@ -92,10 +92,26 @@ class ProjectContract:
             payload = self.to_dict(include_fingerprint=False)
             # O mesmo contrato em outro worktree precisa manter a identidade.
             payload["repository_root"] = "."
+            payload = self._stable_fingerprint_payload(payload)
             digest = sha256(
                 json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest()
             object.__setattr__(self, "fingerprint", digest)
+
+    @classmethod
+    def _stable_fingerprint_payload(cls, value):
+        """Remove localização/apresentação volátil, preservando decisões executáveis."""
+        if isinstance(value, dict):
+            return {
+                key: cls._stable_fingerprint_payload(item)
+                for key, item in value.items()
+                if key not in {"line", "detail"}
+            }
+        if isinstance(value, list):
+            return [cls._stable_fingerprint_payload(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(cls._stable_fingerprint_payload(item) for item in value)
+        return value
 
     def to_dict(self, *, include_fingerprint: bool = True) -> dict[str, object]:
         payload = asdict(self)

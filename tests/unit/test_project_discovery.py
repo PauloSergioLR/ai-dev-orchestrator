@@ -79,6 +79,49 @@ def test_deploy_is_audited_but_never_becomes_local_gate(tmp_path: Path) -> None:
     assert contract.excluded_operations[0].risk_class is RiskClass.REMOTE_MUTATION
 
 
+def test_folded_remote_migration_and_staging_smoke_never_become_local_gates(
+    tmp_path: Path,
+) -> None:
+    workflow(tmp_path, """jobs:
+  deploy:
+    steps:
+      - name: Apply migrations
+        run: >-
+          npx wrangler d1 migrations apply example-staging
+          --remote --env staging
+      - name: Smoke staging
+        run: npm run smoke:staging
+""")
+
+    contract = resolve(tmp_path)
+
+    assert contract.gates == ()
+    assert len(contract.excluded_operations) == 2
+    assert all(
+        plan.risk_class is RiskClass.REMOTE_MUTATION
+        for plan in contract.excluded_operations
+    )
+
+
+def test_dispatch_only_deploy_workflow_is_not_expected_pr_ci(tmp_path: Path) -> None:
+    workflow(tmp_path, """name: Deploy
+on:
+  workflow_dispatch:
+jobs:
+  deploy:
+    name: Deploy staging
+    steps:
+      - name: Deploy staging
+        run: ./deploy --staging
+""")
+
+    contract = resolve(tmp_path)
+
+    assert contract.expected_ci == ()
+    assert contract.gates == ()
+    assert len(contract.excluded_operations) == 1
+
+
 def test_multiline_workflow_accepts_only_standalone_structured_commands(tmp_path: Path) -> None:
     workflow(tmp_path, """jobs:
   ci:
@@ -261,3 +304,100 @@ def test_ai_interpretation_remains_bound_to_repository_evidence(tmp_path: Path) 
 
     assert contract.confidence is ContractConfidence.PROVEN
     assert contract.gates[0].argv == ("oddtool", "--all")
+
+    from ai_dev_orchestrator.cli import _gate_overrides_from_contract
+
+    assert _gate_overrides_from_contract(contract) == [{
+        "name": contract.gates[0].name,
+        "capability": "project-validation",
+        "argv": ("oddtool", "--all"),
+        "cwd": ".",
+        "timeout_seconds": 60,
+        "required": True,
+    }]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "uv run pytest",
+        "npm run test",
+        "dotnet test",
+        "./gradlew test",
+        "./mvnw verify",
+        "go test ./...",
+        "cargo test",
+    ],
+)
+def test_same_resolver_builds_structured_plan_for_multiple_ecosystems(
+    tmp_path: Path, command: str
+) -> None:
+    workflow(
+        tmp_path,
+        f"jobs:\n  validation:\n    steps:\n      - name: Test\n        run: {command}\n",
+    )
+
+    contract = resolve(tmp_path)
+
+    assert contract.confidence is ContractConfidence.PROVEN
+    assert contract.gates[0].argv == ProjectCapabilityResolver._parse_argv(command)
+
+
+def test_documented_command_is_evidence_without_versioned_ci(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text(
+        "Execute os testes com `pytest -q`.", encoding="utf-8"
+    )
+
+    contract = resolve(tmp_path)
+
+    assert contract.gates[0].argv == ("pytest", "-q")
+    assert contract.gates[0].source_evidence[0].kind == "operational_documentation"
+
+
+def test_versioned_script_is_evidence_without_versioned_ci(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(
+        '{"scripts":{"test":"custom-runner --all"}}', encoding="utf-8"
+    )
+
+    contract = resolve(tmp_path)
+
+    assert contract.gates[0].argv == ("custom-runner", "--all")
+    assert contract.gates[0].source_evidence[0].kind == "versioned_script"
+
+
+def test_official_ci_wins_over_contradictory_documentation(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text(
+        "Execute os testes antigos com `./old-check`.", encoding="utf-8"
+    )
+    workflow(
+        tmp_path,
+        "jobs:\n  validation:\n    steps:\n      - name: Test\n        run: ./current-check\n",
+    )
+
+    contract = resolve(tmp_path)
+
+    assert [gate.argv for gate in contract.gates] == [("./current-check",)]
+
+
+def test_windows_paths_keep_backslashes_in_structured_argv() -> None:
+    assert ProjectCapabilityResolver._parse_argv(
+        r'tools\validate.exe --all'
+    ) == (r"tools\validate.exe", "--all")
+    assert ProjectCapabilityResolver._parse_argv(
+        r'".\tools dir\validate.exe" --all'
+    ) == (r".\tools dir\validate.exe", "--all")
+
+
+def test_fingerprint_ignores_cosmetic_evidence_location_changes(tmp_path: Path) -> None:
+    readme = tmp_path / "README.md"
+    readme.write_text("Teste com `custom-check --all`.", encoding="utf-8")
+    first = resolve(tmp_path)
+    readme.write_text(
+        "Introducao atualizada.\n\nTeste com `custom-check --all`.", encoding="utf-8"
+    )
+    cosmetic = resolve(tmp_path)
+    readme.write_text("Teste com `custom-check --strict`.", encoding="utf-8")
+    operational = resolve(tmp_path)
+
+    assert cosmetic.fingerprint == first.fingerprint
+    assert operational.fingerprint != first.fingerprint

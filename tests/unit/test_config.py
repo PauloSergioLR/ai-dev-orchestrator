@@ -63,7 +63,12 @@ def test_allows_valid_direct_instantiation(tmp_path: Path) -> None:
     assert config.state.database_path.parts[-3:] == ("acme", "orchestrator", "orchestrator.db")
 
 
-def test_default_state_is_isolated_by_repository(tmp_path: Path) -> None:
+def test_default_state_is_isolated_by_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
+
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
     common = {
         "execution": {"max_attempts": 1, "max_parallel_runs": 1, "auto_merge": False},
         "workspace": {
@@ -81,6 +86,13 @@ def test_default_state_is_isolated_by_repository(tmp_path: Path) -> None:
     )
 
     assert first.state.database_path != second.state.database_path
+    first_run = SqliteExecutionStore(first.state.database_path).create(
+        1, repository_identity=first.github.repository_full_name
+    )
+    second_run = SqliteExecutionStore(second.state.database_path).create(
+        1, repository_identity=second.github.repository_full_name
+    )
+    assert first_run.id != second_run.id
 
 
 def test_rejects_extra_argument_in_direct_instantiation(tmp_path: Path) -> None:
@@ -253,3 +265,55 @@ def test_environment_variables_override_absolute_workspace_paths(
 
     assert config.workspace.repository_path == repository
     assert config.workspace.worktrees_dir == worktrees
+
+
+def test_migrates_legacy_database_to_repository_namespace_without_deleting_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
+
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    legacy = tmp_path / ".ai-dev-orchestrator" / "orchestrator.db"
+    store = SqliteExecutionStore(legacy)
+    legacy_run = store.create(78, branch="work/legacy", base_ref="main")
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / ".git").mkdir()
+    content = valid_toml(tmp_path).replace(
+        (tmp_path / "repository").as_posix(), repository.as_posix()
+    )
+
+    config = load_config(write_config(repository / "orchestrator.toml", content))
+
+    migrated = SqliteExecutionStore(config.state.database_path).get(legacy_run.id)
+    assert legacy.exists()
+    assert migrated.repository_identity == "acme/orchestrator"
+    assert migrated.issue_number == 78
+
+
+def test_legacy_migration_fails_closed_when_another_repository_claimed_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
+
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    legacy = tmp_path / ".ai-dev-orchestrator" / "orchestrator.db"
+    SqliteExecutionStore(legacy).create(1, branch="work/legacy", base_ref="main")
+    first = tmp_path / "first"
+    first.mkdir()
+    (first / ".git").mkdir()
+    first_content = valid_toml(tmp_path).replace(
+        (tmp_path / "repository").as_posix(), first.as_posix()
+    )
+    load_config(write_config(first / "orchestrator.toml", first_content))
+    second = tmp_path / "second"
+    second.mkdir()
+    (second / ".git").mkdir()
+    second_content = first_content.replace('repository = "orchestrator"', 'repository = "other"').replace(
+        first.as_posix(), second.as_posix()
+    )
+
+    with pytest.raises(ConfigurationError, match="outro reposit"):
+        load_config(write_config(second / "orchestrator.toml", second_content))
+
+    assert legacy.exists()
