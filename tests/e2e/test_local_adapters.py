@@ -4,14 +4,21 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from ai_dev_orchestrator.adapters.antigravity import AntigravityAdapter
+from ai_dev_orchestrator.adapters.github import PullRequest
 from ai_dev_orchestrator.adapters.codex import CodexAdapter, CodexProviderFailure
+from ai_dev_orchestrator.domain.ci import CiResult, CiStatus
+from ai_dev_orchestrator.domain.issue import Issue
 from ai_dev_orchestrator.domain.provider import ProviderFailure, ProviderFailureKind
+from ai_dev_orchestrator.domain.worktree import GitWorktree
 from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner, OutputPolicy
+from ai_dev_orchestrator.services.pipeline import RunPipeline
 from ai_dev_orchestrator.services.validation import LocalValidationError, LocalValidationService
 
 
@@ -94,6 +101,58 @@ def test_antigravity_fail_closed_para_contrato_e_quota(payload, expected) -> Non
             pytest.fail("resposta inválida do reviewer deveria falhar fechada")
         assert failure is not None
         assert failure.classification == expected
+
+
+class ReviewReader:
+    def __init__(self, head: str) -> None:
+        self.head = head
+
+    def get_review_data(self, number: int):
+        return {
+            "number": number, "url": "https://example.test/pr/1", "baseRefName": "main",
+            "headRefName": "work/e2e", "headRefOid": self.head, "commits": [self.head],
+            "files": ["src/process.py"], "diff": "diff --git a/x b/x",
+        }
+
+
+class TwoStageReviewer:
+    def __init__(self, failure_at: int) -> None:
+        self.failure_at = failure_at
+        self.calls: list[dict] = []
+
+    def invoke(self, prompt: str, cwd, schema: dict) -> str:
+        self.calls.append(schema)
+        if len(self.calls) == self.failure_at:
+            raise ProviderFailure("gemini", ProviderFailureKind.NETWORK_ERROR,
+                                  "falha roteirizada", datetime.now(timezone.utc))
+        return json.dumps({field: [] for field in schema["required"]})
+
+
+@pytest.mark.parametrize("failure_at", [1, 2])
+def test_falha_em_cada_etapa_do_review_nao_libera_review_ou_merge(tmp_path: Path, failure_at: int) -> None:
+    """O plano e o StructuredReview são chamadas distintas e ambas são fail-closed."""
+    head = "a" * 40
+    reviewer = TwoStageReviewer(failure_at)
+    pipeline = object.__new__(RunPipeline)
+    pipeline.review_reader = ReviewReader(head)
+    pipeline.reviewer = reviewer
+    pipeline.config = SimpleNamespace(review=SimpleNamespace(blocking_severities=("CRITICAL", "HIGH", "MEDIUM")))
+    worktree = GitWorktree(tmp_path, tmp_path, "work/e2e", "main")
+    issue = Issue(67, "review e2e", "body", "OPEN", "url", (), ())
+    pull_request = PullRequest(1, "https://example.test/pr/1", "PR", "main", "work/e2e")
+    ci = CiResult(head, (), CiStatus.SUCCESS)
+
+    failure = None
+    try:
+        pipeline._review_head(issue, worktree, pull_request, head, (), ci, ())
+    except ProviderFailure as raised:
+        failure = raised
+    else:
+        pytest.fail("falha do reviewer não pode produzir aprovação")
+
+    assert failure is not None
+    assert len(reviewer.calls) == failure_at
+    assert reviewer.calls[0].get("required") != reviewer.calls[-1].get("required") or failure_at == 1
 
 
 def test_gates_locais_preservam_return_code_mesmo_com_saida_cp1252(tmp_path: Path) -> None:

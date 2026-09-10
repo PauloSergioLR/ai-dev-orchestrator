@@ -17,6 +17,7 @@ from ai_dev_orchestrator.domain.recovery import (
     WorktreeState,
 )
 from ai_dev_orchestrator.domain.review import FindingSeverity, ReviewFinding, ReviewVerdict, StructuredReview
+from ai_dev_orchestrator.domain.provider import ProviderFailure
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
 from ai_dev_orchestrator.services.recovery_executor import CommitResult, RecoveryExecutor
 from ai_dev_orchestrator.services.recovery_planner import RecoveryPlanner
@@ -43,6 +44,8 @@ class LocalWorld:
     calls: list[str] = field(default_factory=list)
     review_prompts: list[str] = field(default_factory=list)
     crash_after: str | None = None
+    provider_failure_at: str | None = None
+    provider_failure: ProviderFailure | None = None
     _prepared: bool = False
 
     def _crash(self, boundary: str) -> None:
@@ -103,6 +106,9 @@ class LocalWorld:
     def resume_correction(self, run: RunRecord, findings: tuple[ReviewFinding, ...]) -> str:
         self.calls.append("resume_correction")
         assert findings
+        if self.provider_failure_at == "resume_correction" and self.provider_failure:
+            self.provider_failure_at = None
+            raise self.provider_failure
         return run.codex_session_id or ""
 
     def merge_pull_request(self, run: RunRecord) -> MergeObservation:
@@ -152,8 +158,10 @@ class WorldObserver:
         )
 
 
-def make_service(tmp_path: Path, world: LocalWorld, issue: int = 67) -> tuple[SqliteExecutionStore, ResumeService, RunRecord]:
-    store = SqliteExecutionStore(tmp_path / f"e2e-{issue}.db")
+def make_service(
+    tmp_path: Path, world: LocalWorld, issue: int = 67, *, database_path: Path | None = None
+) -> tuple[SqliteExecutionStore, ResumeService, RunRecord]:
+    store = SqliteExecutionStore(database_path or tmp_path / f"e2e-{issue}.db")
     run = store.create(issue, project_item_id=f"item-{issue}", branch=f"work/issue-{issue}",
                        worktree_path=f"C:/e2e/{issue}", base_ref="main")
     policy = RecoveryPolicy("acme/repo", "main", True, 3)

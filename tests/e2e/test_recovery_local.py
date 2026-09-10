@@ -71,6 +71,30 @@ def test_head_remoto_divergente_e_project_inconsistente_bloqueiam_sem_merge(tmp_
     assert_invariants(store, 67)
 
 
+def test_pr_mergeado_manualmente_e_reconciliado_sem_segundo_merge(tmp_path) -> None:
+    world = LocalWorld(reject_first_review=False)
+    store, service, original = make_service(tmp_path, world)
+    world._prepared = world.pr_exists = world.merged = True
+    world.local_head = world.remote_head = HEAD_ONE
+    run = store.transition(original.id, ExecutionPhase.CODEX_RUNNING, summary="worktree", current_head_sha=HEAD_ONE)
+    run = store.transition(run.id, ExecutionPhase.TESTING, summary="sessão", codex_session_id="sessao-unica")
+    run = store.transition(run.id, ExecutionPhase.COMMIT_PENDING, summary="gates")
+    run = store.transition(run.id, ExecutionPhase.PUSH_PENDING, summary="commit")
+    run = store.transition(run.id, ExecutionPhase.PR_PENDING, summary="push")
+    run = store.transition(run.id, ExecutionPhase.WAITING_CI, summary="pr", pull_request_number=1, pull_request_url="https://example.test/acme/repo/pull/1")
+    run = store.transition(run.id, ExecutionPhase.GEMINI_REVIEWING, summary="ci", ci_head_sha=HEAD_ONE)
+    store.transition(run.id, ExecutionPhase.MERGE_PENDING, summary="review aprovada", reviewed_head_sha=HEAD_ONE,
+                     review_verdict="APPROVED")
+
+    result = service.resume(67)
+    reconciled = assert_invariants(store, 67)
+
+    assert result.phase == ExecutionPhase.COMPLETED.value
+    assert reconciled.id == original.id
+    assert world.calls == ["done"]
+    assert reconciled.merge_commit_sha
+
+
 @pytest.mark.parametrize("kind", [ProviderFailureKind.NETWORK_ERROR, ProviderFailureKind.TIMEOUT])
 def test_falhas_transitorias_preservam_identidade_e_permite_retry(tmp_path, kind) -> None:
     world = LocalWorld()
@@ -117,16 +141,57 @@ def test_quota_com_janela_conhecida_retomara_mesma_sessao(tmp_path) -> None:
     assert_invariants(store, 67)
 
 
-def test_duas_issues_isoladas_e_human_required_nao_corrompe_outra(tmp_path) -> None:
+def test_quota_no_resume_da_correcao_preserva_sessao_pr_e_nao_faz_merge(tmp_path) -> None:
+    quota = ProviderFailure("codex", ProviderFailureKind.TERMINAL_QUOTA, "You've hit your usage limit",
+                            datetime.now(timezone.utc), session_id="sessao-unica")
+    world = LocalWorld(provider_failure_at="resume_correction", provider_failure=quota)
+    store, service, original = make_service(tmp_path, world)
+
+    result = service.resume(67)
+    waiting = assert_invariants(store, 67)
+
+    assert result.phase == ExecutionPhase.WAITING_CODEX_QUOTA.value
+    assert waiting.id == original.id
+    assert waiting.codex_session_id == "sessao-unica"
+    assert waiting.pull_request_number == 1
+    assert waiting.provider_resume_phase == ExecutionPhase.CODEX_RUNNING.value
+    assert world.calls.count("resume_correction") == 1
+    assert "merge" not in world.calls
+
+
+def test_duas_issues_no_mesmo_journal_sao_isoladas_e_vaga_reabre_apos_conclusao(tmp_path) -> None:
     first = LocalWorld()
     second = LocalWorld(reject_first_review=False)
-    store_a, service_a, run_a = make_service(tmp_path, first, 67)
-    store_b, service_b, run_b = make_service(tmp_path, second, 68)
-    # Bancos separados simulam workers paralelos sem compartilhamento de adapters remotos.
+    database = tmp_path / "paralelo.db"
+    store_a, service_a, run_a = make_service(tmp_path, first, 67, database_path=database)
+    store_b, service_b, run_b = make_service(tmp_path, second, 68, database_path=database)
     store_a.require_human(run_a.id, summary="quota requer ação", reason="QUOTA")
     result = service_b.resume(68)
 
     assert store_a.get(run_a.id).phase == ExecutionPhase.HUMAN_REQUIRED
     assert result.phase == ExecutionPhase.COMPLETED.value
+    assert store_b.list_active() == (store_a.get(run_a.id),)
+    assert_invariants(store_a, 67)
+    assert_invariants(store_b, 68)
+
+
+def test_ctrl_c_na_observacao_preserva_checkpoint_de_todas_as_execucoes(tmp_path) -> None:
+    database = tmp_path / "interrompido.db"
+    first = LocalWorld()
+    second = LocalWorld()
+    store_a, service_a, run_a = make_service(tmp_path, first, 67, database_path=database)
+    store_b, _, run_b = make_service(tmp_path, second, 68, database_path=database)
+
+    class InterruptingObserver:
+        def observe(self, run):
+            raise KeyboardInterrupt
+
+    service_a.observer = InterruptingObserver()
+    with pytest.raises(KeyboardInterrupt):
+        service_a.resume(67)
+
+    assert store_a.get(run_a.id).phase == ExecutionPhase.PREPARING
+    assert store_b.get(run_b.id).phase == ExecutionPhase.PREPARING
+    assert store_a.events(run_a.id)[-1].summary == "Retomada interrompida"
     assert_invariants(store_a, 67)
     assert_invariants(store_b, 68)
