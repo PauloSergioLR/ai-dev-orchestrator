@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -414,7 +415,7 @@ def test_cli_rejects_state_without_deep() -> None:
     result = CliRunner().invoke(app, ["doctor", "--state"])
 
     assert result.exit_code == 2
-    assert "--state exige --deep" in result.output
+    assert "--state exige --deep" in re.sub(r"\x1b\[[0-9;]*m", "", result.output)
 
 
 def test_cli_deep_warns_and_displays_diagnostic_scopes(
