@@ -1,3 +1,0 @@
-[mcp_servers.code-review-graph]
-command="crg"
-args=["serve"]
