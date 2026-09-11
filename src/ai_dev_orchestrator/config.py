@@ -231,6 +231,26 @@ class ProviderConfig(BaseModel):
         return "default" if value.casefold() in {"auto", "default"} else value
 
 
+class CodeReviewGraphConfig(BaseModel):
+    """Integração externa, opcional e fail-open com o Code Review Graph."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    enabled: StrictBool = False
+    command: tuple[str, ...] = (
+        "uvx", "--from", "code-review-graph==2.3.8", "code-review-graph"
+    )
+    required_version: str = Field(default="2.3.8", pattern=r"^\d+\.\d+\.\d+$")
+    timeout_seconds: float = Field(default=180, gt=0)
+
+    @field_validator("command")
+    @classmethod
+    def command_must_be_structured(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value or any(not part or "\x00" in part for part in value):
+            raise ValueError("deve conter argumentos não vazios")
+        return value
+
+
 class SupervisorConfig(BaseModel):
     """Política conservadora do modo desacompanhado."""
 
@@ -334,6 +354,9 @@ class OrchestratorConfig(BaseSettings):
     convergence: ConvergenceConfig = Field(default_factory=ConvergenceConfig)
     review: ReviewConfig = Field(default_factory=ReviewConfig)
     providers: ProviderConfig = Field(default_factory=ProviderConfig)
+    code_review_graph: CodeReviewGraphConfig = Field(
+        default_factory=CodeReviewGraphConfig
+    )
     supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
     notifications: NotificationConfig = Field(default_factory=NotificationConfig)
     cleanup: CleanupConfig = Field(default_factory=CleanupConfig)

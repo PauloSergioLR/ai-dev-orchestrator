@@ -20,6 +20,13 @@ remote_name = "origin"
 codex_model = "default"
 gemini_model = "default"
 
+[code_review_graph]
+# Integração externa e fail-open. O uvx baixa/executa somente a versão pinada.
+enabled = false
+command = ["uvx", "--from", "code-review-graph==2.3.8", "code-review-graph"]
+required_version = "2.3.8"
+timeout_seconds = 180
+
 [execution]
 max_attempts = 2
 max_parallel_runs = 1

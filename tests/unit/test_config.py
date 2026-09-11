@@ -41,6 +41,23 @@ def test_loads_a_valid_toml(tmp_path: Path) -> None:
     assert config.github.project_number == 42
     assert config.execution.auto_merge is False
     assert (config.workspace.remote_name, config.github.pull_request_base, config.github.ai_review_status) == ("origin", "main", "AI Review")
+    assert config.code_review_graph.enabled is False
+    assert config.code_review_graph.required_version == "2.3.8"
+
+
+def test_loads_controlled_code_review_graph_configuration(tmp_path: Path) -> None:
+    content = valid_toml(tmp_path) + '''
+[code_review_graph]
+enabled = true
+command = ["uvx", "--from", "code-review-graph==2.3.8", "code-review-graph"]
+required_version = "2.3.8"
+timeout_seconds = 90
+'''
+
+    loaded = load_config(write_config(tmp_path / "config.toml", content))
+
+    assert loaded.code_review_graph.enabled is True
+    assert loaded.code_review_graph.command[0] == "uvx"
 
 
 def test_accepts_absolute_workspace_paths(tmp_path: Path) -> None:

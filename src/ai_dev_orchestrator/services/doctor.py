@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+import json
 from pathlib import Path
 import shutil
 import sys
 from tempfile import TemporaryDirectory
+import tomllib
 from typing import Sequence
 
 from ai_dev_orchestrator.adapters.antigravity import AntigravityAdapter, AntigravityError
@@ -37,6 +39,7 @@ from ai_dev_orchestrator.domain.project_contract import (
     CommandPlan, ContractConfidence, SourceEvidence,
 )
 from ai_dev_orchestrator.services.project_discovery import ProjectCapabilityResolver
+from ai_dev_orchestrator.services.code_review_graph import CodeReviewGraphIntegrator
 
 
 class CheckStatus(StrEnum):
@@ -87,6 +90,7 @@ class DoctorService:
             self._check_repository(),
             self._check_configuration(),
         ]
+        checks.extend(self._check_code_review_graph())
         checks.extend(self._check_project_contract())
         if not deep:
             return checks
@@ -148,6 +152,108 @@ class DoctorService:
                 f"risco={plan.risk_class}; evidência={plan.source_evidence[0].path}",
             ))
         return checks
+
+    def _check_code_review_graph(self) -> list[DoctorCheck]:
+        """Valida pacote, grafo e configurações MCP sem alterá-los."""
+        try:
+            config = load_config(self.config_path)
+        except ConfigurationError:
+            return []
+        crg = config.code_review_graph
+        if not crg.enabled:
+            return [DoctorCheck(
+                "Code Review Graph", CheckStatus.OK,
+                "desabilitado; habilite [code_review_graph] para usar a integração",
+            )]
+
+        integrator = CodeReviewGraphIntegrator(crg, self.runner)
+        observed, error = integrator.version()
+        if error:
+            package = DoctorCheck(
+                "Code Review Graph", CheckStatus.WARNING,
+                f"indisponível ({error}); instale a versão {crg.required_version} "
+                "ou ajuste code_review_graph.command; o pipeline fará fallback",
+            )
+        elif observed != crg.required_version:
+            package = DoctorCheck(
+                "Code Review Graph", CheckStatus.WARNING,
+                f"versão incompatível: {observed}; esperada {crg.required_version}; "
+                "instale a versão configurada",
+            )
+        else:
+            package = DoctorCheck(
+                "Code Review Graph", CheckStatus.OK, f"versão {observed} compatível"
+            )
+
+        root = config.workspace.repository_path
+        stats, status_error = (
+            integrator.status(root) if root.is_dir() and package.status is CheckStatus.OK
+            else (None, "repositório ou pacote indisponível")
+        )
+        graph = DoctorCheck(
+            "Grafo CRG",
+            CheckStatus.OK if stats is not None else CheckStatus.WARNING,
+            (
+                f"íntegro; {stats['nodes']} nós, {stats['edges']} arestas, "
+                f"{stats['files']} arquivos"
+                if stats is not None else
+                f"ausente ou inválido ({status_error}); será construído no primeiro uso"
+            ),
+        )
+        return [
+            package,
+            graph,
+            self._check_codex_mcp(),
+            self._check_antigravity_mcp(),
+        ]
+
+    def _check_codex_mcp(self) -> DoctorCheck:
+        path = Path.home() / ".codex" / "config.toml"
+        if not path.exists():
+            return DoctorCheck(
+                "MCP CRG Codex", CheckStatus.OK,
+                "configurado pelo orquestrador por execução e escopado ao worktree",
+            )
+        try:
+            with path.open("rb") as stream:
+                data = tomllib.load(stream)
+            configured = self._valid_mcp_entry(
+                data.get("mcp_servers", {}).get("code-review-graph")
+            )
+        except (OSError, tomllib.TOMLDecodeError, AttributeError):
+            configured = False
+        return DoctorCheck(
+            "MCP CRG Codex",
+            CheckStatus.OK if configured else CheckStatus.WARNING,
+            "configuração encontrada" if configured else
+            "config.toml existente é inválido; corrija-o ou execute "
+            "code-review-graph install --platform codex",
+        )
+
+    def _check_antigravity_mcp(self) -> DoctorCheck:
+        path = Path.home() / ".gemini" / "antigravity" / "mcp_config.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            configured = self._valid_mcp_entry(
+                data.get("mcpServers", {}).get("code-review-graph")
+            )
+        except (OSError, json.JSONDecodeError, AttributeError):
+            configured = False
+        return DoctorCheck(
+            "MCP CRG Antigravity",
+            CheckStatus.OK if configured else CheckStatus.WARNING,
+            "configuração encontrada" if configured else
+            "ausente ou inválida; o pipeline tentará configurá-la atomicamente antes "
+            "do review; ou execute code-review-graph install --platform antigravity",
+        )
+
+    @staticmethod
+    def _valid_mcp_entry(entry: object) -> bool:
+        if not isinstance(entry, dict) or not isinstance(entry.get("command"), str):
+            return False
+        args = entry.get("args")
+        return isinstance(args, list) and all(isinstance(arg, str) for arg in args) \
+            and "serve" in args
 
     def _deep_provider_checks(self) -> list[DoctorCheck]:
         """Exercita providers somente em um diretório temporário descartável."""

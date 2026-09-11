@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ from ai_dev_orchestrator.domain.provider import (
 
 
 CODEX_TIMEOUT_SECONDS = 30 * 60
+logger = logging.getLogger(__name__)
 
 
 class CodexError(Exception):
@@ -58,14 +60,17 @@ class CodexAdapter:
         runner: ProcessRunner | None = None,
         timeout: float = CODEX_TIMEOUT_SECONDS,
         model: str = "default",
+        code_review_graph_command: tuple[str, ...] = (),
     ) -> None:
         self.runner = runner if runner is not None else CommandRunner(timeout=timeout)
         self.model = model
+        self.code_review_graph_command = code_review_graph_command
 
     def execute(self, worktree: str | Path, prompt: str) -> CodexExecution:
         """Inicia uma sessão persistida do Codex no worktree explicitamente informado."""
         path = self._validate_worktree(worktree)
         arguments = ["codex", "exec", "-C", str(path), "--json"]
+        arguments.extend(self._mcp_arguments(path))
         if self.model != "default":
             arguments.extend(["--model", self.model])
         result, session_id, final_message = self._run([*arguments, "-"], prompt, "executar")
@@ -86,6 +91,7 @@ class CodexAdapter:
             raise CodexError("O identificador da sessão Codex é obrigatório para retomar")
         path = self._validate_worktree(worktree)
         arguments = ["codex", "exec", "-C", str(path), "--json"]
+        arguments.extend(self._mcp_arguments(path))
         if self.model != "default":
             arguments.extend(["--model", self.model])
         result, returned_session_id, final_message = self._run(
@@ -107,6 +113,19 @@ class CodexAdapter:
             stderr=result.stderr,
             succeeded=True,
         )
+
+    def _mcp_arguments(self, worktree: Path) -> list[str]:
+        """Escopa o MCP CRG ao worktree sem depender de configuração global."""
+        if not self.code_review_graph_command:
+            return []
+        command, *prefix = self.code_review_graph_command
+        values = (
+            f"mcp_servers.code-review-graph.command={json.dumps(command)}",
+            f"mcp_servers.code-review-graph.args={json.dumps([*prefix, 'serve'])}",
+            f"mcp_servers.code-review-graph.cwd={json.dumps(str(worktree))}",
+            "mcp_servers.code-review-graph.required=false",
+        )
+        return [part for value in values for part in ("-c", value)]
 
     @staticmethod
     def _validate_worktree(worktree: str | Path) -> Path:
@@ -200,6 +219,13 @@ class CodexAdapter:
             except CodexError as error:
                 fail(ProviderFailureKind.PROTOCOL_ERROR, "JSONL", message=str(error),
                      diagnostic_context=diagnostic)
+            crg_calls, file_reads, input_tokens, output_tokens = self._context_metrics(events)
+            logger.info(
+                "Contexto Codex: CRG=%d chamada(s); leituras amplas=%d; "
+                "tokens entrada=%s; tokens saída=%s",
+                crg_calls, file_reads, input_tokens or "indisponível",
+                output_tokens or "indisponível",
+            )
             return result, session_id, final_message
 
         structured = self._structured_failure(events)
@@ -213,6 +239,44 @@ class CodexAdapter:
             failure_diagnostic = self._diagnostic_context(events, terminal, result.returncode, source)
             fail(kind, source, retry, message,
                  failure_diagnostic if kind == ProviderFailureKind.UNKNOWN else None)
+
+    @staticmethod
+    def _context_metrics(
+        events: list[dict[str, Any]],
+    ) -> tuple[int, int, int | None, int | None]:
+        """Extrai métricas estáveis quando o protocolo do provider as expõe."""
+        crg_calls = 0
+        file_reads = 0
+        token_values: dict[str, list[int]] = {"input_tokens": [], "output_tokens": []}
+
+        def visit(value: Any) -> None:
+            nonlocal crg_calls, file_reads
+            if isinstance(value, dict):
+                kind = str(value.get("type", "")).casefold()
+                serialized = json.dumps(value, ensure_ascii=False).casefold()
+                if "mcp" in kind and "code-review-graph" in serialized:
+                    crg_calls += 1
+                if kind in {"command_execution", "command"}:
+                    command = str(value.get("command", "")).casefold()
+                    if any(marker in command for marker in ("rg ", "grep ", "get-content", "sed ", "cat ")):
+                        file_reads += 1
+                for key in token_values:
+                    observed = value.get(key)
+                    if isinstance(observed, int) and not isinstance(observed, bool):
+                        token_values[key].append(observed)
+                for nested in value.values():
+                    visit(nested)
+            elif isinstance(value, list):
+                for nested in value:
+                    visit(nested)
+
+        visit(events)
+        return (
+            crg_calls,
+            file_reads,
+            max(token_values["input_tokens"], default=None),
+            max(token_values["output_tokens"], default=None),
+        )
 
     @staticmethod
     def _structured_failure(events: list[dict[str, Any]]) -> tuple[ProviderFailureKind, datetime | None] | None:

@@ -33,6 +33,10 @@ from ai_dev_orchestrator.services.convergence import (
 )
 from ai_dev_orchestrator.domain.project_contract import ProjectContract
 from ai_dev_orchestrator.services.project_discovery import ProjectCapabilityResolver
+from ai_dev_orchestrator.services.code_review_graph import (
+    CodeReviewGraphIntegrator,
+    GRAPH_INSTRUCTION,
+)
 
 
 class ProjectStatusWriter(Protocol):
@@ -51,7 +55,14 @@ class RecoveryEffects:
     ) -> None:
         self.config = config
         self.worktrees = GitWorktreeAdapter()
-        self.codex = CodexAdapter(model=config.providers.codex_model)
+        self.codex = CodexAdapter(
+            model=config.providers.codex_model,
+            code_review_graph_command=(
+                config.code_review_graph.command
+                if config.code_review_graph.enabled else ()
+            ),
+        )
+        self.graph_integrator = CodeReviewGraphIntegrator(config.code_review_graph)
         self.validation = LocalValidationService()
         self.publication = GitPublicationAdapter()
         self.issues = GitHubIssueAdapter(config)
@@ -73,16 +84,29 @@ class RecoveryEffects:
 
     def start_codex(self, run: RunRecord) -> str:
         issue = self.issues.get_issue(run.issue_number)
-        return self.codex.execute(run.worktree_path or "", build_initial_prompt(issue)).session_id
+        self._prepare_graph(run)
+        return self.codex.execute(
+            run.worktree_path or "",
+            build_initial_prompt(
+                issue, use_code_review_graph=self.config.code_review_graph.enabled
+            ),
+        ).session_id
 
     def resume_codex(self, run: RunRecord) -> str:
-        return self.codex.resume(run.worktree_path or "", run.codex_session_id or "", f"Continue a Issue #{run.issue_number} no mesmo worktree.").session_id
+        self._prepare_graph(run)
+        prompt = f"Continue a Issue #{run.issue_number} no mesmo worktree."
+        if self.config.code_review_graph.enabled:
+            prompt += f"\n\n{GRAPH_INSTRUCTION}"
+        return self.codex.resume(run.worktree_path or "", run.codex_session_id or "", prompt).session_id
 
     def resume_local_failure(self, run: RunRecord, diagnostic: str) -> str:
         prompt = (
             "Corrija somente a falha determinística dos gates locais abaixo, no mesmo "
             "worktree. Não faça commit, push, PR ou merge.\n\n" + diagnostic[:500]
         )
+        if self.config.code_review_graph.enabled:
+            prompt += f"\n\n{GRAPH_INSTRUCTION}"
+        self._prepare_graph(run)
         return self.codex.resume(run.worktree_path or "", run.codex_session_id or "", prompt).session_id
 
     def run_local_gates(self, run: RunRecord):
@@ -130,6 +154,9 @@ class RecoveryEffects:
             "a causa no mesmo worktree e execute os gates locais. Não crie outro PR, "
             "não faça merge e mantenha esta mesma sessão Codex."
         )
+        if self.config.code_review_graph.enabled:
+            prompt += f"\n\n{GRAPH_INSTRUCTION}"
+        self._prepare_graph(run)
         return self.codex.resume(run.worktree_path or "", run.codex_session_id, prompt).session_id
 
     def _wait_ci_result(self, run: RunRecord):
@@ -151,7 +178,8 @@ class RecoveryEffects:
         pipeline = RunPipeline(self.config, self.issues, self.projects, self.projects,
                                self.worktrees, self.codex, self.validation, self.publication,
                                self.pull_requests, self.pull_requests, self.pull_requests,
-                               self.reviewer, self.pull_requests, project_contract=contract)
+                               self.reviewer, self.pull_requests, project_contract=contract,
+                               graph_integrator=getattr(self, "graph_integrator", None))
         worktree = GitWorktree(self.config.workspace.repository_path, Path(run.worktree_path or ""), run.branch or "", run.base_ref or "")
         pull = PullRequest(run.pull_request_number, run.pull_request_url, issue.title, self.config.github.pull_request_base, run.branch or "")
         return pipeline._review_head(issue, worktree, pull, run.current_head_sha, gates, ci_result, prior_findings)
@@ -186,8 +214,17 @@ class RecoveryEffects:
             raise ValueError("Contexto de correção incompleto")
         issue = self.issues.get_issue(run.issue_number)
         rejected = StructuredReview(ReviewVerdict.REJECTED, findings, run.reviewed_head_sha, "Findings persistidos")
-        prompt = CorrectionContextBuilder().build(issue, run.pull_request_number, run.pull_request_url, run.reviewed_head_sha, rejected, ())
+        prompt = CorrectionContextBuilder().build(
+            issue, run.pull_request_number, run.pull_request_url,
+            run.reviewed_head_sha, rejected, (),
+            use_code_review_graph=self.config.code_review_graph.enabled,
+        )
+        self._prepare_graph(run)
         return self.codex.resume(run.worktree_path or "", run.codex_session_id or "", prompt).session_id
+
+    def _prepare_graph(self, run: RunRecord) -> None:
+        if self.config.code_review_graph.enabled and run.worktree_path:
+            self.graph_integrator.prepare(run.worktree_path)
 
     def merge_pull_request(self, run: RunRecord) -> MergeObservation:
         if not run.pull_request_number or not run.pull_request_url or not run.reviewed_head_sha:

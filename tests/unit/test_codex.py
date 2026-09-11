@@ -61,6 +61,35 @@ def test_executes_headless_in_explicit_worktree_and_captures_session(tmp_path: P
     assert "--last" not in runner.arguments
 
 
+def test_configures_optional_crg_mcp_for_each_worktree(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    runner = FakeRunner(CommandResult(0, jsonl()))
+
+    CodexAdapter(
+        runner, code_review_graph_command=("uvx", "--from", "code-review-graph==2.3.8")
+    ).execute(worktree, "Implemente")
+
+    joined = "\n".join(runner.arguments)
+    assert "mcp_servers.code-review-graph.command" in joined
+    assert "code-review-graph==2.3.8" in joined
+    assert "mcp_servers.code-review-graph.required=false" in joined
+    assert str(worktree.resolve()) in joined
+
+
+def test_extracts_context_metrics_exposed_by_provider() -> None:
+    events = [{
+        "type": "turn.completed",
+        "usage": {"input_tokens": 1200, "output_tokens": 80},
+        "items": [
+            {"type": "mcp_tool_call", "server": "code-review-graph"},
+            {"type": "command_execution", "command": "rg -n service src"},
+        ],
+    }]
+
+    assert CodexAdapter._context_metrics(events) == (1, 1, 1200, 80)
+
+
 def test_resumes_explicit_session_in_explicit_worktree(tmp_path: Path) -> None:
     worktree = tmp_path / "worktree"
     worktree.mkdir()

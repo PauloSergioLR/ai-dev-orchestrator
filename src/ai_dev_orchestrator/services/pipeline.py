@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import logging
 from pathlib import Path, PureWindowsPath
 import re
 from typing import Protocol
@@ -60,6 +61,13 @@ from ai_dev_orchestrator.domain.provider import ProviderFailure
 from ai_dev_orchestrator.domain.project_contract import CommandPlan, ProjectContract, SourceEvidence
 from ai_dev_orchestrator.services.project_discovery import ProjectCapabilityResolver
 from ai_dev_orchestrator.services.validation import LocalValidationError
+from ai_dev_orchestrator.services.code_review_graph import (
+    CodeReviewGraphIntegrator,
+    GRAPH_INSTRUCTION,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 class RunPipelineError(Exception):
@@ -187,7 +195,7 @@ def derive_worktree_path(worktrees_dir: Path, branch: str) -> Path:
     return candidate
 
 
-def build_initial_prompt(issue: Issue) -> str:
+def build_initial_prompt(issue: Issue, *, use_code_review_graph: bool = False) -> str:
     """Monta o prompt inicial de forma determinística, sem consultar providers."""
     return (
         f"Implemente a Issue #{issue.number}: {issue.title}\n\n"
@@ -197,6 +205,7 @@ def build_initial_prompt(issue: Issue) -> str:
         "Leia e respeite o AGENTS.md do repositório/worktree. Trabalhe somente no escopo "
         "desta Issue. Nesta etapa, não faça commit, push, Pull Request ou merge. "
         "Execute as validações pedidas pela própria Issue quando aplicável."
+        + (f"\n\n{GRAPH_INSTRUCTION}" if use_code_review_graph else "")
     )
 
 
@@ -221,6 +230,7 @@ class RunPipeline:
         execution_store: ExecutionStore | None = None,
         convergence: ConvergencePoller | None = None,
         project_contract: ProjectContract | None = None,
+        graph_integrator: CodeReviewGraphIntegrator | None = None,
     ) -> None:
         self.config = config
         self.issue_reader = issue_reader
@@ -238,6 +248,9 @@ class RunPipeline:
         self.execution_store = execution_store
         self.convergence = convergence or ConvergencePoller(config.convergence)
         self.project_contract = project_contract
+        self.graph_integrator = graph_integrator or CodeReviewGraphIntegrator(
+            config.code_review_graph
+        )
         self._execution_id: str | None = None
 
     @classmethod
@@ -274,7 +287,13 @@ class RunPipeline:
             GitHubProjectAdapter(config),
             GitHubProjectStatusAdapter(config),
             GitWorktreeAdapter(),
-            CodexAdapter(model=config.providers.codex_model),
+            CodexAdapter(
+                model=config.providers.codex_model,
+                code_review_graph_command=(
+                    config.code_review_graph.command
+                    if config.code_review_graph.enabled else ()
+                ),
+            ),
             LocalValidationService(),
             GitPublicationAdapter(),
             pull_requests,
@@ -287,6 +306,7 @@ class RunPipeline:
             pull_requests,
             SqliteExecutionStore(config.state.database_path),
             project_contract=contract,
+            graph_integrator=CodeReviewGraphIntegrator(config.code_review_graph),
         )
 
     def run(self, issue_number: int, branch: str, *, base_ref: str | None = None) -> RunResult:
@@ -400,9 +420,13 @@ class RunPipeline:
             project_status=self.config.github.status_for("implementing"),
         )
         self._checkpoint("Primeira chamada Codex iniciada", codex_start_attempted=True)
+        self._prepare_graph(worktree.path)
         try:
             execution = self.codex_executor.execute(
-                worktree.path, build_initial_prompt(issue)
+                worktree.path,
+                build_initial_prompt(
+                    issue, use_code_review_graph=self._uses_graph()
+                ),
             )
         except ProviderFailure as error:
             self._record_provider_wait(error, ExecutionPhase.WAITING_CODEX_QUOTA)
@@ -730,6 +754,15 @@ class RunPipeline:
         prior_findings: tuple[ReviewFinding, ...],
     ) -> StructuredReview:
         assert self.review_reader is not None and self.reviewer is not None
+        if self._uses_graph():
+            try:
+                self.graph_integrator.ensure_antigravity_mcp()
+            except Exception as error:
+                logger.warning(
+                    "MCP CRG do Antigravity indisponível; review seguirá pelo dossier: %s",
+                    str(error)[:500],
+                )
+        self._prepare_graph(worktree.path)
         context_builder = ContextBuilder(self.review_reader, worktree.path)
         dossier = context_builder.build(
             issue, pull_request.number, head_sha, gates, ci_result, prior_findings
@@ -740,7 +773,12 @@ class RunPipeline:
         policy = policy_path.read_text(encoding="utf-8")
         plan = parse_review_plan(
             self.reviewer.invoke(
-                build_prompt(policy, dossier, blocking_severities=self.config.review.blocking_severities),
+                build_prompt(
+                    policy, dossier,
+                    blocking_severities=self.config.review.blocking_severities,
+                    use_code_review_graph=self._uses_graph(),
+                    graph_repository=worktree.path,
+                ),
                 worktree.path, REVIEW_PLAN_SCHEMA
             )
         )
@@ -750,6 +788,8 @@ class RunPipeline:
                 build_prompt(
                     policy, dossier, plan, build_checklists(dossier.changed_files),
                     blocking_severities=self.config.review.blocking_severities,
+                    use_code_review_graph=self._uses_graph(),
+                    graph_repository=worktree.path,
                 ),
                 worktree.path,
                 STRUCTURED_REVIEW_SCHEMA,
@@ -812,7 +852,9 @@ class RunPipeline:
                 ci_result.expected_head_sha,
                 review,
                 previous_findings,
+                use_code_review_graph=self._uses_graph(),
             )
+            self._prepare_graph(worktree.path)
             execution = self.codex_executor.resume(worktree.path, session_id, prompt)
             if execution.session_id != session_id:
                 raise RunPipelineError(
@@ -942,12 +984,17 @@ class RunPipeline:
                     local_gate_correction_attempts=attempts,
                 )
                 diagnostic = str(error)[:500]
+                self._prepare_graph(worktree.path)
                 resumed = self.codex_executor.resume(
                     worktree.path,
                     session_id,
                     "Corrija somente a falha determinística dos gates locais abaixo. "
                     "Mantenha o escopo da Issue e não faça commit, push ou PR.\n\n"
-                    + diagnostic,
+                    + diagnostic
+                    + (
+                        f"\n\n{GRAPH_INSTRUCTION}"
+                        if self._uses_graph() else ""
+                    ),
                 )
                 if resumed.session_id != session_id:
                     raise RunPipelineError("Codex retomou uma sessão diferente da sessão original")
@@ -957,6 +1004,22 @@ class RunPipeline:
                     "Correção local concluída; o mesmo plano congelado será reexecutado",
                     local_gate_correction_attempts=attempts,
                 )
+
+    def _prepare_graph(self, worktree: Path) -> None:
+        """Executa a integração opcional sem permitir propagação de falhas."""
+        if not self._uses_graph():
+            return
+        try:
+            self.graph_integrator.prepare(worktree)
+        except Exception as error:
+            logger.warning(
+                "Code Review Graph indisponível; usando busca/leitura direta: %s",
+                str(error)[:500],
+            )
+
+    def _uses_graph(self) -> bool:
+        graph_config = getattr(self.config, "code_review_graph", None)
+        return bool(graph_config and graph_config.enabled)
 
     def _record_gate_results(self, gates: tuple[GateResult, ...], attempt: int) -> None:
         if self.execution_store is None or self._execution_id is None:

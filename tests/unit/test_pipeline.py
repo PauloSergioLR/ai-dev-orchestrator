@@ -156,6 +156,27 @@ def test_codex_failure_preserves_worktree_without_cleanup(tmp_path: Path) -> Non
     assert len(worktree.calls) == len(status.calls) == len(codex.calls) == 1
 
 
+def test_crg_failure_is_fail_open_and_prompt_keeps_fallback(tmp_path: Path) -> None:
+    configured = config(tmp_path)
+    configured.code_review_graph.enabled = True
+    status, worktree, codex = FakeStatusWriter(), FakeWorktreeCreator(), FakeCodex()
+
+    class BrokenGraph:
+        def prepare(self, path):
+            raise RuntimeError("grafo corrompido")
+
+    service = RunPipeline(
+        configured, FakeIssueReader(), FakeProjectReader((item(),)), status,
+        worktree, codex, graph_integrator=BrokenGraph(),
+    )
+
+    result = service.run(17, "feat/pipeline")
+
+    assert result.session_id == "session-17"
+    assert "Code Review Graph" in codex.calls[0][1]
+    assert "fallback" in codex.calls[0][1]
+
+
 def test_partial_failure_mentions_the_configured_status(tmp_path: Path) -> None:
     status, worktree, codex = FakeStatusWriter(), FakeWorktreeCreator(), FakeCodex(
         error=RuntimeError("Codex falhou")
@@ -180,3 +201,11 @@ def test_prompt_contains_issue_body_and_required_instructions() -> None:
 
     for text in ("#17", "Executar pipeline", "Body completo", "AGENTS.md", "somente no escopo", "commit, push, Pull Request ou merge", "validações"):
         assert text in prompt
+
+
+def test_prompt_orienta_crg_e_fallback_quando_habilitado() -> None:
+    prompt = build_initial_prompt(issue(), use_code_review_graph=True)
+
+    assert "Code Review Graph" in prompt
+    assert "antes de buscas amplas" in prompt
+    assert "fallback" in prompt
