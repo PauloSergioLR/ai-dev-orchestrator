@@ -1219,9 +1219,15 @@ class RunPipeline:
         if self.execution_store is None or self._execution_id is None:
             return
         try:
-            self.execution_store.transition(
+            run = self.execution_store.transition(
                 self._execution_id, phase, summary=summary, **updates
             )
+            # Entregas externas são auxiliares e o serviço absorve suas falhas.
+            from ai_dev_orchestrator.services.escalation import EscalationService
+            try:
+                EscalationService(self.config, self.execution_store).deliver_event(run)
+            except Exception:
+                logger.warning("Notificação externa indisponível; pipeline continuará")
         except Exception as error:
             raise RunPipelineError(f"Falha ao persistir checkpoint: {error}") from error
 

@@ -81,6 +81,21 @@ def test_quota_com_retry_conhecido_nao_notifica(setup):
     project.set_status.assert_not_called()
 
 
+def test_eventos_configurados_sao_despachados_uma_vez_por_transicao(setup):
+    config, store, channels, _, escalation = setup
+    config.notifications.events = ("WAITING_CODEX_QUOTA", "COMPLETED")
+    run = advance(store, Phase.CODEX_RUNNING)
+    waiting = record_provider_failure(
+        store, run.id,
+        ProviderFailure("codex", Kind.TERMINAL_QUOTA, "quota", datetime.now(timezone.utc), session_id="session"),
+    )
+    escalation.assess(waiting)
+    escalation.assess(store.get(waiting.id))
+    assert channels["discord"].send.call_count == 1
+    message = channels["discord"].send.call_args.args[0]
+    assert "WAITING_CODEX_QUOTA" in message and "Issue #" in message and "Provider: codex" in message
+
+
 def test_quota_sem_retry_respeita_politica_local(setup):
     config, store, channels, _, escalation = setup
     run = advance(store, Phase.CODEX_RUNNING)

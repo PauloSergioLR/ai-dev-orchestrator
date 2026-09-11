@@ -6,7 +6,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from ai_dev_orchestrator.adapters import notifications
-from ai_dev_orchestrator.adapters.notifications import EnvironmentNotificationAdapter, REQUIRED_ENV
+from ai_dev_orchestrator.adapters.notifications import (
+    DiscordWebhookProvider,
+    EnvironmentNotificationAdapter,
+    REQUIRED_ENV,
+    TelegramBotProvider,
+)
 
 
 def configure(monkeypatch, channel):
@@ -67,6 +72,25 @@ def test_ambiente_incompleto_nao_abre_conexao(monkeypatch):
 def test_redirecionamentos_nao_recebem_payload():
     with pytest.raises(ValueError, match="Redirecionamento"):
         notifications._NoRedirect().redirect_request(None, None, 307, "", {}, "https://outro.invalid")
+
+
+@pytest.mark.parametrize(
+    ("provider", "environment"),
+    [
+        (DiscordWebhookProvider, {"ORCH_DISCORD_WEBHOOK_URL": "https://discord.com/api/webhooks/id/novo-segredo"}),
+        (TelegramBotProvider, {"ORCH_TELEGRAM_BOT_TOKEN": "novo-token", "ORCH_TELEGRAM_CHAT_ID": "-100123"}),
+    ],
+)
+def test_providers_aceitam_nomes_de_secrets_documentados(monkeypatch, provider, environment):
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    opener = MagicMock()
+    opener.open.return_value.__enter__.return_value.read.return_value = b'{"ok":true}'
+    monkeypatch.setattr(notifications, "build_opener", lambda *args: opener)
+    provider(timeout=4).send("teste seguro")
+    assert opener.open.call_args.kwargs["timeout"] == 4
+    payload = opener.open.call_args.args[0].data.decode()
+    assert "novo-segredo" not in payload and "novo-token" not in payload
 
 
 def test_init_configura_canais_e_mostra_apenas_nomes_ausentes(tmp_path, monkeypatch):

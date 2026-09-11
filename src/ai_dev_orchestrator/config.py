@@ -265,7 +265,13 @@ class NotificationConfig(BaseModel):
     """Canais opcionais; credenciais são lidas somente do ambiente."""
 
     model_config = ConfigDict(extra="forbid")
+    enabled: StrictBool = True
     channels: tuple[Literal["email", "discord", "telegram"], ...] = ()
+    discord_enabled: StrictBool = True
+    telegram_enabled: StrictBool = True
+    events: tuple[Literal[
+        "HUMAN_REQUIRED", "WAITING_CODEX_QUOTA", "FAILED", "NEEDS_CHANGES", "COMPLETED"
+    ], ...] = ("HUMAN_REQUIRED",)
     timeout_seconds: float = Field(default=15, gt=0, le=60)
     retry_seconds: float = Field(default=300, gt=0)
     max_attempts: int = Field(default=3, gt=0)

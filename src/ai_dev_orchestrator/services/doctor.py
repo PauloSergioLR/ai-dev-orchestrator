@@ -13,6 +13,7 @@ import tomllib
 from typing import Sequence
 
 from ai_dev_orchestrator.adapters.antigravity import AntigravityAdapter, AntigravityError
+from ai_dev_orchestrator.adapters.notifications import configuration_error, missing_environment
 from ai_dev_orchestrator.adapters.codex import CodexAdapter, CodexError
 from ai_dev_orchestrator.adapters.github import (
     GitHubProjectAdapter,
@@ -91,12 +92,39 @@ class DoctorService:
             self._check_configuration(),
         ]
         checks.extend(self._check_code_review_graph())
+        checks.extend(self._check_notifications())
         checks.extend(self._check_project_contract())
         if not deep:
             return checks
         checks.extend(self._deep_provider_checks())
         if state:
             checks.append(self._check_state_consistency())
+        return checks
+
+    def _check_notifications(self) -> list[DoctorCheck]:
+        """Valida apenas configuração local; nunca revela nem transmite secrets."""
+        try:
+            config = load_config(self.config_path)
+        except ConfigurationError:
+            return []
+        policy = config.notifications
+        if not policy.enabled:
+            return [DoctorCheck("Notificações", CheckStatus.OK, "desabilitadas globalmente")]
+        if not policy.channels:
+            return [DoctorCheck("Notificações", CheckStatus.OK, "nenhum provider habilitado")]
+        checks: list[DoctorCheck] = []
+        for channel in policy.channels:
+            enabled = getattr(policy, f"{channel}_enabled", True)
+            if not enabled:
+                checks.append(DoctorCheck(f"Notificação {channel}", CheckStatus.OK, "desabilitada na configuração"))
+                continue
+            absent = missing_environment((channel,))
+            if absent:
+                checks.append(DoctorCheck(f"Notificação {channel}", CheckStatus.WARNING, "variáveis ausentes: " + ", ".join(absent)))
+            elif error := configuration_error(channel):
+                checks.append(DoctorCheck(f"Notificação {channel}", CheckStatus.WARNING, error))
+            else:
+                checks.append(DoctorCheck(f"Notificação {channel}", CheckStatus.OK, "configuração presente; use 'orch notifications test' para conectividade"))
         return checks
 
     def _check_project_contract(self) -> list[DoctorCheck]:

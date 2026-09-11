@@ -262,7 +262,11 @@ editar o perfil diretamente:
 
 ```toml
 [notifications]
+enabled = true
 channels = ["email", "discord", "telegram"]
+discord_enabled = true
+telegram_enabled = true
+events = ["HUMAN_REQUIRED", "WAITING_CODEX_QUOTA", "FAILED", "NEEDS_CHANGES", "COMPLETED"]
 timeout_seconds = 15
 retry_seconds = 300
 max_attempts = 3
@@ -275,12 +279,39 @@ ambiente do processo; nunca coloque seus valores no TOML, Issue ou banco.
 | Canal | Variáveis de ambiente |
 | --- | --- |
 | E-mail | `ORCH_SMTP_HOST`, `ORCH_SMTP_USER`, `ORCH_SMTP_PASSWORD`, `ORCH_EMAIL_FROM`, `ORCH_EMAIL_TO` |
-| Discord | `ORCH_DISCORD_WEBHOOK` |
-| Telegram | `ORCH_TELEGRAM_TOKEN`, `ORCH_TELEGRAM_CHAT_ID` |
+| Discord | `ORCH_DISCORD_WEBHOOK_URL` (ou o alias legado `ORCH_DISCORD_WEBHOOK`) |
+| Telegram | `ORCH_TELEGRAM_BOT_TOKEN`, `ORCH_TELEGRAM_CHAT_ID` (ou o alias legado `ORCH_TELEGRAM_TOKEN`) |
 
 O e-mail usa SMTP com STARTTLS obrigatório e validação de certificado. A porta
 padrão é 587; `ORCH_SMTP_PORT` permite ajustá-la. Discord usa um webhook HTTPS e
 desativa menções; Telegram envia texto sem interpretação de Markdown.
+
+`enabled = false` desliga todos os avisos externos; `discord_enabled` e
+`telegram_enabled` permitem desligar cada provider independentemente. `events`
+seleciona os estados notificados. Os avisos contêm somente metadados resumidos
+(Issue, estado, branch, PR, provider, horário e links), e uma falha de entrega
+não altera o resultado do pipeline.
+
+### Configurar Discord
+
+1. No servidor Discord, selecione o canal desejado e abra **Integrações**.
+2. Crie um **Incoming Webhook** e copie sua URL.
+3. Armazene-a como secret do ambiente: `ORCH_DISCORD_WEBHOOK_URL`.
+4. Inclua `"discord"` em `notifications.channels`.
+5. Rode `uv run orch doctor` e depois `uv run orch notifications test`.
+
+### Configurar Telegram
+
+1. Crie um bot com o BotFather e guarde o token retornado.
+2. Inicie conversa com o bot ou adicione-o ao grupo/canal de destino.
+3. Descubra o `chat_id` pelo mecanismo seguro de sua preferência (para grupos ele
+   normalmente é negativo).
+4. Armazene `ORCH_TELEGRAM_BOT_TOKEN` e `ORCH_TELEGRAM_CHAT_ID` como secrets do ambiente.
+5. Inclua `"telegram"` em `notifications.channels` e rode `uv run orch notifications test`.
+
+`orch doctor` confere a ativação, as variáveis necessárias e o formato básico sem
+exibir valores. O comando de teste envia apenas uma mensagem sintética a cada
+provider habilitado; use-o somente quando desejar exercitar conectividade.
 
 As mensagens contêm repositório, Issue, motivo estruturado, fase interrompida,
 PR, HEAD, número de correções, horário UTC e uma ação de inspeção. Não incluem

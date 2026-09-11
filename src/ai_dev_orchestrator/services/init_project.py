@@ -323,7 +323,11 @@ max_sleep_seconds = {config.supervisor.max_sleep_seconds}
         else ""
     ) + f"""
 [notifications]
+enabled = {str(config.notifications.enabled).lower()}
 channels = {array(config.notifications.channels)}
+discord_enabled = {str(config.notifications.discord_enabled).lower()}
+telegram_enabled = {str(config.notifications.telegram_enabled).lower()}
+events = {array(config.notifications.events)}
 timeout_seconds = {config.notifications.timeout_seconds}
 retry_seconds = {config.notifications.retry_seconds}
 max_attempts = {config.notifications.max_attempts}

@@ -24,6 +24,7 @@ from ai_dev_orchestrator.services.init_project import ProjectInitError, ProjectI
 from ai_dev_orchestrator.services.supervisor import SupervisorError, SupervisorService
 from ai_dev_orchestrator.config import OrchestratorConfig
 from ai_dev_orchestrator.adapters.git import GitWorktreeAdapter
+from ai_dev_orchestrator.adapters.notifications import EnvironmentNotificationAdapter, missing_environment
 from ai_dev_orchestrator.services.cleanup import CleanupService
 from ai_dev_orchestrator.services.history import HistoryService, format_duration
 from ai_dev_orchestrator.services.supersession import SupersessionError, SupersessionService
@@ -39,6 +40,8 @@ app = typer.Typer(
     help="Orquestrador local-first de desenvolvimento com IA.",
     add_completion=False,
 )
+notifications_app = typer.Typer(help="Testa providers externos configurados.")
+app.add_typer(notifications_app, name="notifications")
 
 
 def _show_version(value: bool) -> None:
@@ -113,6 +116,40 @@ def doctor(
 
     if has_errors(checks):
         raise typer.Exit(code=1)
+
+
+@notifications_app.command("test")
+def test_notifications() -> None:
+    """Envia uma mensagem sintética a cada canal configurado, sem expor secrets."""
+    try:
+        config = load_config()
+    except ConfigurationError as error:
+        typer.echo(f"Erro: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    policy = config.notifications
+    if not policy.enabled:
+        typer.echo("Notificações estão desabilitadas globalmente.")
+        raise typer.Exit(code=1)
+    names = tuple(
+        name for name in policy.channels
+        if getattr(policy, f"{name}_enabled", True)
+    )
+    if not names:
+        typer.echo("Nenhum provider de notificação está habilitado.")
+        raise typer.Exit(code=1)
+    absent = missing_environment(names)
+    if absent:
+        typer.echo("Variáveis ausentes: " + ", ".join(absent), err=True)
+        raise typer.Exit(code=1)
+    for name in names:
+        try:
+            EnvironmentNotificationAdapter(name, policy.timeout_seconds).send(
+                "AI Dev Orchestrator: teste de notificação confirmado."
+            )
+        except Exception:
+            typer.echo(f"{name}: falhou; confira a configuração e conectividade.", err=True)
+        else:
+            typer.echo(f"{name}: enviado")
 
 
 @app.command("init")

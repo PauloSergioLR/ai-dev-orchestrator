@@ -77,6 +77,12 @@ class ResumeService:
             if run.phase in PROVIDER_WAIT_PHASES or run.phase == ExecutionPhase.HUMAN_REQUIRED:
                 run = self.escalation.assess(run)
                 return self._result(run)
+            if run.phase in {
+                ExecutionPhase.FAILED,
+                ExecutionPhase.NEEDS_CHANGES,
+                ExecutionPhase.COMPLETED,
+            }:
+                self.escalation.deliver_event(run)
         return result
 
     def _resume(self, issue_number: int, *, retry_provider: bool = False, recover_failed: bool = False) -> ResumeResult:
