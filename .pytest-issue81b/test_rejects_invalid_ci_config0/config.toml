@@ -1,0 +1,19 @@
+
+[github]
+owner = "acme"
+repository = "orchestrator"
+project_number = 42
+ready_status = "Ready"
+
+[workspace]
+repository_path = "C:/Users/lll/Documents/Projetos/ai-dev-orchestrator-worktrees/work--adicionar-notificacoes-externas-via-discord-e-te/.pytest-issue81b/test_rejects_invalid_ci_config0/repository"
+worktrees_dir = "C:/Users/lll/Documents/Projetos/ai-dev-orchestrator-worktrees/work--adicionar-notificacoes-externas-via-discord-e-te/.pytest-issue81b/test_rejects_invalid_ci_config0/worktrees"
+base_ref = "main"
+
+[execution]
+max_attempts = 2
+max_parallel_runs = 1
+auto_merge = false
+
+[ci]
+required_checks = []

@@ -69,7 +69,12 @@ remove_local_branch = false
 remove_remote_branch = false
 [notifications]
 # Nenhum canal ativo por padrão. Opções: "email", "discord", "telegram".
+enabled = true
 channels = []
+discord_enabled = true
+telegram_enabled = true
+# Estados que disparam avisos. Remova os que não desejar receber.
+events = ["HUMAN_REQUIRED", "WAITING_CODEX_QUOTA", "FAILED", "NEEDS_CHANGES", "COMPLETED"]
 timeout_seconds = 15
 retry_seconds = 300
 max_attempts = 3

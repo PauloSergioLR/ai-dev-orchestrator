@@ -6,7 +6,11 @@ import os
 import re
 from typing import Protocol
 
-from ai_dev_orchestrator.adapters.notifications import EnvironmentNotificationAdapter
+from ai_dev_orchestrator.adapters.notifications import (
+    DiscordWebhookProvider,
+    EnvironmentNotificationAdapter,
+    TelegramBotProvider,
+)
 from ai_dev_orchestrator.config import OrchestratorConfig
 from ai_dev_orchestrator.domain.execution import ExecutionPhase, ExecutionStore, RunRecord, PROVIDER_WAIT_PHASES, TERMINAL_PHASES
 
@@ -31,6 +35,14 @@ REASONS = {
     "INTERNAL_ERROR": "Erro interno impediu a continuidade segura",
 }
 
+NOTIFIABLE_PHASES = frozenset({
+    ExecutionPhase.HUMAN_REQUIRED,
+    ExecutionPhase.WAITING_CODEX_QUOTA,
+    ExecutionPhase.FAILED,
+    ExecutionPhase.NEEDS_CHANGES,
+    ExecutionPhase.COMPLETED,
+})
+
 
 def safe_context(value: object) -> str:
     text = str(value or "-").replace("\n", " ").replace("\r", " ")
@@ -45,13 +57,22 @@ class EscalationService:
                  status_writer: ProjectStatusWriter | None = None,
                  channels: Mapping[str, NotificationChannel] | None = None) -> None:
         self.config, self.store, self.status_writer = config, store, status_writer
-        self.channels = channels if channels is not None else {
-            name: EnvironmentNotificationAdapter(name, config.notifications.timeout_seconds)
-            for name in config.notifications.channels
-        }
+        if channels is not None:
+            self.channels = channels
+        else:
+            providers: dict[str, NotificationChannel] = {}
+            for name in config.notifications.channels:
+                if name == "discord" and config.notifications.discord_enabled:
+                    providers[name] = DiscordWebhookProvider(config.notifications.timeout_seconds)
+                elif name == "telegram" and config.notifications.telegram_enabled:
+                    providers[name] = TelegramBotProvider(config.notifications.timeout_seconds)
+                elif name == "email":
+                    providers[name] = EnvironmentNotificationAdapter(name, config.notifications.timeout_seconds)
+            self.channels = providers
 
     def assess(self, run: RunRecord, *, error: Exception | None = None) -> RunRecord:
         if run.phase in TERMINAL_PHASES:
+            self.deliver_event(run)
             return run
         if run.phase == ExecutionPhase.HUMAN_REQUIRED:
             self.deliver(run)
@@ -60,6 +81,7 @@ class EscalationService:
             reason = run.quota_classification
             return self.escalate(run, reason if reason in REASONS else "PROVIDER_BLOCKED")
         if run.phase in PROVIDER_WAIT_PHASES:
+            self.deliver_event(run)
             if run.quota_retry_at is not None:
                 return run
             if (run.phase != ExecutionPhase.WAITING_PROVIDER
@@ -91,6 +113,9 @@ class EscalationService:
         return self.store.get(run.id)
 
     def deliver(self, run: RunRecord) -> None:
+        self.deliver_event(run)
+        if run.phase != ExecutionPhase.HUMAN_REQUIRED:
+            return
         status = "Human Review" if run.human_reason == "CORRECTION_LIMIT" else "Blocked"
         key = sha256(f"{run.human_reason}:{run.human_phase}:{run.current_head_sha}:{run.correction_attempts}".encode()).hexdigest()
         if self.status_writer and run.project_item_id:
@@ -101,6 +126,39 @@ class EscalationService:
             f"Fase: {safe_context(run.human_phase)} | PR: {run.pull_request_number or '-'} | HEAD: {safe_context(run.current_head_sha)}\n"
             f"Correções: {run.correction_attempts} | Horário: {run.human_at}\n"
             f"Ação: inspecione orch state --issue {run.issue_number} e corrija a causa antes de retomar."
+        )
+        if (
+            self.config.notifications.enabled
+            and ExecutionPhase.HUMAN_REQUIRED.value in self.config.notifications.events
+        ):
+            for name, channel in self.channels.items():
+                self._attempt(run, key, name, lambda channel=channel: channel.send(message))
+
+    def deliver_event(self, run: RunRecord) -> None:
+        """Despacha uma transição relevante uma vez por contexto material."""
+        policy = self.config.notifications
+        if not policy.enabled or run.phase not in NOTIFIABLE_PHASES or run.phase.value not in policy.events:
+            return
+        if run.phase == ExecutionPhase.HUMAN_REQUIRED:
+            # Mantém o formato operacional já usado por intervenções humanas.
+            return
+        provider = run.quota_provider or ("gemini" if run.phase.value.startswith("WAITING_GEMINI") else "codex")
+        reason = run.last_error or run.quota_classification or run.review_verdict or "Transição registrada"
+        key = sha256(
+            f"{run.phase}:{run.current_head_sha}:{run.pull_request_number}:{reason}:{run.correction_attempts}".encode()
+        ).hexdigest()
+        timestamp = run.updated_at.isoformat()
+        issue_url = (
+            f"https://github.com/{self.config.github.repository_full_name}/issues/{run.issue_number}"
+        )
+        links = f"Issue: {issue_url}"
+        if run.pull_request_url:
+            links += f" | PR: {run.pull_request_url}"
+        message = (
+            f"{safe_context(self.config.github.repository_full_name)} | Issue #{run.issue_number} | {run.phase.value}\n"
+            f"Resumo: {safe_context(reason)}\n"
+            f"Branch: {safe_context(run.branch)} | Provider: {safe_context(provider)} | PR: {run.pull_request_number or '-'}\n"
+            f"Horário: {timestamp}\n{links}"
         )
         for name, channel in self.channels.items():
             self._attempt(run, key, name, lambda channel=channel: channel.send(message))

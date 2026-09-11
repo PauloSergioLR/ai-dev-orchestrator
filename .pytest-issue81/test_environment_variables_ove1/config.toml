@@ -1,0 +1,16 @@
+
+[github]
+owner = "acme"
+repository = "orchestrator"
+project_number = 42
+ready_status = "Ready"
+
+[workspace]
+repository_path = "C:/Users/lll/Documents/Projetos/ai-dev-orchestrator-worktrees/work--adicionar-notificacoes-externas-via-discord-e-te/.pytest-issue81/test_environment_variables_ove1/repository"
+worktrees_dir = "C:/Users/lll/Documents/Projetos/ai-dev-orchestrator-worktrees/work--adicionar-notificacoes-externas-via-discord-e-te/.pytest-issue81/test_environment_variables_ove1/worktrees"
+base_ref = "main"
+
+[execution]
+max_attempts = 2
+max_parallel_runs = 1
+auto_merge = false
