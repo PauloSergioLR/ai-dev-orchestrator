@@ -4,6 +4,7 @@ import json
 from dataclasses import replace
 import typer
 from pathlib import Path
+import logging
 
 from ai_dev_orchestrator import __version__
 from ai_dev_orchestrator.config import ConfigurationError, load_config
@@ -70,8 +71,15 @@ def cli(
         is_eager=True,
         help="Exibe a versão da aplicação e encerra.",
     ),
+    verbose: bool = typer.Option(
+        False, "--verbose", help="Exibe diagnósticos detalhados das integrações."
+    ),
 ) -> None:
     """Interface de linha de comando do AI Dev Orchestrator."""
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
 
 
 @app.command()

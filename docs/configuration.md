@@ -35,6 +35,12 @@ remote_name = "origin"
 codex_model = "default"
 gemini_model = "default"
 
+[code_review_graph]
+enabled = false
+command = ["uvx", "--from", "code-review-graph==2.3.8", "code-review-graph"]
+required_version = "2.3.8"
+timeout_seconds = 180
+
 [execution]
 max_attempts = 2
 max_parallel_runs = 1
@@ -125,6 +131,59 @@ fingerprint ficam congelados no run para uso por restart e resume.
 Em `[providers]`, `default` (ou `auto`) preserva a seleção feita pela CLI.
 Identificadores explícitos são encaminhados ao início e à retomada. Os modelos
 usados ficam registrados no run e não podem ser trocados silenciosamente.
+
+## Code Review Graph
+
+A integração é opcional e fica desabilitada por padrão. Para habilitá-la, use a
+seção `[code_review_graph]` acima com `enabled = true`. O comando recomendado usa
+`uvx` e fixa a mesma versão em `command` e `required_version`; assim o código do
+projeto externo não é copiado para este repositório. Também é possível instalar
+o pacote separadamente e configurar `command = ["code-review-graph"]`.
+
+O MCP do Codex é escopado automaticamente ao worktree em cada chamada. Antes do
+primeiro review, o orquestrador mescla atomicamente a entrada equivalente no
+arquivo MCP do Antigravity, preservando os demais servidores. Também é possível
+antecipar essa configuração com o instalador suportado pelo próprio CRG:
+
+```powershell
+uvx --from code-review-graph==2.3.8 code-review-graph install --platform antigravity
+```
+
+Opcionalmente, o mesmo instalador pode criar a configuração global usada por
+sessões Codex fora do orquestrador:
+
+```powershell
+uvx --from code-review-graph==2.3.8 code-review-graph install --platform codex
+```
+
+Depois dessa configuração única, `orch watch`, `orch work`, `orch run` e as
+retomadas cuidam do grafo sem comandos manuais: criam o primeiro grafo e usam
+`update --brief` nas chamadas posteriores antes de entregar trabalho aos
+agentes. O banco SQLite permanece local em `.code-review-graph/`, protegido pelo
+`.gitignore` interno criado pelo CRG.
+
+`orch doctor` informa pacote ausente, versão divergente, grafo ausente/corrompido
+e configuração MCP inválida para Codex e Antigravity, sempre com ação corretiva.
+Esses itens são `WARNING`: erro de pacote, build, update, banco ou MCP nunca muda
+sozinho a execução para `FAILED`; o agente continua com grep e leitura direta.
+Para desabilitar, use `enabled = false` ou
+`ORCH_CODE_REVIEW_GRAPH__ENABLED=false`.
+
+### Comparação de contexto
+
+Para validar uma tarefa real, execute-a em dois worktrees equivalentes, primeiro
+com `enabled = false` e depois com `enabled = true`, usando `--verbose` antes do
+subcomando (por exemplo, `orch --verbose run ...`). Compare as linhas
+`Contexto Codex` — chamadas CRG, leituras amplas e tokens de entrada/saída quando
+o provider os fornecer — e `CRG usado`, que inclui duração, nós, arestas e a
+economia estimada retornada pelo CRG. Compare também gates e resultado final.
+Se a CLI do provider não expuser tokens, o log registra `indisponível` em vez de
+inventar uma estimativa. Para comprovar o fallback, troque temporariamente
+`command` por um executável inexistente: deve aparecer um warning e a tarefa deve
+seguir pelo fluxo atual.
+
+Os números da validação realizada neste repositório estão em
+[Validação do Code Review Graph](code-review-graph-validation.md).
 
 `orch watch` usa `[supervisor]` para polling conservador. Nenhum horário de reset
 é inferido. `retry_without_reset_seconds` é opcional e somente deve ser definido

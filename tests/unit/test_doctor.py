@@ -366,6 +366,66 @@ def test_reports_missing_configuration(tmp_path: Path) -> None:
     assert "não encontrado" in check.message
 
 
+class CrgRunner:
+    def __init__(self, results):
+        self.results = results
+
+    def run(self, arguments, cwd=None, **kwargs):
+        return self.results.get(tuple(arguments), CommandResult(1))
+
+
+def crg_config(tmp_path: Path) -> Path:
+    path = write_valid_config(tmp_path / "orchestrator.toml")
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(
+            "\n[code_review_graph]\nenabled = true\ncommand = ['crg']\n"
+            "required_version = '2.3.8'\n"
+        )
+    (tmp_path / "repository").mkdir()
+    return path
+
+
+def test_doctor_identifies_missing_crg_as_non_blocking_warning(tmp_path: Path) -> None:
+    checks = DoctorService(
+        CrgRunner({("crg", "--version"): CommandResult(None, error="ausente")}),
+        crg_config(tmp_path),
+    )._check_code_review_graph()
+
+    assert checks[0].status is CheckStatus.WARNING
+    assert "pipeline fará fallback" in checks[0].message
+    assert not has_errors(checks)
+
+
+def test_doctor_validates_version_graph_and_both_mcp_configs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "config.toml").write_text(
+        '[mcp_servers.code-review-graph]\ncommand="crg"\nargs=["serve"]\n',
+        encoding="utf-8",
+    )
+    antigravity = tmp_path / ".gemini" / "antigravity"
+    antigravity.mkdir(parents=True)
+    (antigravity / "mcp_config.json").write_text(
+        json.dumps({"mcpServers": {"code-review-graph": {
+            "command": "crg", "args": ["serve"]
+        }}}),
+        encoding="utf-8",
+    )
+    repository = tmp_path / "repository"
+    status_args = ("crg", "status", "--json", "--repo", str(repository))
+    runner = CrgRunner({
+        ("crg", "--version"): CommandResult(0, "code-review-graph 2.3.8"),
+        status_args: CommandResult(0, json.dumps({"nodes": 10, "edges": 20, "files": 4})),
+    })
+
+    checks = DoctorService(runner, crg_config(tmp_path))._check_code_review_graph()
+
+    assert all(check.status is CheckStatus.OK for check in checks)
+    assert "10 nós" in checks[1].message
+
+
 def test_reports_invalid_configuration(tmp_path: Path) -> None:
     config = tmp_path / "invalid.toml"
     config.write_text("[github", encoding="utf-8")

@@ -57,6 +57,20 @@ def test_prompt_uses_configured_blocking_policy_outside_untrusted_data(tmp_path,
     assert "blocking_severities" not in json.loads(prompt.split("<DADOS_NAO_CONFIAVEIS>\n")[1].split("\n</DADOS_NAO_CONFIAVEIS>")[0])
 
 
+def test_review_prompt_autoriza_somente_crg_read_only_com_fallback(tmp_path):
+    value = dossier(tmp_path)
+
+    prompt = build_prompt(
+        "POLÍTICA", value, use_code_review_graph=True,
+        graph_repository=tmp_path,
+    )
+
+    authority = prompt.split("</POLITICA_AUTORITATIVA>")[0]
+    assert "Code Review Graph MCP" in authority
+    assert "read-only" in authority and "fallback" in authority
+    assert json.dumps(str(tmp_path)) in authority
+
+
 def test_prompt_serializes_prior_findings_as_structured_data(tmp_path):
     value = dossier(tmp_path)
     value = value.__class__(**{**value.__dict__, "prior_findings": (ReviewFinding(FindingSeverity.LOW, "t", "d", "a.py", 3, "c"),)})

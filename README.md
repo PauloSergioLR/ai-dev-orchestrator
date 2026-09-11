@@ -36,6 +36,12 @@ Ele reporta `LOCAL_CAPABILITY` e `LIVE_PROVIDER` separadamente. `--state`
 adiciona a conferência `STATE_CONSISTENCY`, abrindo o SQLite apenas em leitura e
 comparando execuções ativas com PRs e Project, sem corrigir divergências.
 
+O Code Review Graph pode ser habilitado como integração local, versionada e
+fail-open. O pipeline constrói/atualiza o grafo antes de Codex e Antigravity,
+orienta os agentes a consultar sua estrutura antes de buscas amplas e mantém
+grep/leitura direta como fallback. `orch doctor` valida pacote, versão, grafo e
+MCP dos dois providers. Veja [configuração do Code Review Graph](docs/configuration.md#code-review-graph).
+
 ## Descoberta agnóstica do projeto
 
 O orquestrador não pede linguagem, framework ou package manager. `orch init`
