@@ -244,6 +244,34 @@ def test_start_resume_and_gates(tmp_path: Path) -> None:
     assert (gated.phase, effects_gates.calls["gates"]) == (ExecutionPhase.COMMIT_PENDING, 1)
 
 
+def test_local_gate_limit_persists_sanitized_diagnostic(tmp_path: Path) -> None:
+    from ai_dev_orchestrator.services.validation import GateResult, LocalValidationError
+
+    store, effects, executor, observation = context(tmp_path)
+    effects.max_local_gate_correction_attempts = 0
+
+    def fail_gates(_run):
+        raise LocalValidationError(
+            "pytest falhou: token=segredo",
+            result=GateResult("pytest", ("pytest",), False, 1, "falha token=segredo"),
+        )
+
+    effects.run_local_gates = fail_gates
+    run = at(store, ExecutionPhase.TESTING)
+    blocked = executor.execute(run, decision(RecoveryAction.RUN_LOCAL_GATES), observation)
+
+    assert blocked.phase is ExecutionPhase.HUMAN_REQUIRED
+    assert blocked.human_reason == "LOCAL_GATE_CORRECTION_LIMIT"
+    assert "segredo" not in (blocked.last_error or "")
+    assert "[redigido]" in (blocked.last_error or "")
+    assert "segredo" not in (blocked.gate_results_json or "")
+    assert "[redigido]" in (blocked.gate_results_json or "")
+    from ai_dev_orchestrator.services.inspect import InspectService
+    inspection = InspectService(store).inspect(blocked.issue_number)
+    assert inspection is not None
+    assert inspection.gates[-1]["diagnostic"] == "falha token=[redigido]"
+
+
 def test_resume_divergent_session_does_not_transition(tmp_path: Path) -> None:
     store, effects, executor, observation = context(tmp_path)
     effects.resume_result = "other"

@@ -64,9 +64,11 @@ class ResumeService:
         from ai_dev_orchestrator.adapters.github import GitHubProjectStatusAdapter
         return cls(store, RealObserver(config, store), RecoveryPlanner(policy), RecoveryExecutor(policy, store, RecoveryEffects(config)), config.providers.codex_model, config.providers.gemini_model, EscalationService(config, store, GitHubProjectStatusAdapter(config)))
 
-    def resume(self, issue_number: int, *, retry_provider: bool = False, recover_failed: bool = False) -> ResumeResult:
+    def resume(self, issue_number: int, *, retry_provider: bool = False, recover_failed: bool = False,
+               resume_local_gates: bool = False) -> ResumeResult:
         try:
-            result = self._resume(issue_number, retry_provider=retry_provider, recover_failed=recover_failed)
+            result = self._resume(issue_number, retry_provider=retry_provider, recover_failed=recover_failed,
+                                  resume_local_gates=resume_local_gates)
         except Exception as error:
             run = self.store.get_active_for_issue(issue_number)
             if run and self.escalation:
@@ -85,7 +87,8 @@ class ResumeService:
                 self.escalation.deliver_event(run)
         return result
 
-    def _resume(self, issue_number: int, *, retry_provider: bool = False, recover_failed: bool = False) -> ResumeResult:
+    def _resume(self, issue_number: int, *, retry_provider: bool = False, recover_failed: bool = False,
+                resume_local_gates: bool = False) -> ResumeResult:
         if issue_number <= 0:
             raise ResumeError("A Issue deve ser um inteiro positivo")
         run = self.store.get_active_for_issue(issue_number)
@@ -112,6 +115,12 @@ class ResumeService:
                     run.id,
                     ExecutionPhase.WAITING_CI,
                     summary="Retomada de CI legada autorizada; identidade persistida será revalidada",
+                )
+            elif resume_local_gates and self._is_local_gate_correction_limit(run):
+                run = self.store.transition(
+                    run.id,
+                    ExecutionPhase.TESTING,
+                    summary="Retomada humana autorizada; gates locais serão reexecutados na mesma execução",
                 )
             elif not (retry_provider and run.provider_resume_phase):
                 return self._result(run)
@@ -175,6 +184,8 @@ class ResumeService:
                 return self._result(run)
             except Exception as error:
                 raise ResumeError(f"Retomada interrompida em {run.phase}: {error}") from error
+            if run.phase is ExecutionPhase.HUMAN_REQUIRED:
+                return self._result(run)
             if run.phase in TERMINAL_PHASES:
                 return self._result(run)
             if decision.action.value == "WAIT_FOR_CI" and run.phase.value == "WAITING_CI":
@@ -214,6 +225,15 @@ class ResumeService:
                 and run.pull_request_url
                 and run.current_head_sha
             )
+        )
+
+    @staticmethod
+    def _is_local_gate_correction_limit(run: RunRecord) -> bool:
+        """Autoriza somente a repetição humana dos gates locais já bloqueados."""
+        return (
+            run.human_reason == "LOCAL_GATE_CORRECTION_LIMIT"
+            and run.human_phase == ExecutionPhase.TESTING.value
+            and bool(run.branch and run.worktree_path and run.base_ref and run.codex_session_id)
         )
 
     def _record_provider_wait(self, run: RunRecord, failure: ProviderFailure) -> RunRecord:

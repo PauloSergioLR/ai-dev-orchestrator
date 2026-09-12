@@ -112,7 +112,13 @@ def _gate_results(value: str | None) -> tuple[dict[str, Any], ...]:
         payload = __import__("json").loads(value)
     except (ValueError, TypeError):
         return ()
-    return tuple(item for item in payload if isinstance(item, dict)) if isinstance(payload, list) else ()
+    if not isinstance(payload, list):
+        return ()
+    return tuple(
+        {key: _safe(value) if isinstance(value, str) else value for key, value in item.items()}
+        for item in payload
+        if isinstance(item, dict)
+    )
 
 
 def _safe(value: str | None) -> str | None:

@@ -10,7 +10,6 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -69,7 +68,10 @@ def write_valid_config(path: Path) -> Path:
 
 
 def test_all_checks_are_ok(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(sys, "version_info", SimpleNamespace(major=3, minor=13, micro=1))
+    monkeypatch.setattr(
+        "ai_dev_orchestrator.services.doctor.sys",
+        SimpleNamespace(version_info=SimpleNamespace(major=3, minor=13, micro=1)),
+    )
 
     checks = DoctorService(
         FakeRunner(successful_results()), write_valid_config(tmp_path / "orchestrator.toml")
@@ -284,7 +286,10 @@ def test_command_runner_resolves_path_executable_without_changing_arguments(
 
 
 def test_reports_incompatible_python(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "version_info", SimpleNamespace(major=3, minor=12, micro=9))
+    monkeypatch.setattr(
+        "ai_dev_orchestrator.services.doctor.sys",
+        SimpleNamespace(version_info=SimpleNamespace(major=3, minor=12, micro=9)),
+    )
 
     check = DoctorService()._check_python()
 
@@ -505,7 +510,10 @@ def test_cli_deep_warns_and_displays_diagnostic_scopes(
 def test_normal_doctor_does_not_run_deep_provider_probes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(sys, "version_info", SimpleNamespace(major=3, minor=13, micro=1))
+    monkeypatch.setattr(
+        "ai_dev_orchestrator.services.doctor.sys",
+        SimpleNamespace(version_info=SimpleNamespace(major=3, minor=13, micro=1)),
+    )
 
     def forbidden(*args, **kwargs):
         raise AssertionError("provider não deve ser chamado sem --deep")
