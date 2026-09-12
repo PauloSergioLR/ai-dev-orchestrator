@@ -200,6 +200,41 @@ def test_other_human_required_run_remains_closed(tmp_path: Path) -> None:
     assert effects.calls == {}
 
 
+def test_local_gate_limit_retries_same_identity_only_when_explicitly_authorized(tmp_path: Path) -> None:
+    from ai_dev_orchestrator.services.validation import GateResult, LocalValidationError
+
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    original = advance(store, ExecutionPhase.TESTING)
+    blocked = store.require_human(
+        original.id, summary="gate falhou", reason="LOCAL_GATE_CORRECTION_LIMIT"
+    )
+    effects = Effects()
+    effects.max_local_gate_correction_attempts = 0
+
+    def fail_gates(_run: RunRecord) -> None:
+        effects.called("gates")
+        raise LocalValidationError(
+            "pytest falhou", result=GateResult("pytest", ("pytest",), False, 1, "assert 1 == 2")
+        )
+
+    effects.run_local_gates = fail_gates
+    snapshot = RecoveryObservation(WorktreeState.CONVERGENT, local_head_sha=OLD)
+
+    result = service(store, Observer(lambda _run: snapshot), effects).resume(37, resume_local_gates=True)
+
+    resumed = store.get(original.id)
+    assert resumed.phase is ExecutionPhase.HUMAN_REQUIRED
+    assert resumed.id == blocked.id
+    assert (resumed.branch, resumed.worktree_path, resumed.codex_session_id) == (
+        original.branch,
+        original.worktree_path,
+        original.codex_session_id,
+    )
+    assert resumed.pull_request_number is None
+    assert effects.calls == {"gates": 1}
+    assert result.phase == ExecutionPhase.HUMAN_REQUIRED.value
+
+
 def test_preparing_existing_worktree_keeps_execution_and_does_not_prepare_again(tmp_path: Path) -> None:
     store = SqliteExecutionStore(tmp_path / "state.db")
     original = create(store)

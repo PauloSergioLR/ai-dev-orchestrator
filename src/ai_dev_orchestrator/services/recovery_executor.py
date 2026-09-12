@@ -12,7 +12,7 @@ from ai_dev_orchestrator.domain.recovery import (
     RecoveryAction, RecoveryDecision, RecoveryObservation, RecoveryPolicy,
 )
 from ai_dev_orchestrator.domain.review import ReviewFinding, StructuredReview
-from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
+from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore, sanitize_diagnostic_text
 from ai_dev_orchestrator.services.validation import LocalValidationError
 from ai_dev_orchestrator.domain.provider import ProviderFailure
 
@@ -94,11 +94,18 @@ class RecoveryExecutor:
             except LocalValidationError as error:
                 if isinstance(error, ProviderFailure):
                     raise
+                diagnostic = str(error)[:500]
+                if error.result is not None:
+                    self.store.checkpoint(
+                        run.id,
+                        summary="Diagnóstico de gate local persistido",
+                        gate_results_json=json.dumps([self._gate_result(error.result, run)], ensure_ascii=False),
+                    )
                 limit = getattr(self.effects, "max_local_gate_correction_attempts", 0)
                 if run.local_gate_correction_attempts >= limit:
                     return self.store.require_human(
                         run.id,
-                        summary="Limite de correções locais atingido; identidade preservada",
+                        summary=f"Limite de correções locais atingido; identidade preservada. Diagnóstico: {diagnostic}",
                         reason="LOCAL_GATE_CORRECTION_LIMIT",
                     )
                 audited = self.store.transition(
@@ -128,6 +135,7 @@ class RecoveryExecutor:
                             "category": gate.category,
                             "succeeded": gate.succeeded,
                             "returncode": gate.returncode,
+                            "diagnostic": sanitize_diagnostic_text(gate.diagnostic),
                             "duration_seconds": round(gate.duration_seconds, 6),
                             "attempt": run.local_gate_correction_attempts,
                         }
@@ -239,6 +247,18 @@ class RecoveryExecutor:
         if action == RecoveryAction.COMPLETE:
             return self.store.transition(run.id, ExecutionPhase.COMPLETED, summary=decision.reason)
         raise RecoveryExecutionError("Ação de recovery desconhecida")
+
+    @staticmethod
+    def _gate_result(gate, run: RunRecord) -> dict[str, object]:
+        return {
+            "name": gate.name,
+            "category": gate.category,
+            "succeeded": gate.succeeded,
+            "returncode": gate.returncode,
+            "diagnostic": sanitize_diagnostic_text(gate.diagnostic),
+            "duration_seconds": round(gate.duration_seconds, 6),
+            "attempt": run.local_gate_correction_attempts,
+        }
 
     @staticmethod
     def _required(value: str | None, name: str) -> None:

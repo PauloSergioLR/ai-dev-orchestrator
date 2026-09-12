@@ -14,6 +14,14 @@ from ai_dev_orchestrator.adapters.notifications import (
 )
 
 
+def test_suite_blocks_real_network_even_with_notification_credentials(monkeypatch) -> None:
+    """Regressão: fixtures e secrets herdados nunca podem entregar notificações."""
+    monkeypatch.setenv("ORCH_DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/id/secret")
+
+    with pytest.raises(AssertionError, match="não pode abrir conexões"):
+        DiscordWebhookProvider().send("acme/repo Issue sintética")
+
+
 def configure(monkeypatch, channel):
     for name in REQUIRED_ENV[channel]:
         monkeypatch.setenv(name, "valor-local")

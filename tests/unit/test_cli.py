@@ -148,7 +148,8 @@ def test_resume_encaminha_flags_explicitas_sem_substituir_identidade(monkeypatch
 
     monkeypatch.setattr("ai_dev_orchestrator.cli.load_config", lambda: object())
     monkeypatch.setattr("ai_dev_orchestrator.cli.ResumeService.from_config", lambda _: Service())
-    for flag, option in (("--retry-provider", "retry_provider"), ("--recover-failed", "recover_failed")):
+    for flag, option in (("--retry-provider", "retry_provider"), ("--recover-failed", "recover_failed"),
+                         ("--resume-local-gates", "resume_local_gates")):
         result = runner.invoke(app, ["resume", "--issue", "37", flag])
         assert result.exit_code == 0
         assert calls[-1] == (37, {option: True})

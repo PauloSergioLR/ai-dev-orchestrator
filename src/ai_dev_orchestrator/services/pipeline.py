@@ -56,7 +56,7 @@ from ai_dev_orchestrator.services.merge import (
     wait_for_merge_confirmation,
 )
 from ai_dev_orchestrator.domain.execution import ExecutionPhase, ExecutionStore
-from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
+from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore, sanitize_diagnostic_text
 from ai_dev_orchestrator.domain.provider import ProviderFailure
 from ai_dev_orchestrator.domain.project_contract import CommandPlan, ProjectContract, SourceEvidence
 from ai_dev_orchestrator.services.project_discovery import ProjectCapabilityResolver
@@ -1039,6 +1039,7 @@ class RunPipeline:
                 "category": gate.category,
                 "succeeded": gate.succeeded,
                 "returncode": gate.returncode,
+                "diagnostic": sanitize_diagnostic_text(gate.diagnostic),
                 "duration_seconds": round(gate.duration_seconds, 6),
                 "attempt": attempt,
             }
