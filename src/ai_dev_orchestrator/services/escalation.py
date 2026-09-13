@@ -42,6 +42,7 @@ NOTIFIABLE_PHASES = frozenset({
     ExecutionPhase.NEEDS_CHANGES,
     ExecutionPhase.COMPLETED,
 })
+CHAT_NOTIFICATION_CHANNELS = frozenset({"discord", "telegram"})
 
 
 def safe_context(value: object) -> str:
@@ -161,6 +162,8 @@ class EscalationService:
             f"Horário: {timestamp}\n{links}"
         )
         for name, channel in self.channels.items():
+            if name in CHAT_NOTIFICATION_CHANNELS:
+                continue
             self._attempt(run, key, name, lambda channel=channel: channel.send(message))
 
     def _project(self, run: RunRecord, status: str) -> None:
