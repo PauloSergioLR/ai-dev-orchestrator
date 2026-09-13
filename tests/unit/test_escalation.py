@@ -1,6 +1,7 @@
 """Escalonamento e notificações com providers locais, sem rede real."""
 
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 from unittest.mock import Mock
 
 import pytest
@@ -81,7 +82,7 @@ def test_quota_com_retry_conhecido_nao_notifica(setup):
     project.set_status.assert_not_called()
 
 
-def test_eventos_configurados_sao_despachados_uma_vez_por_transicao(setup):
+def test_eventos_intermediarios_nao_enviam_discord_ou_telegram(setup):
     config, store, channels, _, escalation = setup
     config.notifications.events = ("WAITING_CODEX_QUOTA", "COMPLETED")
     run = advance(store, Phase.CODEX_RUNNING)
@@ -91,9 +92,25 @@ def test_eventos_configurados_sao_despachados_uma_vez_por_transicao(setup):
     )
     escalation.assess(waiting)
     escalation.assess(store.get(waiting.id))
-    assert channels["discord"].send.call_count == 1
-    message = channels["discord"].send.call_args.args[0]
+    channels["email"].send.assert_called_once()
+    channels["discord"].send.assert_not_called()
+    channels["telegram"].send.assert_not_called()
+    message = channels["email"].send.call_args.args[0]
     assert "WAITING_CODEX_QUOTA" in message and "Issue #" in message and "Provider: codex" in message
+
+
+@pytest.mark.parametrize("phase", (Phase.NEEDS_CHANGES, Phase.WAITING_PROVIDER, Phase.COMPLETED))
+def test_transicoes_intermediarias_nunca_enviam_canais_de_chat(setup, phase):
+    config, store, channels, _, escalation = setup
+    config.notifications.events = (phase.value,)
+    escalation.channels = {name: channels[name] for name in ("discord", "telegram")}
+    run = advance(store, Phase.CODEX_RUNNING)
+    run = replace(run, phase=phase)
+
+    escalation.deliver_event(run)
+
+    channels["discord"].send.assert_not_called()
+    channels["telegram"].send.assert_not_called()
 
 
 def test_quota_sem_retry_respeita_politica_local(setup):
