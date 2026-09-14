@@ -235,6 +235,59 @@ def test_local_gate_limit_retries_same_identity_only_when_explicitly_authorized(
     assert result.phase == ExecutionPhase.HUMAN_REQUIRED.value
 
 
+def test_legacy_local_gate_progress_error_reexecutes_gates_with_same_identity(tmp_path: Path) -> None:
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    original = advance(store, ExecutionPhase.TESTING)
+    corrected = store.checkpoint(
+        original.id,
+        summary="Diagnóstico de gate local persistido",
+        local_gate_correction_attempts=1,
+        gate_results_json='[{"name":"pytest","succeeded":false}]',
+    )
+    blocked = store.require_human(
+        corrected.id,
+        summary="Retomada sem progresso detectada",
+        reason="INTERNAL_ERROR",
+    )
+    effects = Effects()
+
+    def snapshot(run: RunRecord) -> RecoveryObservation:
+        if run.phase is ExecutionPhase.COMMIT_PENDING:
+            raise RuntimeError("gates reexecutados")
+        return RecoveryObservation(WorktreeState.CONVERGENT, local_head_sha=OLD)
+
+    with pytest.raises(ResumeError, match="gates reexecutados"):
+        service(store, Observer(snapshot), effects).resume(37, resume_local_gates=True)
+
+    resumed = store.get(original.id)
+    assert resumed.phase is ExecutionPhase.COMMIT_PENDING
+    assert (resumed.id, resumed.codex_session_id, resumed.branch, resumed.worktree_path) == (
+        blocked.id,
+        original.codex_session_id,
+        original.branch,
+        original.worktree_path,
+    )
+    assert resumed.local_gate_correction_attempts == 1
+    assert resumed.pull_request_number is resumed.pull_request_url is None
+    assert effects.calls == {"gates": 1}
+
+
+def test_legacy_local_gate_progress_error_requires_persisted_gate_evidence(tmp_path: Path) -> None:
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    original = advance(store, ExecutionPhase.TESTING)
+    blocked = store.require_human(
+        original.id,
+        summary="Retomada sem progresso detectada",
+        reason="INTERNAL_ERROR",
+    )
+
+    result = service(
+        store, Observer(lambda _run: pytest.fail("não deve observar")), Effects()
+    ).resume(37, resume_local_gates=True)
+
+    assert result.phase == ExecutionPhase.HUMAN_REQUIRED.value
+    assert store.get(original.id) == blocked
+
 def test_preparing_existing_worktree_keeps_execution_and_does_not_prepare_again(tmp_path: Path) -> None:
     store = SqliteExecutionStore(tmp_path / "state.db")
     original = create(store)
