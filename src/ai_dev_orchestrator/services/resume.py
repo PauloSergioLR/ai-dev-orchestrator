@@ -156,6 +156,7 @@ class ResumeService:
                          run.current_head_sha, run.ci_head_sha, run.reviewed_head_sha,
                          run.review_verdict, run.correction_attempts, run.merge_commit_sha,
                          run.merged_head_sha, run.project_status,
+                         run.local_gate_correction_attempts, run.gate_results_json,
                          observation, decision.action, decision.next_phase)
             if signature in seen:
                 raise ResumeError("Retomada sem progresso detectada")
