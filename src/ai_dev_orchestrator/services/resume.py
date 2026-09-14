@@ -116,7 +116,7 @@ class ResumeService:
                     ExecutionPhase.WAITING_CI,
                     summary="Retomada de CI legada autorizada; identidade persistida será revalidada",
                 )
-            elif resume_local_gates and self._is_local_gate_correction_limit(run):
+            elif resume_local_gates and self._is_local_gate_resume_eligible(run):
                 run = self.store.transition(
                     run.id,
                     ExecutionPhase.TESTING,
@@ -235,6 +235,20 @@ class ResumeService:
             run.human_reason == "LOCAL_GATE_CORRECTION_LIMIT"
             and run.human_phase == ExecutionPhase.TESTING.value
             and bool(run.branch and run.worktree_path and run.base_ref and run.codex_session_id)
+        )
+
+    @classmethod
+    def _is_local_gate_resume_eligible(cls, run: RunRecord) -> bool:
+        """Aceita o limite explícito ou o legado comprovadamente interrompido pelo anti-loop."""
+        if cls._is_local_gate_correction_limit(run):
+            return True
+        return (
+            run.human_reason == "INTERNAL_ERROR"
+            and run.human_phase == ExecutionPhase.TESTING.value
+            and run.pull_request_number is None
+            and run.pull_request_url is None
+            and bool(run.branch and run.worktree_path and run.base_ref and run.codex_session_id)
+            and (run.local_gate_correction_attempts > 0 or run.gate_results_json is not None)
         )
 
     def _record_provider_wait(self, run: RunRecord, failure: ProviderFailure) -> RunRecord:
