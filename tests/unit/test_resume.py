@@ -275,6 +275,65 @@ def test_testing_reexecutes_gates_before_commit(tmp_path: Path) -> None:
     assert store.get_active_for_issue(37).phase == ExecutionPhase.COMMIT_PENDING  # type: ignore[union-attr]
 
 
+def test_retry_provider_reexecutes_local_gates_after_same_session_correction(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+
+    from ai_dev_orchestrator.domain.provider import ProviderFailure, ProviderFailureKind
+    from ai_dev_orchestrator.services.provider_recovery import record_provider_failure
+    from ai_dev_orchestrator.services.validation import GateResult, LocalValidationError
+
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    original = advance(store, ExecutionPhase.TESTING)
+    running = store.transition(
+        original.id, ExecutionPhase.CODEX_RUNNING, summary="quota durante sessão"
+    )
+    waiting = record_provider_failure(
+        store,
+        running.id,
+        ProviderFailure(
+            "codex",
+            ProviderFailureKind.TERMINAL_QUOTA,
+            "quota",
+            datetime.now(timezone.utc),
+            session_id=original.codex_session_id,
+        ),
+    )
+    blocked = store.require_human(
+        waiting.id, summary="quota requer retry manual", reason="QUOTA_NO_RETRY"
+    )
+    effects = Effects()
+    effects.max_local_gate_correction_attempts = 1
+
+    def gates(run: RunRecord):
+        effects.called("gates")
+        if effects.calls["gates"] == 1:
+            raise LocalValidationError(
+                "pytest falhou",
+                result=GateResult("pytest", ("pytest",), False, 1, "assert 1 == 2"),
+            )
+        return ()
+
+    effects.run_local_gates = gates
+
+    def snapshot(run: RunRecord) -> RecoveryObservation:
+        if run.phase is ExecutionPhase.COMMIT_PENDING:
+            raise RuntimeError("gates reexecutados")
+        return RecoveryObservation(WorktreeState.CONVERGENT, local_head_sha=OLD)
+
+    with pytest.raises(ResumeError, match="gates reexecutados"):
+        service(store, Observer(snapshot), effects).resume(37, retry_provider=True)
+
+    resumed = store.get(original.id)
+    assert resumed.phase is ExecutionPhase.COMMIT_PENDING
+    assert resumed.local_gate_correction_attempts == 1
+    assert (resumed.id, resumed.codex_session_id, resumed.branch, resumed.worktree_path) == (
+        blocked.id,
+        original.codex_session_id,
+        original.branch,
+        original.worktree_path,
+    )
+    assert effects.calls == {"resume": 2, "gates": 2}
+
 def test_crash_boundaries_are_reconciled_without_repeating_remote_mutations(tmp_path: Path) -> None:
     store = SqliteExecutionStore(tmp_path / "state.db")
     original = advance(store, ExecutionPhase.COMMIT_PENDING)
