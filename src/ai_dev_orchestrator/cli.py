@@ -616,6 +616,7 @@ def resume(
     retry_provider: bool = typer.Option(False, "--retry-provider", help="Tenta novamente após intervenção na causa do bloqueio do provider."),
     recover_failed: bool = typer.Option(False, "--recover-failed", help="Reconcilia FAILED transitório com provas locais/remotas antes de reativar."),
     resume_local_gates: bool = typer.Option(False, "--resume-local-gates", help="Autoriza reexecutar gates locais após LOCAL_GATE_CORRECTION_LIMIT."),
+    resume_publication: bool = typer.Option(False, "--resume-publication", help="Reconcilia HUMAN_REQUIRED de commit, push ou PR antes de retomar a publicação."),
 ) -> None:
     """Retoma uma execução ativa a partir do estado persistido."""
     try:
@@ -627,6 +628,8 @@ def resume(
             options["recover_failed"] = True
         if resume_local_gates:
             options["resume_local_gates"] = True
+        if resume_publication:
+            options["resume_publication"] = True
         result = service.resume(issue, **options)
     except (ConfigurationError, ResumeError, ExecutionStoreError) as error:
         typer.echo(f"Erro: {error}", err=True)

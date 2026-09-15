@@ -59,6 +59,33 @@ local idêntico ao checkpoint. A partir de `WAITING_CI`, o número e a URL do PR
 devem estar persistidos juntos, e a observação deve conter exatamente um PR com
 repositório, base, branch e HEAD convergentes. Uma identidade parcial bloqueia.
 
+## Recuperação explícita de publicação em HUMAN_REQUIRED
+
+Uma execução interrompida em publicação continua fechada por padrão. O comando
+`orch resume --issue N --resume-publication` só considera
+`HUMAN_REQUIRED` com motivo `INTERNAL_ERROR` ou `REMOTE_AMBIGUOUS` e
+`human_phase` igual a `COMMIT_PENDING`, `PUSH_PENDING`, `PR_PENDING` ou
+`PUBLISHING` legado. Outros motivos e fases não são reinterpretados.
+
+Antes de restaurar a fase persistida, o serviço cria apenas uma visão temporária
+da mesma execução, coleta novamente Git, branch remota e Pull Requests e consulta
+o `RecoveryPlanner`. A transição real só ocorre quando o planner escolhe uma
+ação diferente de `BLOCK`. Depois disso, o loop normal volta a observar antes
+de cada efeito e segue sozinho por commit, push, PR, CI, review e demais etapas.
+
+Em `COMMIT_PENDING`, alterações locais só permitem `CREATE_COMMIT` quando o
+HEAD observado ainda é o checkpoint. Um commit já existente só permite
+`RECORD_EXISTING_COMMIT` quando o worktree está limpo e seu pai imediato é o
+checkpoint. Push, branch remota e PR mantêm as mesmas provas estritas do planner.
+Divergência, identidade incompleta, PR parcial ou observação ambígua continuam
+bloqueados.
+
+A restauração preserva `execution_id`, sessão Codex, branch, worktree,
+`base_ref` e o checkpoint de HEAD. Ela não executa reset, checkout, abort de
+merge, rebase, recriação de worktree nem descarte de arquivos. O HEAD persistido
+só muda quando o executor comprova ou cria o commit seguinte.
+
+
 ## Provas de histórico e review
 
 Para não aceitar divergências silenciosas, commit e push usam relações diretas:

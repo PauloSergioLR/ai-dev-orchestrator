@@ -193,3 +193,17 @@ retomar. Depois de corrigir um bloqueio, --retry-provider solicita uma tentativa
 explícita. --recover-failed reconcilia registros históricos de falha transitória
 somente quando a identidade local/remota pode ser comprovada. Consulte as
 [regras de recuperação e encoding](docs/recovery-state-machine.md#falhas-de-provider-e-retomada).
+
+Para um bloqueio ocorrido especificamente durante commit, push ou criação/adoção
+do Pull Request, depois de inspecionar a execução use:
+
+```powershell
+orch resume --issue N --resume-publication
+```
+
+A opção aceita somente `INTERNAL_ERROR` ou `REMOTE_AMBIGUOUS` nas fases de
+publicação recuperáveis. Ela observa Git e PR e exige uma decisão segura do
+`RecoveryPlanner` antes de restaurar a fase; identidade incompleta ou qualquer
+contradição permanece em `HUMAN_REQUIRED`. A mesma execução, sessão Codex,
+branch e worktree são preservadas, e o pipeline segue normalmente após a
+reconciliação.

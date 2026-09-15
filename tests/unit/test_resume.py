@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from ai_dev_orchestrator.adapters.antigravity import AntigravityError
-from ai_dev_orchestrator.domain.execution import ExecutionPhase, RunRecord
+from ai_dev_orchestrator.domain.execution import ExecutionPhase, RunRecord, validate_transition
 from ai_dev_orchestrator.domain.recovery import (
     CiObservation, CiState, MergeObservation, MergeState, ProjectState,
     PullRequestObservation, PullRequestState, RecoveryObservation, RecoveryPolicy,
@@ -198,6 +198,365 @@ def test_other_human_required_run_remains_closed(tmp_path: Path) -> None:
     assert result.phase == ExecutionPhase.HUMAN_REQUIRED.value
     assert store.get(legacy.id).phase is ExecutionPhase.HUMAN_REQUIRED
     assert effects.calls == {}
+
+
+def test_resume_publication_from_dirty_commit_continues_to_completion_with_same_identity(
+    tmp_path: Path,
+) -> None:
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    original = advance(store, ExecutionPhase.COMMIT_PENDING)
+    blocked = store.require_human(
+        original.id, summary="falha interna na publicação", reason="INTERNAL_ERROR"
+    )
+    effects = Effects()
+    observed_commit_identities: list[tuple[object, ...]] = []
+
+    def snapshot(run: RunRecord) -> RecoveryObservation:
+        if run.phase is ExecutionPhase.COMMIT_PENDING:
+            observed_commit_identities.append(
+                (
+                    run.id,
+                    run.codex_session_id,
+                    run.branch,
+                    run.worktree_path,
+                    run.current_head_sha,
+                )
+            )
+            return RecoveryObservation(
+                WorktreeState.CONVERGENT,
+                local_head_sha=OLD,
+                has_worktree_changes=True,
+            )
+        if run.phase is ExecutionPhase.PUSH_PENDING:
+            return RecoveryObservation(
+                WorktreeState.CONVERGENT,
+                local_head_sha=HEAD,
+                local_head_parent_sha=OLD,
+            )
+        if run.phase is ExecutionPhase.PR_PENDING:
+            return RecoveryObservation(
+                WorktreeState.CONVERGENT,
+                local_head_sha=HEAD,
+                local_head_parent_sha=OLD,
+                remote_head_sha=HEAD,
+            )
+        if run.phase in {
+            ExecutionPhase.WAITING_CI,
+            ExecutionPhase.GEMINI_REVIEWING,
+            ExecutionPhase.MERGE_PENDING,
+        }:
+            return RecoveryObservation(
+                WorktreeState.CONVERGENT,
+                local_head_sha=HEAD,
+                local_head_parent_sha=OLD,
+                remote_head_sha=HEAD,
+                pull_requests=(pr(),),
+                ci=CiObservation(CiState.SUCCESS, HEAD),
+                merge=MergeObservation(MergeState.OPEN),
+            )
+        if run.phase is ExecutionPhase.PROJECT_DONE_PENDING:
+            return RecoveryObservation(
+                WorktreeState.ABSENT,
+                project_state=ProjectState.DONE,
+            )
+        raise AssertionError(run.phase)
+
+    result = service(store, Observer(snapshot), effects).resume(
+        37, resume_publication=True
+    )
+
+    persisted = store.get(original.id)
+    expected_identity = (
+        blocked.id,
+        original.codex_session_id,
+        original.branch,
+        original.worktree_path,
+        OLD,
+    )
+    assert observed_commit_identities == [expected_identity, expected_identity]
+    assert result.phase == ExecutionPhase.COMPLETED.value
+    assert (
+        persisted.id,
+        persisted.codex_session_id,
+        persisted.branch,
+        persisted.worktree_path,
+    ) == (
+        blocked.id,
+        original.codex_session_id,
+        original.branch,
+        original.worktree_path,
+    )
+    assert persisted.current_head_sha == HEAD
+    assert effects.calls == {
+        "commit": 1,
+        "push": 1,
+        "create_pr": 1,
+        "review": 1,
+        "merge": 1,
+    }
+    assert len(
+        [
+            event
+            for event in store.events(original.id)
+            if event.phase is ExecutionPhase.HUMAN_REQUIRED
+        ]
+    ) == 1
+
+
+def test_resume_publication_records_existing_direct_commit_without_recreating_it(
+    tmp_path: Path,
+) -> None:
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    original = advance(store, ExecutionPhase.COMMIT_PENDING)
+    store.require_human(
+        original.id, summary="checkpoint interrompido", reason="INTERNAL_ERROR"
+    )
+    effects = Effects()
+
+    def snapshot(run: RunRecord) -> RecoveryObservation:
+        if run.phase is ExecutionPhase.COMMIT_PENDING:
+            return RecoveryObservation(
+                WorktreeState.CONVERGENT,
+                local_head_sha=HEAD,
+                local_head_parent_sha=OLD,
+            )
+        raise RuntimeError("fim após adoção do commit")
+
+    with pytest.raises(ResumeError, match="fim após adoção do commit"):
+        service(store, Observer(snapshot), effects).resume(
+            37, resume_publication=True
+        )
+
+    persisted = store.get(original.id)
+    assert persisted.phase is ExecutionPhase.PUSH_PENDING
+    assert persisted.current_head_sha == HEAD
+    assert persisted.human_reason is persisted.human_phase is None
+    assert effects.calls == {}
+
+
+def test_resume_publication_keeps_nondirect_divergent_head_blocked(
+    tmp_path: Path,
+) -> None:
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    original = advance(store, ExecutionPhase.COMMIT_PENDING)
+    blocked = store.require_human(
+        original.id, summary="checkpoint interrompido", reason="INTERNAL_ERROR"
+    )
+    effects = Effects()
+    snapshot = RecoveryObservation(
+        WorktreeState.CONVERGENT,
+        local_head_sha=HEAD,
+        local_head_parent_sha=MERGE,
+    )
+
+    with pytest.raises(ResumeError, match="commit direto e seguro"):
+        service(store, Observer(lambda _run: snapshot), effects).resume(
+            37, resume_publication=True
+        )
+
+    assert store.get(original.id) == blocked
+    assert effects.calls == {}
+
+
+def test_resume_publication_keeps_incomplete_worktree_identity_blocked(
+    tmp_path: Path,
+) -> None:
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    run = store.create(
+        37,
+        project_item_id="item",
+        worktree_path="C:/worktree",
+        base_ref="main",
+    )
+    run = store.transition(
+        run.id,
+        ExecutionPhase.CODEX_RUNNING,
+        summary="worktree",
+        current_head_sha=OLD,
+    )
+    run = store.transition(
+        run.id,
+        ExecutionPhase.TESTING,
+        summary="codex",
+        codex_session_id="session",
+    )
+    run = store.transition(run.id, ExecutionPhase.COMMIT_PENDING, summary="gates")
+    blocked = store.require_human(
+        run.id, summary="checkpoint interrompido", reason="INTERNAL_ERROR"
+    )
+    effects = Effects()
+
+    with pytest.raises(ResumeError, match="Identidade persistida do worktree"):
+        service(
+            store,
+            Observer(
+                lambda _run: RecoveryObservation(
+                    WorktreeState.CONVERGENT,
+                    local_head_sha=OLD,
+                    has_worktree_changes=True,
+                )
+            ),
+            effects,
+        ).resume(37, resume_publication=True)
+
+    assert store.get(run.id) == blocked
+    assert effects.calls == {}
+
+
+def test_resume_publication_reconciles_existing_push(
+    tmp_path: Path,
+) -> None:
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    original = advance(store, ExecutionPhase.PUSH_PENDING)
+    store.require_human(
+        original.id, summary="push ambíguo", reason="REMOTE_AMBIGUOUS"
+    )
+    effects = Effects()
+
+    def snapshot(run: RunRecord) -> RecoveryObservation:
+        if run.phase is ExecutionPhase.PUSH_PENDING:
+            return RecoveryObservation(
+                WorktreeState.CONVERGENT,
+                local_head_sha=HEAD,
+                local_head_parent_sha=OLD,
+                remote_head_sha=HEAD,
+            )
+        raise RuntimeError("fim após adoção do push")
+
+    with pytest.raises(ResumeError, match="fim após adoção do push"):
+        service(store, Observer(snapshot), effects).resume(
+            37, resume_publication=True
+        )
+
+    persisted = store.get(original.id)
+    assert persisted.phase is ExecutionPhase.PR_PENDING
+    assert persisted.current_head_sha == HEAD
+    assert effects.calls == {}
+
+
+def test_resume_publication_reconciles_existing_pull_request(
+    tmp_path: Path,
+) -> None:
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    original = advance(store, ExecutionPhase.PR_PENDING)
+    store.require_human(
+        original.id, summary="PR ambíguo", reason="REMOTE_AMBIGUOUS"
+    )
+    effects = Effects()
+
+    def snapshot(run: RunRecord) -> RecoveryObservation:
+        if run.phase is ExecutionPhase.PR_PENDING:
+            return RecoveryObservation(
+                WorktreeState.CONVERGENT,
+                local_head_sha=HEAD,
+                local_head_parent_sha=OLD,
+                remote_head_sha=HEAD,
+                pull_requests=(pr(),),
+            )
+        raise RuntimeError("fim após adoção do PR")
+
+    with pytest.raises(ResumeError, match="fim após adoção do PR"):
+        service(store, Observer(snapshot), effects).resume(
+            37, resume_publication=True
+        )
+
+    persisted = store.get(original.id)
+    assert persisted.phase is ExecutionPhase.WAITING_CI
+    assert (
+        persisted.pull_request_number,
+        persisted.pull_request_url,
+    ) == (37, URL)
+    assert effects.calls == {}
+
+
+def test_resume_publication_keeps_remote_and_pr_contradiction_blocked(
+    tmp_path: Path,
+) -> None:
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    original = advance(store, ExecutionPhase.PR_PENDING)
+    blocked = store.require_human(
+        original.id, summary="PR ambíguo", reason="REMOTE_AMBIGUOUS"
+    )
+    effects = Effects()
+    snapshot = RecoveryObservation(
+        WorktreeState.CONVERGENT,
+        local_head_sha=HEAD,
+        local_head_parent_sha=OLD,
+        remote_head_sha=MERGE,
+        pull_requests=(pr(MERGE),),
+    )
+
+    with pytest.raises(ResumeError, match="Branch remota não converge"):
+        service(store, Observer(lambda _run: snapshot), effects).resume(
+            37, resume_publication=True
+        )
+
+    assert store.get(original.id) == blocked
+    assert effects.calls == {}
+
+
+def test_resume_publication_rejects_unrelated_human_reason_without_observing(
+    tmp_path: Path,
+) -> None:
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    original = advance(store, ExecutionPhase.COMMIT_PENDING)
+    blocked = store.require_human(
+        original.id, summary="autenticação", reason="AUTH_ERROR"
+    )
+    observer = Observer(lambda _run: pytest.fail("não deve observar"))
+    effects = Effects()
+
+    with pytest.raises(ResumeError, match="motivo HUMAN_REQUIRED"):
+        service(store, observer, effects).resume(37, resume_publication=True)
+
+    assert observer.calls == 0
+    assert store.get(original.id) == blocked
+    assert effects.calls == {}
+
+
+def test_resume_publication_supports_legacy_publishing_checkpoint(
+    tmp_path: Path,
+) -> None:
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    run = create(store)
+    run = store.transition(
+        run.id,
+        ExecutionPhase.CODEX_RUNNING,
+        summary="worktree",
+        current_head_sha=OLD,
+    )
+    run = store.transition(
+        run.id,
+        ExecutionPhase.TESTING,
+        summary="codex",
+        codex_session_id="session",
+    )
+    original = store.transition(
+        run.id, ExecutionPhase.PUBLISHING, summary="publicação legada"
+    )
+    store.require_human(
+        original.id, summary="falha interna", reason="INTERNAL_ERROR"
+    )
+    effects = Effects()
+
+    def snapshot(current: RunRecord) -> RecoveryObservation:
+        if current.phase is ExecutionPhase.PUBLISHING:
+            return RecoveryObservation(
+                WorktreeState.CONVERGENT,
+                local_head_sha=OLD,
+                has_worktree_changes=True,
+            )
+        raise RuntimeError("fim após commit legado")
+
+    with pytest.raises(ResumeError, match="fim após commit legado"):
+        service(store, Observer(snapshot), effects).resume(
+            37, resume_publication=True
+        )
+
+    persisted = store.get(original.id)
+    assert persisted.phase is ExecutionPhase.PUSH_PENDING
+    assert persisted.current_head_sha == HEAD
+    assert effects.calls == {"commit": 1}
 
 
 def test_local_gate_limit_retries_same_identity_only_when_explicitly_authorized(tmp_path: Path) -> None:
@@ -458,6 +817,7 @@ def test_protocol_failure_in_review_retries_only_same_head(tmp_path: Path, failu
         ci_head_sha=HEAD,
     )
     snapshot = RecoveryObservation(
+
         WorktreeState.CONVERGENT,
         local_head_sha=HEAD,
         remote_head_sha=HEAD,
@@ -611,3 +971,19 @@ def test_observation_error_runs_no_effect(tmp_path: Path) -> None:
         service(store, Observer(lambda _run: (_ for _ in ()).throw(RuntimeError("offline"))), effects).resume(37)
 
     assert effects.calls == {}
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        ExecutionPhase.COMMIT_PENDING,
+        ExecutionPhase.PUSH_PENDING,
+        ExecutionPhase.PR_PENDING,
+        ExecutionPhase.PUBLISHING,
+    ],
+)
+def test_human_required_allows_publication_targets_but_not_merge(
+    target: ExecutionPhase,
+) -> None:
+    validate_transition(ExecutionPhase.HUMAN_REQUIRED, target)
+    with pytest.raises(ValueError, match="Transição de execução inválida"):
+        validate_transition(ExecutionPhase.HUMAN_REQUIRED, ExecutionPhase.MERGE_PENDING)
