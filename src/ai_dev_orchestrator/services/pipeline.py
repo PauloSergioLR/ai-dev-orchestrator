@@ -881,7 +881,6 @@ class RunPipeline:
             )
             self._transition(ExecutionPhase.COMMIT_PENDING, "Commit da correção será publicado")
             new_head = self.git_publisher.commit_correction(worktree.path)
-            self._checkpoint("HEAD da correção preservado", current_head_sha=new_head)
             self._ensure_existing_pull_request(
                 pull_request, worktree.branch, ci_result.expected_head_sha
             )

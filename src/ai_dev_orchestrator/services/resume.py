@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from ai_dev_orchestrator.domain.execution import RunRecord, TERMINAL_PHASES, PROVIDER_WAIT_PHASES
-from ai_dev_orchestrator.domain.recovery import RecoveryObservation
+from ai_dev_orchestrator.domain.recovery import RecoveryAction, RecoveryObservation
 from ai_dev_orchestrator.config import OrchestratorConfig
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
 from ai_dev_orchestrator.services.recovery_executor import RecoveryExecutor
@@ -65,10 +65,12 @@ class ResumeService:
         return cls(store, RealObserver(config, store), RecoveryPlanner(policy), RecoveryExecutor(policy, store, RecoveryEffects(config)), config.providers.codex_model, config.providers.gemini_model, EscalationService(config, store, GitHubProjectStatusAdapter(config)))
 
     def resume(self, issue_number: int, *, retry_provider: bool = False, recover_failed: bool = False,
-               resume_local_gates: bool = False) -> ResumeResult:
+               resume_local_gates: bool = False,
+               resume_publication: bool = False) -> ResumeResult:
         try:
             result = self._resume(issue_number, retry_provider=retry_provider, recover_failed=recover_failed,
-                                  resume_local_gates=resume_local_gates)
+                                  resume_local_gates=resume_local_gates,
+                                  resume_publication=resume_publication)
         except Exception as error:
             run = self.store.get_active_for_issue(issue_number)
             if run and self.escalation:
@@ -88,7 +90,8 @@ class ResumeService:
         return result
 
     def _resume(self, issue_number: int, *, retry_provider: bool = False, recover_failed: bool = False,
-                resume_local_gates: bool = False) -> ResumeResult:
+                resume_local_gates: bool = False,
+                resume_publication: bool = False) -> ResumeResult:
         if issue_number <= 0:
             raise ResumeError("A Issue deve ser um inteiro positivo")
         run = self.store.get_active_for_issue(issue_number)
@@ -110,7 +113,10 @@ class ResumeService:
         if run.phase in TERMINAL_PHASES:
             raise ResumeError(f"A execução da Issue #{issue_number} já é terminal")
         if run.phase is ExecutionPhase.HUMAN_REQUIRED:
-            if self._is_legacy_ci_terminal(run):
+            if resume_publication:
+                self._validate_models(run)
+                run = self._resume_publication(run)
+            elif self._is_legacy_ci_terminal(run):
                 run = self.store.transition(
                     run.id,
                     ExecutionPhase.WAITING_CI,
@@ -124,13 +130,7 @@ class ResumeService:
                 )
             elif not (retry_provider and run.provider_resume_phase):
                 return self._result(run)
-        if (
-            (self.codex_model is not None and run.codex_model != self.codex_model)
-            or (self.gemini_model is not None and run.gemini_model != self.gemini_model)
-        ):
-            raise ResumeError(
-                "Os modelos configurados divergem dos modelos persistidos nesta execução"
-            )
+        self._validate_models(run)
         run = self.store.checkpoint(run.id, summary="Retomada iniciada")
         try:
             run = resume_provider_wait(self.store, run, manual_retry=retry_provider)
@@ -250,6 +250,60 @@ class ResumeService:
             and bool(run.branch and run.worktree_path and run.base_ref and run.codex_session_id)
             and (run.local_gate_correction_attempts > 0 or run.gate_results_json is not None)
         )
+
+    def _resume_publication(self, run: RunRecord) -> RunRecord:
+        """Restaura uma fase de publicação somente após prova read-only do planner."""
+        allowed_reasons = {"INTERNAL_ERROR", "REMOTE_AMBIGUOUS"}
+        allowed_phases = {
+            ExecutionPhase.COMMIT_PENDING,
+            ExecutionPhase.PUSH_PENDING,
+            ExecutionPhase.PR_PENDING,
+            ExecutionPhase.PUBLISHING,
+        }
+        if run.human_reason not in allowed_reasons:
+            raise ResumeError(
+                "Recuperação de publicação não autorizada para o motivo HUMAN_REQUIRED atual"
+            )
+        try:
+            target = ExecutionPhase(run.human_phase or "")
+        except ValueError as error:
+            raise ResumeError(
+                "Recuperação de publicação exige human_phase reconhecida"
+            ) from error
+        if target not in allowed_phases:
+            raise ResumeError(
+                "Recuperação de publicação não autorizada para a human_phase atual"
+            )
+
+        candidate = replace(run, phase=target)
+        try:
+            observation = self.observer.observe(candidate)
+        except Exception as error:
+            raise ResumeError(
+                f"Não foi possível observar a recuperação de publicação: {error}"
+            ) from error
+        decision = self.planner.plan(candidate, observation)
+        if decision.action is RecoveryAction.BLOCK:
+            raise ResumeError(
+                "Recuperação de publicação bloqueada: " + decision.reason
+            )
+        return self.store.transition(
+            run.id,
+            target,
+            summary=(
+                "Retomada explícita de publicação autorizada após observação segura: "
+                f"{decision.action.value}"
+            ),
+        )
+
+    def _validate_models(self, run: RunRecord) -> None:
+        if (
+            (self.codex_model is not None and run.codex_model != self.codex_model)
+            or (self.gemini_model is not None and run.gemini_model != self.gemini_model)
+        ):
+            raise ResumeError(
+                "Os modelos configurados divergem dos modelos persistidos nesta execução"
+            )
 
     def _record_provider_wait(self, run: RunRecord, failure: ProviderFailure) -> RunRecord:
         current = record_provider_failure(self.store, run.id, failure)

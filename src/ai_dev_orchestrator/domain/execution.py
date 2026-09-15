@@ -112,6 +112,10 @@ for _phase in PROVIDER_WAIT_PHASES:
     _ALLOWED.setdefault(_phase, set()).update(RESUMABLE_PROVIDER_PHASES)
 _ALLOWED[ExecutionPhase.HUMAN_REQUIRED] = {
     *RESUMABLE_PROVIDER_PHASES,
+    ExecutionPhase.COMMIT_PENDING,
+    ExecutionPhase.PUSH_PENDING,
+    ExecutionPhase.PR_PENDING,
+    ExecutionPhase.PUBLISHING,
     ExecutionPhase.WAITING_CI,
 }
 
