@@ -136,3 +136,36 @@ def test_motivo_vazio_e_reinicio_nao_alteram_decisao(tmp_path):
     reopened = SqliteExecutionStore(tmp_path / "state.db")
     assert reopened.get(original.id).phase is ExecutionPhase.SUPERSEDED
     assert len(reopened.events(original.id)) == 6
+
+
+def test_run_pre_pr_sem_efeito_remoto_pode_ser_abandonado_sem_apagar_worktree(
+    tmp_path: Path,
+) -> None:
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    worktree = tmp_path / "worktree-com-alteracoes"
+    worktree.mkdir()
+    evidence = worktree / "nao-apagar.txt"
+    evidence.write_text("trabalho local", encoding="utf-8")
+    run = store.create(
+        51,
+        branch="work/pre-pr",
+        worktree_path=str(worktree),
+        base_ref="main",
+    )
+
+    class PrePrObserver:
+        def observe(self, _run):
+            return RecoveryObservation(
+                WorktreeState.CONVERGENT,
+                remote_head_sha=None,
+                pull_requests=(),
+                merge=MergeObservation(MergeState.CLOSED),
+            )
+
+    result = SupersessionService(store, PrePrObserver()).supersede(
+        51, "run interrompido antes da publicação"
+    )
+
+    assert result.id == run.id
+    assert result.phase is ExecutionPhase.SUPERSEDED
+    assert evidence.read_text(encoding="utf-8") == "trabalho local"

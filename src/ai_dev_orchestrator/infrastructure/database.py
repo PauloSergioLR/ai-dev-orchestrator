@@ -16,7 +16,7 @@ from ai_dev_orchestrator.domain.execution import (
 )
 from ai_dev_orchestrator.domain.review import ReviewFinding, ReviewVerdict, StructuredReview
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 _SUMMARY_LIMIT = 500
 
 
@@ -74,7 +74,7 @@ class SqliteExecutionStore:
                         "INSERT INTO schema_version(version) VALUES (?)",
                         (SCHEMA_VERSION,),
                     )
-                elif row["version"] in {1, 2, 3, 4}:
+                elif row["version"] in {1, 2, 3, 4, 5}:
                     c.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
                 elif row["version"] != SCHEMA_VERSION:
                     raise SchemaVersionError(
@@ -114,6 +114,12 @@ class SqliteExecutionStore:
                     "ci_correction_attempts": "INTEGER NOT NULL DEFAULT 0",
                     "gate_results_json": "TEXT",
                     "ci_checks_json": "TEXT",
+                    "base_sha": "TEXT",
+                    "candidate_contract_fingerprint": "TEXT",
+                    "candidate_contract_json": "TEXT",
+                    "no_changes_attempts": "INTEGER NOT NULL DEFAULT 0",
+                    "provider_final_message": "TEXT",
+                    "merge_origin": "TEXT",
                 }
                 for name, declaration in additions.items():
                     if name not in existing_columns:
@@ -181,7 +187,7 @@ class SqliteExecutionStore:
         try:
             with self._connection() as c:
                 c.execute(
-                    "INSERT INTO executions(id, issue_number, project_item_id, phase, branch, worktree_path, base_ref, codex_model, gemini_model, repository_identity, contract_fingerprint, project_contract_json, terminal, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                    "INSERT INTO executions(id, issue_number, project_item_id, phase, branch, worktree_path, base_ref, base_sha, codex_model, gemini_model, repository_identity, contract_fingerprint, project_contract_json, terminal, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
                     (
                         execution_id,
                         issue_number,
@@ -190,6 +196,7 @@ class SqliteExecutionStore:
                         details.get("branch"),
                         details.get("worktree_path"),
                         details.get("base_ref"),
+                        details.get("base_sha"),
                         details.get("codex_model", "default"),
                         details.get("gemini_model", "default"),
                         details.get("repository_identity"),
@@ -246,20 +253,34 @@ class SqliteExecutionStore:
             raise ExecutionStoreError("Execução concluída ou já supersedida não pode ser abandonada")
         try:
             with self._connection() as c:
+                c.execute("BEGIN IMMEDIATE")
                 sequence = c.execute(
                     "SELECT COALESCE(MAX(sequence), 0) + 1 FROM execution_events WHERE execution_id = ?",
                     (execution_id,),
                 ).fetchone()[0]
                 now = _now()
-                c.execute(
-                    "UPDATE executions SET phase = ?, terminal = 1, updated_at = ? WHERE id = ?",
-                    (ExecutionPhase.SUPERSEDED.value, now, execution_id),
+                changed = c.execute(
+                    "UPDATE executions SET phase = ?, terminal = 1, updated_at = ? "
+                    "WHERE id = ? AND phase = ? AND updated_at = ?",
+                    (
+                        ExecutionPhase.SUPERSEDED.value,
+                        now,
+                        execution_id,
+                        current.phase.value,
+                        current.updated_at.isoformat(),
+                    ),
                 )
+                if changed.rowcount != 1:
+                    raise ExecutionStoreError(
+                        "Execução mudou desde a decisão de supersessão"
+                    )
                 c.execute(
                     "INSERT INTO execution_events(execution_id, sequence, previous_phase, phase, created_at, summary, head_sha) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (execution_id, sequence, current.phase.value, ExecutionPhase.SUPERSEDED.value,
                      now, _sanitize(summary), current.current_head_sha),
                 )
+        except ExecutionStoreError:
+            raise
         except sqlite3.Error as error:
             raise ExecutionStoreError(f"Não foi possível superseder execução: {error}") from error
         return self.get(execution_id)
@@ -426,6 +447,7 @@ class SqliteExecutionStore:
             "branch",
             "worktree_path",
             "base_ref",
+            "base_sha",
             "codex_session_id",
             "pull_request_number",
             "pull_request_url",
@@ -460,12 +482,19 @@ class SqliteExecutionStore:
             "ci_correction_attempts",
             "gate_results_json",
             "ci_checks_json",
+            "candidate_contract_fingerprint",
+            "candidate_contract_json",
+            "no_changes_attempts",
+            "provider_final_message",
+            "merge_origin",
         }
         if invalid := set(updates) - allowed:
             raise ExecutionStoreError(
                 f"Campos de execução inválidos: {', '.join(sorted(invalid))}"
             )
         self._validate_models(current, updates)
+        if "provider_final_message" in updates and updates["provider_final_message"] is not None:
+            updates["provider_final_message"] = _sanitize(str(updates["provider_final_message"]))
         fields = {
             **updates,
             "phase": phase.value,
@@ -476,14 +505,25 @@ class SqliteExecutionStore:
             fields.update(human_reason=None, human_phase=None, human_at=None)
         try:
             with self._connection() as c:
+                c.execute("BEGIN IMMEDIATE")
                 sequence = c.execute(
                     "SELECT COALESCE(MAX(sequence), 0) + 1 FROM execution_events WHERE execution_id = ?",
                     (execution_id,),
                 ).fetchone()[0]
-                c.execute(
-                    f"UPDATE executions SET {', '.join(f'{key} = ?' for key in fields)} WHERE id = ?",
-                    (*fields.values(), execution_id),
+                changed = c.execute(
+                    f"UPDATE executions SET {', '.join(f'{key} = ?' for key in fields)} "
+                    "WHERE id = ? AND phase = ? AND updated_at = ?",
+                    (
+                        *fields.values(),
+                        execution_id,
+                        current.phase.value,
+                        current.updated_at.isoformat(),
+                    ),
                 )
+                if changed.rowcount != 1:
+                    raise ExecutionStoreError(
+                        "Execução mudou desde a leitura do checkpoint"
+                    )
                 c.execute(
                     "INSERT INTO execution_events(execution_id, sequence, previous_phase, phase, created_at, summary, head_sha) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
@@ -496,6 +536,8 @@ class SqliteExecutionStore:
                         head_sha,
                     ),
                 )
+        except ExecutionStoreError:
+            raise
         except sqlite3.Error as error:
             raise ExecutionStoreError(
                 f"Não foi possível registrar checkpoint: {error}"
@@ -525,6 +567,7 @@ class SqliteExecutionStore:
             "branch",
             "worktree_path",
             "base_ref",
+            "base_sha",
             "codex_session_id",
             "pull_request_number",
             "pull_request_url",
@@ -559,6 +602,11 @@ class SqliteExecutionStore:
             "ci_correction_attempts",
             "gate_results_json",
             "ci_checks_json",
+            "candidate_contract_fingerprint",
+            "candidate_contract_json",
+            "no_changes_attempts",
+            "provider_final_message",
+            "merge_origin",
         }
         if invalid := set(updates) - allowed:
             raise ExecutionStoreError(
@@ -573,17 +621,30 @@ class SqliteExecutionStore:
                 "A sessão Codex não pode ser trocada dentro da mesma execução"
             )
         self._validate_models(current, updates)
+        if "provider_final_message" in updates and updates["provider_final_message"] is not None:
+            updates["provider_final_message"] = _sanitize(str(updates["provider_final_message"]))
         fields = {**updates, "updated_at": _now()}
         try:
             with self._connection() as c:
+                c.execute("BEGIN IMMEDIATE")
                 sequence = c.execute(
                     "SELECT COALESCE(MAX(sequence), 0) + 1 FROM execution_events WHERE execution_id = ?",
                     (execution_id,),
                 ).fetchone()[0]
-                c.execute(
-                    f"UPDATE executions SET {', '.join(f'{key} = ?' for key in fields)} WHERE id = ?",
-                    (*fields.values(), execution_id),
+                changed = c.execute(
+                    f"UPDATE executions SET {', '.join(f'{key} = ?' for key in fields)} "
+                    "WHERE id = ? AND phase = ? AND updated_at = ?",
+                    (
+                        *fields.values(),
+                        execution_id,
+                        current.phase.value,
+                        current.updated_at.isoformat(),
+                    ),
                 )
+                if changed.rowcount != 1:
+                    raise ExecutionStoreError(
+                        "Execução mudou desde a leitura do checkpoint"
+                    )
                 c.execute(
                     "INSERT INTO execution_events(execution_id, sequence, previous_phase, phase, created_at, summary, head_sha) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
@@ -596,6 +657,8 @@ class SqliteExecutionStore:
                         head_sha,
                     ),
                 )
+        except ExecutionStoreError:
+            raise
         except sqlite3.Error as error:
             raise ExecutionStoreError(
                 f"Não foi possível registrar checkpoint: {error}"

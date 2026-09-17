@@ -5,6 +5,8 @@ from dataclasses import replace
 import typer
 from pathlib import Path
 import logging
+import os
+import sys
 
 from ai_dev_orchestrator import __version__
 from ai_dev_orchestrator.config import ConfigurationError, load_config
@@ -19,13 +21,18 @@ from ai_dev_orchestrator.infrastructure.database import (
     SqliteExecutionStore,
 )
 from ai_dev_orchestrator.services.resume import ResumeError, ResumeService
-from ai_dev_orchestrator.services.work import WorkError, WorkService
+from ai_dev_orchestrator.services.work import WorkError, WorkService, branch_from_title
 from ai_dev_orchestrator.services.init_project import ProjectInitError, ProjectInitService
 from ai_dev_orchestrator.services.supervisor import SupervisorError, SupervisorService
 from ai_dev_orchestrator.config import OrchestratorConfig
 from ai_dev_orchestrator.adapters.git import GitWorktreeAdapter
+from ai_dev_orchestrator.adapters.github import GitHubIssueAdapter, GitHubIssueError
 from ai_dev_orchestrator.adapters.notifications import EnvironmentNotificationAdapter, missing_environment
 from ai_dev_orchestrator.services.cleanup import CleanupService
+from ai_dev_orchestrator.services.contract_recovery import (
+    ContractRecoveryError,
+    ContractRecoveryService,
+)
 from ai_dev_orchestrator.services.history import HistoryService, format_duration
 from ai_dev_orchestrator.services.supersession import SupersessionError, SupersessionService
 from ai_dev_orchestrator.services.inspect import InspectService, Inspection
@@ -425,16 +432,25 @@ def watch() -> None:
 @app.command()
 def run(
     issue: int = typer.Option(..., "--issue", min=1, help="Número positivo da Issue."),
-    branch: str = typer.Option(..., "--branch", help="Nome da nova branch."),
+    branch: str | None = typer.Option(
+        None,
+        "--branch",
+        help="Override opcional; por padrão usa a mesma política do fluxo autônomo.",
+    ),
 ) -> None:
     """Prepara uma Issue elegível e inicia sua sessão Codex."""
-    if not branch.strip():
-        raise typer.BadParameter(
-            "--branch é obrigatória e não pode ser vazia", param_hint="--branch"
-        )
     try:
-        result = RunPipeline.from_config(load_config()).run(issue, branch)
-    except (ConfigurationError, RunPipelineError) as error:
+        config = load_config()
+        selected_branch = branch
+        if selected_branch is None:
+            selected_branch = branch_from_title(
+                GitHubIssueAdapter(config).get_issue(issue).title,
+                issue,
+            )
+        if not selected_branch.strip():
+            raise typer.BadParameter("--branch não pode ser vazia", param_hint="--branch")
+        result = RunPipeline.from_config(config).run(issue, selected_branch)
+    except (ConfigurationError, GitHubIssueError, RunPipelineError) as error:
         typer.echo(f"Erro: {error}", err=True)
         raise typer.Exit(code=1) from error
     _show_run_result(result)
@@ -580,19 +596,63 @@ def history(
 @app.command()
 def cleanup(
     issue: int = typer.Option(..., "--issue", min=1, help="Issue cuja execução concluída será limpa."),
+    quarantine_orphan: bool = typer.Option(
+        False,
+        "--quarantine-orphan",
+        help="Move órfão não vazio para quarentena recuperável sob worktrees_dir.",
+    ),
+    yes: bool = typer.Option(False, "--yes", help="Confirma a quarentena sem prompt."),
 ) -> None:
-    """Solicita cleanup seguro de uma execução concluída, conforme a política local."""
+    """Limpa execução concluída/supersedida e órfão vazio comprovado pelo caminho."""
     try:
         config = load_config()
         store = SqliteExecutionStore(config.state.database_path)
         record = store.get_latest_for_issue(issue)
         if record is None:
             raise ExecutionStoreError(f"Nenhuma execução encontrada para a Issue #{issue}.")
-        result = CleanupService(config, store, GitWorktreeAdapter()).cleanup(record.id)
+        if quarantine_orphan and not yes and not typer.confirm(
+            "Mover o diretório órfão exato desta execução para quarentena?"
+        ):
+            typer.echo("Cleanup cancelado; nenhum arquivo foi movido.")
+            return
+        result = CleanupService(config, store, GitWorktreeAdapter()).cleanup(
+            record.id, quarantine_orphan=quarantine_orphan
+        )
     except (ConfigurationError, ExecutionStoreError) as error:
         typer.echo(f"Erro: {error}", err=True)
         raise typer.Exit(code=1) from error
     typer.echo(f"Cleanup {result.status}: {result.detail}")
+
+
+@app.command("recover-contract")
+def recover_contract(
+    issue: int = typer.Option(..., "--issue", min=1),
+    yes: bool = typer.Option(False, "--yes", help="Confirma a adoção sem prompt."),
+) -> None:
+    """Reconstrói o contrato na base_sha, sem confiar no worktree dirty atual."""
+    try:
+        service = ContractRecoveryService.from_config(load_config())
+        preview = service.preview(issue)
+        typer.echo(f"Base SHA: {preview.run.base_sha}")
+        typer.echo(f"Contrato persistido: {preview.run.contract_fingerprint or '-'}")
+        typer.echo(f"Contrato reconstruído: {preview.recovered.fingerprint}")
+        if not preview.changed:
+            typer.echo("Contrato já converge; nenhuma alteração necessária.")
+            return
+        if not yes and not typer.confirm(
+            "Adotar o contrato reconstruído para esta mesma execução?"
+        ):
+            typer.echo("Recuperação cancelada; contrato preservado.")
+            return
+        run = service.recover(
+            issue, expected_fingerprint=preview.recovered.fingerprint
+        )
+    except (ConfigurationError, ExecutionStoreError, ContractRecoveryError) as error:
+        typer.echo(f"Erro: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(
+        f"Contrato recuperado na execução {run.id}: {run.contract_fingerprint}"
+    )
 
 
 def _usage_text(codex: int | None, gemini: int | None, codex_cost: float | None, gemini_cost: float | None) -> str:
@@ -650,7 +710,7 @@ def supersede(
     reason: str = typer.Option(..., "--reason", help="Motivo humano, persistido de forma sanitizada."),
     yes: bool = typer.Option(False, "--yes", help="Confirma sem prompt interativo."),
 ) -> None:
-    """Marca um run com PR fechado sem merge como deliberadamente supersedido."""
+    """Supersede run pré-PR sem efeito remoto ou PR fechado sem merge."""
     try:
         service = SupersessionService.from_config(load_config())
         preview = service.preview(issue)
@@ -722,6 +782,7 @@ def _show_run_result(result: RunResult) -> None:
     typer.echo(f"Branch: {result.branch}")
     typer.echo(f"Worktree: {result.worktree_path}")
     typer.echo(f"Base: {result.base_ref}")
+    typer.echo(f"Base SHA: {result.base_sha or '-'}")
     typer.echo(f"Status: {result.project_status}")
     typer.echo(f"Sessão Codex: {result.session_id}")
     typer.echo(f"Mensagem final: {result.final_message}")
@@ -763,4 +824,10 @@ def _show_run_result(result: RunResult) -> None:
 
 def main() -> None:
     """Executa a aplicação de linha de comando."""
+    if os.name == "nt":
+        # Escopa UTF-8 ao processo da aplicação; não altera code page ou ACL global.
+        for stream in (sys.stdout, sys.stderr):
+            reconfigure = getattr(stream, "reconfigure", None)
+            if reconfigure is not None:
+                reconfigure(encoding="utf-8", errors="replace")
     app()

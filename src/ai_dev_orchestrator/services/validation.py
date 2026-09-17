@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import StrEnum
 from pathlib import Path
+import re
 from time import monotonic
+from collections.abc import Callable
 from typing import Protocol, Sequence
 
 from ai_dev_orchestrator.domain.project_contract import CommandPlan, ProjectContract, RiskClass
@@ -16,12 +19,34 @@ from ai_dev_orchestrator.infrastructure.database import sanitize_diagnostic_text
 MAX_GATE_DIAGNOSTIC_CHARACTERS = 500
 
 
+class LocalFailureKind(StrEnum):
+    PROJECT_TEST_FAILURE = "PROJECT_TEST_FAILURE"
+    PROJECT_BUILD_FAILURE = "PROJECT_BUILD_FAILURE"
+    DISCOVERY_ERROR = "DISCOVERY_ERROR"
+    INVALID_GATE = "INVALID_GATE"
+    MISSING_REQUIRED_ENVIRONMENT = "MISSING_REQUIRED_ENVIRONMENT"
+    CONTRACT_DRIFT = "CONTRACT_DRIFT"
+
+
 class LocalValidationError(Exception):
     """Indica que um gate local obrigatório falhou."""
 
-    def __init__(self, message: str, *, result: "GateResult | None" = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        result: "GateResult | None" = None,
+        kind: LocalFailureKind | None = None,
+        correctable: bool | None = None,
+    ) -> None:
         super().__init__(message)
         self.result = result
+        self.kind = kind or (
+            LocalFailureKind.PROJECT_TEST_FAILURE
+            if result is not None
+            else LocalFailureKind.INVALID_GATE
+        )
+        self.correctable = result is not None if correctable is None else correctable
 
 
 class LocalProcessFailure(ProviderFailure, LocalValidationError):
@@ -46,26 +71,43 @@ class GateResult:
 class LocalValidationService:
     """Executa o plano recebido, em ordem, sem interpretar comandos por shell."""
 
-    def __init__(self, runner: ProcessRunner | None = None, plans: Sequence[CommandPlan] | None = None) -> None:
+    def __init__(self, runner: ProcessRunner | None = None,
+                 plans: Sequence[CommandPlan] | None = None,
+                 progress: Callable[[str], None] | None = None) -> None:
         self.runner = runner
         self.plans = tuple(plans) if plans is not None else None
+        self.progress = progress
 
     def validate(self, worktree: str | Path, contract: ProjectContract | None = None) -> tuple[GateResult, ...]:
         configured = self.plans or (() if contract is None else (*contract.bootstrap, *contract.gates))
         plans = tuple(plan for plan in configured if plan.required)
         if not plans:
-            raise LocalValidationError("Contrato não contém gates locais executáveis")
+            raise LocalValidationError(
+                "Contrato não contém gates locais executáveis",
+                kind=LocalFailureKind.DISCOVERY_ERROR,
+            )
         root = Path(worktree).resolve()
         results: list[GateResult] = []
         for plan in plans:
             if plan.risk_class is not RiskClass.SAFE_LOCAL:
-                raise LocalValidationError(f"Gate '{plan.name}' não é uma operação local segura")
+                raise LocalValidationError(
+                    f"Gate '{plan.name}' não é uma operação local segura",
+                    kind=LocalFailureKind.INVALID_GATE,
+                )
             cwd = (root / plan.cwd).resolve()
             if cwd != root and root not in cwd.parents:
-                raise LocalValidationError(f"cwd do gate '{plan.name}' escapa do worktree")
+                raise LocalValidationError(
+                    f"cwd do gate '{plan.name}' escapa do worktree",
+                    kind=LocalFailureKind.INVALID_GATE,
+                )
             if not cwd.is_dir():
-                raise LocalValidationError(f"cwd do gate '{plan.name}' não existe: {plan.cwd}")
+                raise LocalValidationError(
+                    f"cwd do gate '{plan.name}' não existe: {plan.cwd}",
+                    kind=LocalFailureKind.INVALID_GATE,
+                )
             runner = self.runner or CommandRunner(timeout=plan.timeout_seconds)
+            if self.progress:
+                self.progress(f"Gate local iniciado: {plan.name}")
             started = monotonic()
             result = runner.run(plan.argv, cwd=cwd)
             duration = monotonic() - started
@@ -78,9 +120,28 @@ class LocalValidationService:
             diagnostic = self._summarize(result.error or result.stderr.strip() or result.stdout.strip())
             gate = GateResult(plan.name, plan.argv, result.succeeded, result.returncode, diagnostic, duration, plan.capability)
             results.append(gate)
+            if self.progress:
+                outcome = "aprovado" if gate.succeeded else "reprovado"
+                self.progress(f"Gate local {outcome}: {plan.name}")
             if not gate.succeeded:
                 detail = f": {diagnostic}" if diagnostic else ""
-                raise LocalValidationError(f"Gate local '{plan.name}' falhou{detail}", result=gate)
+                missing_environment = bool(re.search(
+                    r"(?i)(environment variable|vari[aá]vel de ambiente|not set|undefined variable|missing env)",
+                    diagnostic,
+                ))
+                kind = (
+                    LocalFailureKind.MISSING_REQUIRED_ENVIRONMENT
+                    if missing_environment
+                    else LocalFailureKind.PROJECT_BUILD_FAILURE
+                    if "build" in plan.capability.casefold()
+                    else LocalFailureKind.PROJECT_TEST_FAILURE
+                )
+                raise LocalValidationError(
+                    f"Gate local '{plan.name}' falhou{detail}",
+                    result=gate,
+                    kind=kind,
+                    correctable=not missing_environment,
+                )
         return tuple(results)
 
     @staticmethod

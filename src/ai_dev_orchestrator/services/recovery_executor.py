@@ -32,6 +32,7 @@ class RecoveryEffects(Protocol):
     def start_codex(self, run: RunRecord) -> str: ...
     def resume_codex(self, run: RunRecord) -> str: ...
     def run_local_gates(self, run: RunRecord): ...
+    def resume_no_changes(self, run: RunRecord) -> str: ...
     def create_commit(self, run: RunRecord) -> CommitResult: ...
     def push_branch(self, run: RunRecord) -> None: ...
     def create_pull_request(self, run: RunRecord) -> PullRequestObservation: ...
@@ -89,6 +90,18 @@ class RecoveryExecutor:
                 raise RecoveryExecutionError("Provider retornou sessão Codex divergente")
             return self.store.transition(run.id, ExecutionPhase.TESTING, summary=decision.reason, provider_retry_attempts=0)
         if action == RecoveryAction.RUN_LOCAL_GATES:
+            drift = False
+            observe_candidate = getattr(self.effects, "observe_candidate_contract", None)
+            if observe_candidate is not None and run.contract_fingerprint:
+                candidate = observe_candidate(run)
+                if candidate is not None and candidate.fingerprint != run.contract_fingerprint:
+                    self.store.checkpoint(
+                        run.id,
+                        summary="Contrato candidato difere do baseline; somente gates originais serão executados",
+                        candidate_contract_fingerprint=candidate.fingerprint,
+                        candidate_contract_json=candidate.to_json(),
+                    )
+                    drift = True
             try:
                 gate_results = self.effects.run_local_gates(run)
             except LocalValidationError as error:
@@ -100,6 +113,16 @@ class RecoveryExecutor:
                         run.id,
                         summary="Diagnóstico de gate local persistido",
                         gate_results_json=json.dumps([self._gate_result(error.result, run)], ensure_ascii=False),
+                    )
+                if drift or not error.correctable:
+                    kind = "CONTRACT_DRIFT" if drift else error.kind.value
+                    return self.store.require_human(
+                        run.id,
+                        summary=(
+                            f"Gate local não corrigível ({kind}); "
+                            "budget Codex preservado"
+                        ),
+                        reason=kind,
                     )
                 limit = getattr(self.effects, "max_local_gate_correction_attempts", 0)
                 if run.local_gate_correction_attempts >= limit:
@@ -147,6 +170,28 @@ class RecoveryExecutor:
             return self.store.transition(
                 run.id, ExecutionPhase.COMMIT_PENDING,
                 summary=decision.reason, **updates,
+            )
+        if action == RecoveryAction.RESUME_NO_CHANGES:
+            if (
+                run.no_changes_attempts >= self.policy.max_no_changes_attempts
+                or not run.codex_session_id
+            ):
+                raise RecoveryExecutionError("Retomada sem diff não é mais segura")
+            audited = self.store.checkpoint(
+                run.id,
+                summary=decision.reason,
+                no_changes_attempts=run.no_changes_attempts + 1,
+            )
+            if self.effects.resume_no_changes(audited) != audited.codex_session_id:
+                raise RecoveryExecutionError("Provider retornou sessão Codex divergente")
+            updates: dict[str, object] = {}
+            final_message = getattr(self.effects, "provider_final_message", None)
+            if final_message is not None:
+                updates["provider_final_message"] = final_message
+            return self.store.checkpoint(
+                run.id,
+                summary="Retomada sem diff concluída; worktree será observado novamente",
+                **updates,
             )
         if action in {RecoveryAction.CREATE_COMMIT, RecoveryAction.RECORD_EXISTING_COMMIT}:
             result = self.effects.create_commit(run) if action == RecoveryAction.CREATE_COMMIT else CommitResult(observation.local_head_sha or "", observation.local_head_parent_sha or "")
@@ -235,10 +280,19 @@ class RecoveryExecutor:
                 raise RecoveryExecutionError("Merge não foi comprovado para o HEAD aprovado")
             return self.store.transition(run.id, ExecutionPhase.PROJECT_DONE_PENDING, summary=decision.reason, merged_head_sha=merge.merged_head_sha, merge_commit_sha=merge.merge_commit_sha)
         if action == RecoveryAction.MARK_PROJECT_DONE:
+            merge_matches = bool(
+                run.merged_head_sha
+                and (
+                    run.merged_head_sha == run.reviewed_head_sha
+                    or (
+                        run.merge_origin == "EXTERNAL"
+                        and run.merged_head_sha == run.current_head_sha
+                    )
+                )
+            )
             if (
                 not run.project_item_id
-                or not run.reviewed_head_sha
-                or run.merged_head_sha != run.reviewed_head_sha
+                or not merge_matches
                 or not run.merge_commit_sha
             ):
                 raise RecoveryExecutionError("Projeto exige merge persistido e comprovado")
@@ -272,6 +326,7 @@ class RecoveryExecutor:
             RecoveryAction.START_CODEX: {ExecutionPhase.CODEX_RUNNING},
             RecoveryAction.RESUME_CODEX: {ExecutionPhase.CODEX_RUNNING},
             RecoveryAction.RUN_LOCAL_GATES: {ExecutionPhase.TESTING},
+            RecoveryAction.RESUME_NO_CHANGES: {ExecutionPhase.TESTING},
             RecoveryAction.CREATE_COMMIT: {
                 ExecutionPhase.COMMIT_PENDING, ExecutionPhase.PUBLISHING,
             },

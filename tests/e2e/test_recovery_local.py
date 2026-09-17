@@ -32,6 +32,20 @@ def test_fluxo_feliz_com_correcao_reusa_sessao_pr_e_checkpoints(tmp_path) -> Non
     assert len(world.review_prompts[0]) > 10_000
 
 
+def test_codex_sem_diff_retoma_mesma_sessao_uma_vez(tmp_path) -> None:
+    world = LocalWorld(reject_first_review=False, codex_has_changes=False)
+    store, service, original = make_service(tmp_path, world)
+
+    result = service.resume(67)
+    run = assert_invariants(store, 67)
+
+    assert result.phase == ExecutionPhase.COMPLETED.value
+    assert run.id == original.id
+    assert run.no_changes_attempts == 1
+    assert run.codex_session_id == "sessao-unica"
+    assert world.calls.count("resume_no_changes") == 1
+
+
 @pytest.mark.parametrize("boundary", ["push", "pr", "review", "merge"])
 def test_restart_em_fronteiras_remotas_nao_repete_efeito(tmp_path, boundary: str) -> None:
     world = LocalWorld(reject_first_review=False, crash_after=boundary)

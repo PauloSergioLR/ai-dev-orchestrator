@@ -41,6 +41,7 @@ class FakeGit:
     local: bool = True
     remote: bool = True
     calls: list[str] = field(default_factory=list)
+    registered: bool = True
     def worktree_is_clean(self, *_): return self.clean
     def remove_worktree(self, *_): self.calls.append("worktree")
     def local_branch_exists(self, *_): return self.local
@@ -51,6 +52,15 @@ class FakeGit:
     def delete_remote_branch(self, *_):
         self.calls.append("remote")
         self.remote = False
+    def worktree_is_registered(self, *_): return self.registered
+    def remove_empty_orphan_directory(self, path, allowed_root):
+        Path(path).rmdir()
+        self.calls.append("orphan")
+    def quarantine_orphan_directory(self, path, allowed_root, execution_id):
+        target = Path(allowed_root) / f"quarantine-{execution_id}"
+        Path(path).rename(target)
+        self.calls.append("quarantine")
+        return target
 
 
 def test_clean_completed_worktree_is_removed_and_repeated_cleanup_is_safe(tmp_path: Path) -> None:
@@ -130,6 +140,53 @@ def test_cleanup_failure_keeps_completed_and_does_not_change_duration(tmp_path: 
     assert result.status == "PENDING"
     assert persisted.phase is ExecutionPhase.COMPLETED
     assert HistoryService(store).metrics(persisted).duration == before
+
+
+def test_superseded_empty_orphan_has_official_cleanup_but_unknown_content_is_preserved(
+    tmp_path: Path,
+) -> None:
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    root = tmp_path / "worktrees"
+    root.mkdir()
+    empty = root / "empty-orphan"
+    empty.mkdir()
+    run = store.create(
+        80, branch="work/orphan", worktree_path=str(empty), base_ref="main"
+    )
+    run = store.supersede(run.id, summary="abandono explícito")
+    git = FakeGit(registered=False)
+
+    result = CleanupService(config(tmp_path), store, git).cleanup(run.id)
+
+    assert result.status == "DONE"
+    assert not empty.exists()
+    assert git.calls == ["orphan"]
+
+    unknown = root / "unknown"
+    unknown.mkdir()
+    evidence = unknown / "preservar.txt"
+    evidence.write_text("conteúdo desconhecido", encoding="utf-8")
+    other = store.create(
+        81, branch="work/unknown", worktree_path=str(unknown), base_ref="main"
+    )
+    other = store.supersede(other.id, summary="abandono explícito")
+    result = CleanupService(config(tmp_path), store, FakeGit(registered=False)).cleanup(
+        other.id
+    )
+
+    assert result.status == "PENDING"
+    assert evidence.read_text(encoding="utf-8") == "conteúdo desconhecido"
+    git = FakeGit(registered=False)
+    result = CleanupService(config(tmp_path), store, git).cleanup(
+        other.id, quarantine_orphan=True
+    )
+    quarantined = root / f"quarantine-{other.id}"
+    assert result.status == "DONE"
+    assert not unknown.exists()
+    assert (quarantined / "preservar.txt").read_text(encoding="utf-8") == (
+        "conteúdo desconhecido"
+    )
+    assert git.calls == ["quarantine"]
 
 
 def test_history_and_structured_usage_are_derived_without_provider_content(tmp_path: Path) -> None:

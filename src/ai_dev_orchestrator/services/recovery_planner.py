@@ -152,6 +152,21 @@ class RecoveryPlanner:
                 return self._block("Checkpoint de correção sem sessão, tentativa ou findings do HEAD rejeitado.")
             return self._decision(RecoveryAction.RESUME_CODEX, "Sessão Codex persistida.") if run.codex_session_id else self._decision(RecoveryAction.START_CODEX, "Primeira sessão Codex ainda não foi persistida.")
         if phase == ExecutionPhase.TESTING:
+            if (
+                run.codex_start_attempted
+                and
+                run.pull_request_number is None
+                and not observed.has_worktree_changes
+                and observed.local_head_sha == run.current_head_sha
+            ):
+                if not run.codex_session_id:
+                    return self._block("Codex terminou sem diff e a sessão não está persistida.")
+                if run.no_changes_attempts >= self.policy.max_no_changes_attempts:
+                    return self._block("Codex terminou sem alterações após a retomada limitada.")
+                return self._decision(
+                    RecoveryAction.RESUME_NO_CHANGES,
+                    "Codex terminou sem diff; a mesma sessão receberá uma retomada limitada.",
+                )
             return self._decision(RecoveryAction.RUN_LOCAL_GATES, "Gates locais pendentes.")
         if phase == ExecutionPhase.COMMIT_PENDING:
             return self._commit(run, observed)
@@ -292,12 +307,20 @@ class RecoveryPlanner:
         return self._decision(RecoveryAction.MERGE_PULL_REQUEST, "PR aprovado e CI verde para o HEAD exato.")
 
     def _project_done(self, run: RunRecord, observed: RecoveryObservation) -> RecoveryDecision:
+        internal_merge = bool(
+            run.reviewed_head_sha
+            and run.merged_head_sha == run.reviewed_head_sha
+        )
+        external_merge = bool(
+            run.merge_origin == "EXTERNAL"
+            and run.current_head_sha
+            and run.merged_head_sha == run.current_head_sha
+        )
         if (
             not run.project_item_id
-            or not run.reviewed_head_sha
             or not run.merged_head_sha
             or not run.merge_commit_sha
-            or run.merged_head_sha != run.reviewed_head_sha
+            or not (internal_merge or external_merge)
         ):
             return self._block("Merge persistido não está comprovado para atualizar o projeto.")
         if observed.project_state == ProjectState.UNKNOWN:

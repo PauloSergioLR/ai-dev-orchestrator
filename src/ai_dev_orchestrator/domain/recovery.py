@@ -52,6 +52,7 @@ class RecoveryAction(StrEnum):
     START_CODEX = "START_CODEX"
     RESUME_CODEX = "RESUME_CODEX"
     RUN_LOCAL_GATES = "RUN_LOCAL_GATES"
+    RESUME_NO_CHANGES = "RESUME_NO_CHANGES"
     CREATE_COMMIT = "CREATE_COMMIT"
     RECORD_EXISTING_COMMIT = "RECORD_EXISTING_COMMIT"
     PUSH_BRANCH = "PUSH_BRANCH"
@@ -80,12 +81,15 @@ class RecoveryPolicy:
     auto_merge_enabled: bool
     max_correction_attempts: int
     done_status: str = "Done"
+    max_no_changes_attempts: int = 1
 
     def __post_init__(self) -> None:
         if self.max_correction_attempts <= 0:
             raise ValueError("max_correction_attempts deve ser maior que zero")
         if not self.done_status:
             raise ValueError("done_status não pode ser vazio")
+        if self.max_no_changes_attempts < 0:
+            raise ValueError("max_no_changes_attempts não pode ser negativo")
 
 
 @dataclass(frozen=True)

@@ -17,7 +17,7 @@ from ai_dev_orchestrator.domain.project import ProjectStatusOption, infer_status
 
 def workflow(root: Path, body: str) -> None:
     path = root / ".github" / "workflows" / "ci.yml"
-    path.parent.mkdir(parents=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
 
 
@@ -140,6 +140,32 @@ jobs:
     assert contract.expected_ci == ()
     assert contract.gates == ()
     assert len(contract.excluded_operations) == 1
+
+
+@pytest.mark.parametrize(
+    "trigger",
+    ["workflow_dispatch:", "schedule:\n    - cron: '0 3 * * *'", "push:", "release:"],
+)
+def test_non_pr_workflows_never_become_local_gates(
+    tmp_path: Path, trigger: str
+) -> None:
+    workflow(tmp_path, f"""name: Rotina fora de PR
+on:
+  {trigger}
+jobs:
+  quality:
+    name: Quality
+    steps:
+      - name: Safe-looking command
+        run: ./validate
+""")
+
+    contract = resolve(tmp_path)
+
+    assert contract.gates == ()
+    assert contract.expected_ci == ()
+    assert len(contract.excluded_operations) == 1
+    assert contract.excluded_operations[0].risk_class is RiskClass.UNKNOWN
 
 
 def test_multiline_workflow_accepts_only_standalone_structured_commands(tmp_path: Path) -> None:
@@ -302,6 +328,204 @@ def test_local_gate_failure_resumes_same_session_with_independent_budget(tmp_pat
     assert persisted.local_gate_correction_attempts == 1
     assert persisted.ci_correction_attempts == persisted.correction_attempts == 0
     assert pipeline.codex_executor.sessions == ["same-session"]
+
+
+def test_no_diff_after_local_correction_is_rechecked_before_commit(tmp_path: Path) -> None:
+    from ai_dev_orchestrator.adapters.codex import CodexExecution
+    from ai_dev_orchestrator.config import OrchestratorConfig
+    from ai_dev_orchestrator.domain.execution import ExecutionPhase
+    from ai_dev_orchestrator.domain.issue import Issue
+    from ai_dev_orchestrator.domain.worktree import GitWorktree
+    from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
+    from ai_dev_orchestrator.services.pipeline import RunPipeline
+    from ai_dev_orchestrator.services.validation import GateResult
+
+    config = OrchestratorConfig(
+        github={"owner": "acme", "repository": "repo", "project_number": 1, "ready_status": "Ready"},
+        workspace={"repository_path": tmp_path, "worktrees_dir": tmp_path / "worktrees", "base_ref": "main"},
+        execution={"max_attempts": 1, "max_parallel_runs": 1, "auto_merge": False},
+    )
+
+    class Publisher:
+        observations = iter((True, False, True))
+
+        def has_changes(self, _path):
+            return next(self.observations)
+
+    class Validator:
+        calls = 0
+
+        def validate(self, _path):
+            self.calls += 1
+            if self.calls == 1:
+                raise LocalValidationError(
+                    "teste falhou",
+                    result=GateResult("pytest", ("pytest",), False, 1, "falha"),
+                )
+            return (GateResult("pytest", ("pytest",), True, 0, ""),)
+
+    class Codex:
+        prompts: list[str] = []
+
+        def resume(self, _path, session_id, prompt):
+            self.prompts.append(prompt)
+            return CodexExecution(session_id, "corrigido", "", "", True)
+
+    store = SqliteExecutionStore(tmp_path / "state-no-diff.db")
+    run = store.create(82, branch="work/no-diff", worktree_path=str(tmp_path), base_ref="main")
+    run = store.transition(run.id, ExecutionPhase.CODEX_RUNNING, summary="codex")
+    run = store.transition(run.id, ExecutionPhase.TESTING, summary="gates", codex_session_id="session")
+    pipeline = RunPipeline(
+        config, object(), object(), object(), object(), Codex(), Validator(),
+        git_publisher=Publisher(), execution_store=store,
+    )
+    pipeline._execution_id = run.id
+
+    gates, _ = pipeline._validate_with_recovery(
+        Issue(82, "T", "", "OPEN", "url", (), ()),
+        GitWorktree(tmp_path, tmp_path, "work/no-diff", "main"),
+        "session", "inicial",
+    )
+
+    assert gates[0].succeeded
+    assert len(pipeline.codex_executor.prompts) == 2
+    assert store.get(run.id).no_changes_attempts == 1
+
+
+def test_discovery_error_preserves_codex_correction_budget(tmp_path: Path) -> None:
+    from ai_dev_orchestrator.config import OrchestratorConfig
+    from ai_dev_orchestrator.domain.execution import ExecutionPhase
+    from ai_dev_orchestrator.domain.issue import Issue
+    from ai_dev_orchestrator.domain.worktree import GitWorktree
+    from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
+    from ai_dev_orchestrator.services.pipeline import RunPipeline, RunPipelineError
+
+    class InvalidDiscovery:
+        def validate(self, _path):
+            raise LocalValidationError(
+                "contrato sem gates",
+                kind=__import__(
+                    "ai_dev_orchestrator.services.validation",
+                    fromlist=["LocalFailureKind"],
+                ).LocalFailureKind.DISCOVERY_ERROR,
+                correctable=False,
+            )
+
+    class Codex:
+        resumes = 0
+
+        def resume(self, *_args):
+            self.resumes += 1
+            raise AssertionError("discovery não deve consumir Codex")
+
+    configured = OrchestratorConfig(
+        github={
+            "owner": "acme", "repository": "repo", "project_number": 1,
+            "ready_status": "Ready",
+        },
+        workspace={
+            "repository_path": tmp_path,
+            "worktrees_dir": tmp_path / "worktrees",
+            "base_ref": "main",
+        },
+        execution={"max_attempts": 1, "max_parallel_runs": 1, "auto_merge": False},
+    )
+    store = SqliteExecutionStore(tmp_path / "state-discovery.db")
+    run = store.create(
+        79, branch="work/discovery", worktree_path=str(tmp_path), base_ref="main"
+    )
+    run = store.transition(run.id, ExecutionPhase.CODEX_RUNNING, summary="codex")
+    run = store.transition(
+        run.id, ExecutionPhase.TESTING, summary="gates", codex_session_id="session"
+    )
+    pipeline = RunPipeline(
+        configured, object(), object(), object(), object(), Codex(),
+        InvalidDiscovery(), git_publisher=object(), execution_store=store,
+    )
+    pipeline._execution_id = run.id
+
+    with pytest.raises(RunPipelineError, match="DISCOVERY_ERROR"):
+        pipeline._validate_with_recovery(
+            Issue(79, "T", "", "OPEN", "url", (), ()),
+            GitWorktree(tmp_path, tmp_path, "work/discovery", "main"),
+            "session",
+            "fim",
+        )
+
+    persisted = store.get(run.id)
+    assert persisted.phase is ExecutionPhase.HUMAN_REQUIRED
+    assert persisted.human_reason == "DISCOVERY_ERROR"
+    assert persisted.local_gate_correction_attempts == 0
+    assert pipeline.codex_executor.resumes == 0
+
+
+def test_contract_drift_records_candidate_but_executes_only_baseline(
+    tmp_path: Path,
+) -> None:
+    from ai_dev_orchestrator.config import OrchestratorConfig
+    from ai_dev_orchestrator.domain.execution import ExecutionPhase
+    from ai_dev_orchestrator.domain.issue import Issue
+    from ai_dev_orchestrator.domain.worktree import GitWorktree
+    from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
+    from ai_dev_orchestrator.services.pipeline import RunPipeline
+    from ai_dev_orchestrator.services.validation import GateResult
+
+    workflow(tmp_path, "jobs:\n  quality:\n    steps:\n      - name: Test\n        run: ./baseline\n")
+    baseline = resolve(tmp_path)
+    workflow(tmp_path, "jobs:\n  quality:\n    steps:\n      - name: Test\n        run: ./candidate\n")
+    received = []
+
+    class Validator:
+        def validate(self, _path, contract):
+            received.append(contract)
+            return (GateResult("baseline", ("./baseline",), True, 0, ""),)
+
+    configured = OrchestratorConfig(
+        github={
+            "owner": "acme", "repository": "example", "project_number": 1,
+            "ready_status": "Ready", "pull_request_base": "develop",
+        },
+        workspace={
+            "repository_path": tmp_path,
+            "worktrees_dir": tmp_path / "worktrees",
+            "base_ref": "develop",
+        },
+        execution={"max_attempts": 1, "max_parallel_runs": 1, "auto_merge": False},
+    )
+    store = SqliteExecutionStore(tmp_path / "state-contract.db")
+    run = store.create(
+        80,
+        branch="work/contract",
+        worktree_path=str(tmp_path),
+        base_ref="develop",
+        contract_fingerprint=baseline.fingerprint,
+        project_contract_json=baseline.to_json(),
+    )
+    run = store.transition(run.id, ExecutionPhase.CODEX_RUNNING, summary="codex")
+    run = store.transition(
+        run.id, ExecutionPhase.TESTING, summary="gates", codex_session_id="session"
+    )
+    pipeline = RunPipeline(
+        configured,
+        object(), object(), object(), object(), object(),
+        Validator(), git_publisher=object(), execution_store=store,
+        project_contract=baseline,
+    )
+    pipeline._execution_id = run.id
+
+    gates, _ = pipeline._validate_with_recovery(
+        Issue(80, "Alterar CI", "", "OPEN", "url", (), ()),
+        GitWorktree(tmp_path, tmp_path, "work/contract", "develop"),
+        "session",
+        "fim",
+    )
+
+    persisted = store.get(run.id)
+    assert gates[0].succeeded
+    assert received == [baseline]
+    assert persisted.contract_fingerprint == baseline.fingerprint
+    assert persisted.candidate_contract_fingerprint
+    assert persisted.candidate_contract_fingerprint != baseline.fingerprint
 
 
 def test_ai_interpretation_remains_bound_to_repository_evidence(tmp_path: Path) -> None:

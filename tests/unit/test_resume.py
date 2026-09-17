@@ -193,11 +193,62 @@ def test_other_human_required_run_remains_closed(tmp_path: Path) -> None:
     legacy = store.require_human(run.id, summary="CI falhou", reason="REMOTE_AMBIGUOUS")
     effects = Effects()
 
-    result = service(store, Observer(lambda _run: pytest.fail("não deve observar")), effects).resume(37)
+    def not_merged(_run: RunRecord) -> RecoveryObservation:
+        return RecoveryObservation(
+            WorktreeState.CONVERGENT,
+            local_head_sha=HEAD,
+            pull_requests=(pr(),),
+            merge=MergeObservation(MergeState.OPEN),
+        )
+
+    observer = Observer(not_merged)
+    result = service(store, observer, effects).resume(37)
 
     assert result.phase == ExecutionPhase.HUMAN_REQUIRED.value
     assert store.get(legacy.id).phase is ExecutionPhase.HUMAN_REQUIRED
     assert effects.calls == {}
+    assert observer.calls == 1
+
+
+def test_human_required_reconciles_manual_merge_and_finishes_same_run(
+    tmp_path: Path,
+) -> None:
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    run = advance(store, ExecutionPhase.WAITING_CI)
+    blocked = store.require_human(
+        run.id, summary="merge ficou ambíguo", reason="MERGE_BLOCKED"
+    )
+
+    def snapshot(record: RunRecord) -> RecoveryObservation:
+        if record.phase is ExecutionPhase.HUMAN_REQUIRED:
+            return RecoveryObservation(
+                WorktreeState.CONVERGENT,
+                local_head_sha=HEAD,
+                pull_requests=(PullRequestObservation(
+                    37,
+                    URL,
+                    "owner/repo",
+                    "main",
+                    "feat/recovery",
+                    HEAD,
+                    PullRequestState.MERGED,
+                ),),
+                merge=MergeObservation(MergeState.MERGED, HEAD, MERGE),
+            )
+        return RecoveryObservation(
+            WorktreeState.CONVERGENT,
+            local_head_sha=HEAD,
+            project_state=ProjectState.DONE,
+        )
+
+    result = service(store, Observer(snapshot), Effects()).resume(37)
+
+    persisted = store.get(blocked.id)
+    assert result.execution_id == blocked.id
+    assert persisted.phase is ExecutionPhase.COMPLETED
+    assert persisted.merge_origin == "EXTERNAL"
+    assert persisted.merged_head_sha == HEAD
+    assert persisted.merge_commit_sha == MERGE
 
 
 def test_resume_publication_from_dirty_commit_continues_to_completion_with_same_identity(
@@ -646,6 +697,35 @@ def test_legacy_local_gate_progress_error_requires_persisted_gate_evidence(tmp_p
 
     assert result.phase == ExecutionPhase.HUMAN_REQUIRED.value
     assert store.get(original.id) == blocked
+
+
+def test_external_merge_only_does_not_resume_unresolved_human_ci(tmp_path: Path) -> None:
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    original = advance(store, ExecutionPhase.WAITING_CI)
+    blocked = store.require_human(original.id, summary="CI terminal", reason="CI_TERMINAL")
+    unresolved = RecoveryObservation(WorktreeState.CONVERGENT, local_head_sha=HEAD)
+
+    result = service(store, Observer(lambda _run: unresolved), Effects()).reconcile_external_merge(37)
+
+    assert result.phase == ExecutionPhase.HUMAN_REQUIRED.value
+    assert store.get(original.id) == blocked
+
+
+def test_no_diff_exhausted_is_classified_without_escalation_adapter(tmp_path: Path) -> None:
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    original = advance(store, ExecutionPhase.TESTING)
+    store.checkpoint(
+        original.id, summary="Codex sem diff", codex_start_attempted=True,
+        no_changes_attempts=1,
+    )
+    unchanged = RecoveryObservation(WorktreeState.CONVERGENT, local_head_sha=OLD)
+
+    with pytest.raises(ResumeError, match="sem alterações"):
+        service(store, Observer(lambda _run: unchanged), Effects()).resume(37)
+
+    blocked = store.get(original.id)
+    assert blocked.phase is ExecutionPhase.HUMAN_REQUIRED
+    assert blocked.human_reason == "NO_CHANGES"
 
 def test_preparing_existing_worktree_keeps_execution_and_does_not_prepare_again(tmp_path: Path) -> None:
     store = SqliteExecutionStore(tmp_path / "state.db")

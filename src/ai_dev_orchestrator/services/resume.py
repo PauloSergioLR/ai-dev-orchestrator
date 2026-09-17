@@ -6,7 +6,12 @@ from dataclasses import dataclass, replace
 from typing import Protocol
 
 from ai_dev_orchestrator.domain.execution import RunRecord, TERMINAL_PHASES, PROVIDER_WAIT_PHASES
-from ai_dev_orchestrator.domain.recovery import RecoveryAction, RecoveryObservation
+from ai_dev_orchestrator.domain.recovery import (
+    MergeState,
+    PullRequestState,
+    RecoveryAction,
+    RecoveryObservation,
+)
 from ai_dev_orchestrator.config import OrchestratorConfig
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
 from ai_dev_orchestrator.services.recovery_executor import RecoveryExecutor
@@ -59,7 +64,14 @@ class ResumeService:
         from ai_dev_orchestrator.services.recovery_effects import RecoveryEffects
         from ai_dev_orchestrator.services.recovery_observer import RecoveryObserver as RealObserver
         store = SqliteExecutionStore(config.state.database_path)
-        policy = RecoveryPolicy(config.github.repository_full_name, config.github.pull_request_base, config.execution.auto_merge, config.review.max_correction_attempts, config.github.status_for("completed"))
+        policy = RecoveryPolicy(
+            config.github.repository_full_name,
+            config.github.pull_request_base,
+            config.execution.auto_merge,
+            config.review.max_correction_attempts,
+            config.github.status_for("completed"),
+            config.execution.max_no_changes_attempts,
+        )
         from ai_dev_orchestrator.services.escalation import EscalationService
         from ai_dev_orchestrator.adapters.github import GitHubProjectStatusAdapter
         return cls(store, RealObserver(config, store), RecoveryPlanner(policy), RecoveryExecutor(policy, store, RecoveryEffects(config)), config.providers.codex_model, config.providers.gemini_model, EscalationService(config, store, GitHubProjectStatusAdapter(config)))
@@ -88,6 +100,17 @@ class ResumeService:
             }:
                 self.escalation.deliver_event(run)
         return result
+
+    def reconcile_external_merge(self, issue_number: int) -> ResumeResult:
+        """Retoma HUMAN_REQUIRED somente após prova inequívoca de merge externo."""
+        run = self.store.get_active_for_issue(issue_number)
+        if run is None or run.phase is not ExecutionPhase.HUMAN_REQUIRED:
+            raise ResumeError("Reconciliação externa exige execução HUMAN_REQUIRED ativa")
+        self._validate_models(run)
+        reconciled = self._reconcile_external_merge(run)
+        if reconciled is None:
+            return self._result(run)
+        return self.resume(issue_number)
 
     def _resume(self, issue_number: int, *, retry_provider: bool = False, recover_failed: bool = False,
                 resume_local_gates: bool = False,
@@ -129,7 +152,10 @@ class ResumeService:
                     summary="Retomada humana autorizada; gates locais serão reexecutados na mesma execução",
                 )
             elif not (retry_provider and run.provider_resume_phase):
-                return self._result(run)
+                reconciled = self._reconcile_external_merge(run)
+                if reconciled is None:
+                    return self._result(run)
+                run = reconciled
         self._validate_models(run)
         run = self.store.checkpoint(run.id, summary="Retomada iniciada")
         try:
@@ -162,18 +188,27 @@ class ResumeService:
                 raise ResumeError("Retomada sem progresso detectada")
             seen.add(signature)
             if decision.action.value == "BLOCK":
+                from ai_dev_orchestrator.domain.recovery import CiState
+                reason = "REMOTE_AMBIGUOUS"
+                if (run.phase == ExecutionPhase.TESTING
+                        and run.codex_start_attempted
+                        and run.pull_request_number is None
+                        and not observation.has_worktree_changes
+                        and observation.local_head_sha == run.current_head_sha):
+                    reason = "NO_CHANGES"
+                elif run.review_verdict == "REJECTED" and run.correction_attempts >= self.planner.policy.max_correction_attempts:
+                    reason = "CORRECTION_LIMIT"
+                elif run.phase == ExecutionPhase.WAITING_CI and observation.ci.state == CiState.FAILURE:
+                    reason = "CI_TERMINAL"
+                elif run.phase in {ExecutionPhase.MERGING, ExecutionPhase.MERGE_PENDING}:
+                    reason = "MERGE_BLOCKED"
                 if self.escalation:
-                    from ai_dev_orchestrator.domain.recovery import CiState
-                    reason = "REMOTE_AMBIGUOUS"
-                    if run.review_verdict == "REJECTED" and run.correction_attempts >= self.planner.policy.max_correction_attempts:
-                        reason = "CORRECTION_LIMIT"
-                    elif run.phase == ExecutionPhase.WAITING_CI and observation.ci.state == CiState.FAILURE:
-                        reason = "CI_TERMINAL"
-                    elif run.phase in {ExecutionPhase.MERGING, ExecutionPhase.MERGE_PENDING}:
-                        reason = "MERGE_BLOCKED"
                     self.escalation.escalate(run, reason)
                 else:
-                    self.store.require_human(run.id, summary="Reconciliação remota exige intervenção: " + decision.reason)
+                    self.store.require_human(
+                        run.id, summary="Reconciliação remota exige intervenção: " + decision.reason,
+                        reason=reason,
+                    )
                 raise ResumeError(decision.reason)
             try:
                 run = self.executor.execute(run, decision, observation)
@@ -304,6 +339,45 @@ class ResumeService:
             raise ResumeError(
                 "Os modelos configurados divergem dos modelos persistidos nesta execução"
             )
+
+    def _reconcile_external_merge(self, run: RunRecord) -> RunRecord | None:
+        """Converge HUMAN_REQUIRED quando o merge remoto final é inequívoco."""
+        if (
+            not run.branch
+            or not run.current_head_sha
+            or not run.pull_request_number
+            or not run.pull_request_url
+        ):
+            return None
+        try:
+            observation = self.observer.observe(run)
+        except Exception:
+            return None
+        if len(observation.pull_requests) != 1:
+            return None
+        pull_request = observation.pull_requests[0]
+        merge = observation.merge
+        if (
+            pull_request.number != run.pull_request_number
+            or pull_request.url != run.pull_request_url
+            or pull_request.repository_full_name != self.planner.policy.repository_full_name
+            or pull_request.base != self.planner.policy.pull_request_base
+            or pull_request.head_branch != run.branch
+            or pull_request.head_sha != run.current_head_sha
+            or pull_request.state is not PullRequestState.MERGED
+            or merge.state is not MergeState.MERGED
+            or merge.merged_head_sha != run.current_head_sha
+            or not merge.merge_commit_sha
+        ):
+            return None
+        return self.store.transition(
+            run.id,
+            ExecutionPhase.PROJECT_DONE_PENDING,
+            summary="Merge externo reconciliado por identidade remota completa",
+            merged_head_sha=merge.merged_head_sha,
+            merge_commit_sha=merge.merge_commit_sha,
+            merge_origin="EXTERNAL",
+        )
 
     def _record_provider_wait(self, run: RunRecord, failure: ProviderFailure) -> RunRecord:
         current = record_provider_failure(self.store, run.id, failure)

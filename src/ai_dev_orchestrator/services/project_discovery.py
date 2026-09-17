@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 import re
@@ -43,6 +43,7 @@ class _Candidate:
     command: str
     cwd: str
     evidence: SourceEvidence
+    applies_to_pull_request: bool = True
 
 
 class ContractInterpreter(Protocol):
@@ -166,7 +167,11 @@ class ProjectCapabilityResolver:
             except ContractResolutionError as error:
                 rejected.append(str(error))
                 continue
-            if plan.risk_class is not RiskClass.SAFE_LOCAL:
+            if isinstance(item, _Candidate) and not item.applies_to_pull_request:
+                if plan.risk_class is RiskClass.SAFE_LOCAL:
+                    plan = replace(plan, risk_class=RiskClass.UNKNOWN)
+                excluded.append(plan)
+            elif plan.risk_class is not RiskClass.SAFE_LOCAL:
                 excluded.append(plan)
             elif plan.capability == "bootstrap":
                 bootstrap.append(plan)
@@ -217,7 +222,8 @@ class ProjectCapabilityResolver:
                 lines = path.read_text(encoding="utf-8").splitlines()
             except (OSError, UnicodeError):
                 continue
-            if self._workflow_applies_to_pull_request(lines):
+            applies_to_pull_request = self._workflow_applies_to_pull_request(lines)
+            if applies_to_pull_request:
                 jobs.extend(self._workflow_job_names(lines))
             step_name = path.stem
             cwd = "."
@@ -238,6 +244,7 @@ class ProjectCapabilityResolver:
                             path.relative_to(root).as_posix(), "official_ci",
                             command[:300], command_line,
                         ),
+                        applies_to_pull_request,
                     ))
                 pending_commands.clear()
 

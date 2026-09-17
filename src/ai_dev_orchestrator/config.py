@@ -110,6 +110,7 @@ class ExecutionConfig(BaseModel):
     auto_merge: StrictBool
     merge_timeout_seconds: float = Field(default=30, gt=0)
     max_local_gate_correction_attempts: int = Field(default=2, ge=0, le=10)
+    max_no_changes_attempts: int = Field(default=1, ge=0, le=3)
 
 
 class StateConfig(BaseModel):

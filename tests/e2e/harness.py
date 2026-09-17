@@ -41,6 +41,7 @@ class LocalWorld:
     merged: bool = False
     done: bool = False
     reject_first_review: bool = True
+    codex_has_changes: bool = True
     calls: list[str] = field(default_factory=list)
     review_prompts: list[str] = field(default_factory=list)
     crash_after: str | None = None
@@ -64,6 +65,11 @@ class LocalWorld:
 
     def resume_codex(self, run: RunRecord) -> str:
         self.calls.append("resume_codex")
+        return run.codex_session_id or ""
+
+    def resume_no_changes(self, run: RunRecord) -> str:
+        self.calls.append("resume_no_changes")
+        self.codex_has_changes = True
         return run.codex_session_id or ""
 
     def run_local_gates(self, run: RunRecord) -> None:
@@ -151,7 +157,10 @@ class WorldObserver:
         return RecoveryObservation(
             worktree, local_head_sha=world.local_head, remote_head_sha=world.remote_head,
             local_head_parent_sha=(BASE if world.local_head == HEAD_ONE else HEAD_ONE if world.local_head == HEAD_TWO else None),
-            has_worktree_changes=run.phase == ExecutionPhase.COMMIT_PENDING,
+            has_worktree_changes=(
+                run.phase == ExecutionPhase.COMMIT_PENDING
+                or (run.phase == ExecutionPhase.TESTING and world.codex_has_changes)
+            ),
             pull_requests=pulls, ci=ci, merge=merge,
             project_state=ProjectState.DONE if world.done else ProjectState.NOT_DONE,
             findings_head_sha=findings_head,

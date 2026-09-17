@@ -37,7 +37,6 @@ def test_version_is_available() -> None:
 def test_run_validates_required_options() -> None:
     assert runner.invoke(app, ["run", "--branch", "feat/test"]).exit_code != 0
     assert runner.invoke(app, ["run", "--issue", "0", "--branch", "feat/test"]).exit_code != 0
-    assert runner.invoke(app, ["run", "--issue", "17"]).exit_code != 0
 
 
 def test_run_delegates_to_pipeline_and_displays_summary(monkeypatch) -> None:
@@ -57,6 +56,36 @@ def test_run_delegates_to_pipeline_and_displays_summary(monkeypatch) -> None:
     assert result.exit_code == 0
     assert calls == [(17, "feat/test")]
     assert "Sessão Codex: session-17" in result.output
+
+
+def test_run_derives_branch_when_override_is_omitted(monkeypatch) -> None:
+    calls: list[tuple[int, str]] = []
+
+    class IssueReader:
+        def __init__(self, _config):
+            pass
+
+        def get_issue(self, number: int):
+            return SimpleNamespace(title="Corrigir autenticação")
+
+    class FakePipeline:
+        def run(self, issue: int, branch: str) -> RunResult:
+            calls.append((issue, branch))
+            return RunResult(
+                issue, "item", branch, Path("C:/worktree"), "main",
+                "session", "ok", "In Progress",
+            )
+
+    monkeypatch.setattr("ai_dev_orchestrator.cli.load_config", lambda: object())
+    monkeypatch.setattr("ai_dev_orchestrator.cli.GitHubIssueAdapter", IssueReader)
+    monkeypatch.setattr(
+        "ai_dev_orchestrator.cli.RunPipeline.from_config", lambda _config: FakePipeline()
+    )
+
+    result = runner.invoke(app, ["run", "--issue", "17"])
+
+    assert result.exit_code == 0
+    assert calls == [(17, "work/corrigir-autenticacao")]
 
 
 def test_resume_accepts_only_issue_and_displays_a_short_summary(monkeypatch) -> None:

@@ -2,6 +2,21 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+import re
+
+
+@dataclass(frozen=True)
+class PreparedBase:
+    """Ref lógica sincronizada e commit imutável que originará o run."""
+
+    ref: str
+    sha: str
+
+    def __post_init__(self) -> None:
+        if not self.ref or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", self.sha):
+            raise ValueError("Base preparada exige ref e SHA de commit válidos")
+
 
 def base_refs_equivalent(
     first: str,

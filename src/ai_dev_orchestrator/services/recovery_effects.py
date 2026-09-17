@@ -21,7 +21,7 @@ from ai_dev_orchestrator.domain.recovery import (
 )
 from ai_dev_orchestrator.domain.review import ReviewFinding, ReviewVerdict, StructuredReview
 from ai_dev_orchestrator.domain.worktree import GitWorktree
-from ai_dev_orchestrator.services.pipeline import RunPipeline, build_initial_prompt
+from ai_dev_orchestrator.services.pipeline import RunPipeline, build_initial_prompt, emit_progress
 from ai_dev_orchestrator.services.recovery_executor import CommitResult
 from ai_dev_orchestrator.services.validation import LocalValidationService
 from ai_dev_orchestrator.services.merge import MergeGate
@@ -61,9 +61,10 @@ class RecoveryEffects:
                 config.code_review_graph.command
                 if config.code_review_graph.enabled else ()
             ),
+            progress=emit_progress,
         )
         self.graph_integrator = CodeReviewGraphIntegrator(config.code_review_graph)
-        self.validation = LocalValidationService()
+        self.validation = LocalValidationService(progress=emit_progress)
         self.publication = GitPublicationAdapter()
         self.issues = GitHubIssueAdapter(config)
         self.pull_requests = GitHubPullRequestAdapter(config)
@@ -73,13 +74,19 @@ class RecoveryEffects:
         self.reviewer = AntigravityAdapter(
             config.review.timeout_seconds, model=config.providers.gemini_model,
             executable=config.review.executable,
+            progress=emit_progress,
         )
         self.convergence = ConvergencePoller(config.convergence)
 
     def prepare_worktree(self, run: RunRecord) -> str:
         if not run.branch or not run.worktree_path or not run.base_ref:
             raise ValueError("Identidade do worktree ausente")
-        worktree = self.worktrees.create_worktree(self.config.workspace.repository_path, run.branch, run.worktree_path, run.base_ref)
+        worktree = self.worktrees.create_worktree(
+            self.config.workspace.repository_path,
+            run.branch,
+            run.worktree_path,
+            run.base_sha or run.base_ref,
+        )
         return self.publication.current_head(worktree.path)
 
     def start_codex(self, run: RunRecord) -> str:
@@ -111,6 +118,40 @@ class RecoveryEffects:
 
     def run_local_gates(self, run: RunRecord):
         return self._validate(run)
+
+    def observe_candidate_contract(self, run: RunRecord) -> ProjectContract | None:
+        """Reavalia apenas a proposta; o executor continua usando o baseline persistido."""
+        if not run.project_contract_json or not run.worktree_path:
+            return None
+        baseline = self._contract(run)
+        overrides = tuple(
+            plan
+            for plan in (*baseline.bootstrap, *baseline.gates)
+            if any(evidence.kind == "explicit_override" for evidence in plan.source_evidence)
+        )
+        return ProjectCapabilityResolver().resolve(
+            Path(run.worktree_path),
+            repository_identity=baseline.repository_identity,
+            base_branch=baseline.base_branch,
+            pull_request_target=baseline.pull_request_target,
+            protected_branches=baseline.protected_branches,
+            overrides=overrides,
+        )
+
+    def resume_no_changes(self, run: RunRecord) -> str:
+        if not run.codex_session_id:
+            raise ValueError("Sessão Codex ausente para retomada sem diff")
+        prompt = (
+            f"A Issue #{run.issue_number} ainda não produziu alterações versionáveis. "
+            "Implemente efetivamente o escopo no mesmo worktree. Não faça commit, "
+            "push, Pull Request ou merge."
+        )
+        self._prepare_graph(run)
+        execution = self.codex.resume(
+            run.worktree_path or "", run.codex_session_id, prompt
+        )
+        self.provider_final_message = execution.final_message
+        return execution.session_id
 
     def create_commit(self, run: RunRecord) -> CommitResult:
         parent = self.publication.current_head(run.worktree_path or "")

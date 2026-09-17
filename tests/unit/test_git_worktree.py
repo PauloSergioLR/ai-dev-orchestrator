@@ -192,14 +192,15 @@ def test_prepares_remote_base_and_checks_remote_branch(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     runner = FakeRunner([
         repository_result(repository), CommandResult(0), CommandResult(1),
-        CommandResult(0), CommandResult(0, "commit-id\n"), CommandResult(2),
+        CommandResult(0), CommandResult(0, f"{'a' * 40}\n"), CommandResult(2),
     ])
 
     base = GitWorktreeAdapter(runner).prepare_remote_base(
         repository, "origin", "origin/main", "work/nova",
     )
 
-    assert base == "refs/remotes/origin/main"
+    assert base.ref == "refs/remotes/origin/main"
+    assert base.sha == "a" * 40
     assert runner.arguments[3][-2:] == [
         "origin", "refs/heads/main:refs/remotes/origin/main",
     ]
@@ -211,10 +212,25 @@ def test_remote_branch_collision_fails_closed(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     runner = FakeRunner([
         repository_result(repository), CommandResult(0), CommandResult(1),
-        CommandResult(0), CommandResult(0, "commit-id\n"), CommandResult(0, "sha\tref\n"),
+        CommandResult(0), CommandResult(0, f"{'a' * 40}\n"), CommandResult(0, "sha\tref\n"),
     ])
 
     with pytest.raises(GitWorktreeError, match="branch remota já existe"):
         GitWorktreeAdapter(runner).prepare_remote_base(
             repository, "origin", "main", "work/existente",
         )
+
+
+def test_orphan_quarantine_preserves_contents_and_rejects_nested_target(tmp_path: Path) -> None:
+    root = tmp_path / "worktrees"
+    orphan = root / "orphan"
+    orphan.mkdir(parents=True)
+    (orphan / "preservar.txt").write_text("conteúdo", encoding="utf-8")
+
+    target = GitWorktreeAdapter.quarantine_orphan_directory(orphan, root, "run-1")
+
+    assert target == root / ".orchestrator-quarantine" / "run-1--orphan"
+    assert (target / "preservar.txt").read_text(encoding="utf-8") == "conteúdo"
+    assert not orphan.exists()
+    with pytest.raises(GitWorktreeError, match="alvo de quarentena"):
+        GitWorktreeAdapter.quarantine_orphan_directory(target, root, "run-2")

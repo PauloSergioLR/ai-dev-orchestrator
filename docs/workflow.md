@@ -5,9 +5,13 @@ O fluxo principal é iniciado por `orch work` e está implementado assim:
 ```text
 retoma execução ativa ou seleciona a próxima Issue Ready
     ↓
-sincroniza base remota e cria branch/worktree
+sincroniza base remota e persiste seu SHA concreto
+    ↓
+cria branch/worktree no mesmo SHA e congela o contrato desse snapshot
     ↓
 Codex
+    ↓
+sem diff: retoma a mesma sessão dentro do limite; depois NO_CHANGES
     ↓
 gates locais
     ↓
@@ -52,4 +56,5 @@ O arquivo de lock associado ao banco impede dois supervisores locais de operar o
 mesmo estado. Além disso, o índice único de execução ativa por Issue funciona como
 claim transacional: em caso de disputa, a segunda tentativa falha fechada antes de
 criar worktree. Esperas de provider preservam a identidade e o slot lógico da run,
-mas o scheduler continua reconciliando e iniciando as demais vagas disponíveis.
+assim como `HUMAN_REQUIRED`; o scheduler continua reconciliando e iniciando
+somente as demais vagas realmente disponíveis.

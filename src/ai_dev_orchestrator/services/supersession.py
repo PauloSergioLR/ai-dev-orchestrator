@@ -24,14 +24,15 @@ class ExecutionObserver(Protocol):
 class SupersessionPreview:
     run: RunRecord
     remote_head_sha: str | None
-    pull_request_state: PullRequestState
+    pull_request_state: PullRequestState | None
 
     @property
     def evidence(self) -> str:
         return (
             f"execução {self.run.id}; fase {self.run.phase}; PR #{self.run.pull_request_number}; "
             f"branch {self.run.branch}; HEAD persistido {self.run.current_head_sha or '-'}; "
-            f"HEAD remoto {self.remote_head_sha or '-'}; PR {self.pull_request_state}"
+            f"HEAD remoto {self.remote_head_sha or '-'}; "
+            f"PR {self.pull_request_state or 'ausente'}"
         )
 
 
@@ -53,8 +54,10 @@ class SupersessionService:
             raise SupersessionError(f"Nenhuma execução encontrada para a Issue #{issue_number}")
         if run.phase in {ExecutionPhase.COMPLETED, ExecutionPhase.SUPERSEDED}:
             raise SupersessionError("A execução já é terminal e não pode ser supersedida")
-        if run.pull_request_number is None or not run.pull_request_url or not run.branch:
-            raise SupersessionError("Execução sem identidade completa de Pull Request não pode ser supersedida")
+        if not run.branch:
+            raise SupersessionError("Execução sem branch persistida não pode ser supersedida")
+        if (run.pull_request_number is None) != (run.pull_request_url is None):
+            raise SupersessionError("Identidade parcial de Pull Request impede supersessão")
         other = self.store.get_active_for_issue(issue_number)
         if other is not None and other.id != run.id:
             raise SupersessionError("Outra execução ativa para a mesma Issue impede supersessão")
@@ -62,6 +65,18 @@ class SupersessionService:
             observation = self.observer.observe(run)
         except RecoveryObservationError as error:
             raise SupersessionError("Estado remoto desconhecido; supersessão bloqueada") from error
+        if run.pull_request_number is None:
+            if observation.pull_requests:
+                raise SupersessionError(
+                    "Pull Request remoto existe sem identidade persistida; supersessão bloqueada"
+                )
+            if observation.merge.state is MergeState.MERGED:
+                raise SupersessionError("Merge remoto observado; supersessão bloqueada")
+            if observation.remote_head_sha is not None:
+                raise SupersessionError(
+                    "Branch remota existe; execução pré-PR não pode ser abandonada automaticamente"
+                )
+            return SupersessionPreview(run, None, None)
         if len(observation.pull_requests) != 1:
             raise SupersessionError("Pull Requests remotos ambíguos; supersessão bloqueada")
         pull_request = observation.pull_requests[0]
