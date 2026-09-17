@@ -1,6 +1,7 @@
 """RecoveryExecutor exercitado com SQLite real e efeitos contáveis."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -55,6 +56,10 @@ class Effects:
 
     def resume_codex(self, run: RunRecord) -> str:
         self._called("resume")
+        return self.resume_result
+
+    def resume_no_changes(self, run: RunRecord) -> str:
+        self._called("no_changes")
         return self.resume_result
 
     def run_local_gates(self, run: RunRecord) -> None:
@@ -270,6 +275,33 @@ def test_local_gate_limit_persists_sanitized_diagnostic(tmp_path: Path) -> None:
     inspection = InspectService(store).inspect(blocked.issue_number)
     assert inspection is not None
     assert inspection.gates[-1]["diagnostic"] == "falha token=[redigido]"
+
+
+def test_recovered_gate_failure_after_contract_drift_preserves_codex_budget(tmp_path: Path) -> None:
+    from ai_dev_orchestrator.services.validation import GateResult, LocalValidationError
+
+    store, effects, executor, observation = context(tmp_path)
+    effects.max_local_gate_correction_attempts = 2
+    effects.observe_candidate_contract = lambda _run: SimpleNamespace(
+        fingerprint="candidate", to_json=lambda: '{"candidate":true}'
+    )
+
+    def fail_gates(_run):
+        raise LocalValidationError(
+            "baseline falhou",
+            result=GateResult("pytest", ("pytest",), False, 1, "falha"),
+        )
+
+    effects.run_local_gates = fail_gates
+    run = at(store, ExecutionPhase.TESTING, contract_fingerprint="baseline")
+
+    blocked = executor.execute(run, decision(RecoveryAction.RUN_LOCAL_GATES), observation)
+
+    assert blocked.phase is ExecutionPhase.HUMAN_REQUIRED
+    assert blocked.human_reason == "CONTRACT_DRIFT"
+    assert blocked.candidate_contract_fingerprint == "candidate"
+    assert blocked.local_gate_correction_attempts == 0
+    assert effects.calls == {}
 
 
 def test_resume_divergent_session_does_not_transition(tmp_path: Path) -> None:

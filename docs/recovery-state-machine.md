@@ -39,7 +39,7 @@ As novas fases explicitam cada efeito: `COMMIT_PENDING`, `PUSH_PENDING`,
 | --- | --- | --- |
 | `PREPARING` | worktree ausente ou convergente | preparar ou avançar |
 | `CODEX_RUNNING` | sessão Codex persistida | retomar Codex |
-| `TESTING` | gates pendentes | executar gates locais |
+| `TESTING` | diff presente ou retomada sem diff disponível | executar gates ou retomar a mesma sessão dentro do limite |
 | `COMMIT_PENDING` | qualquer alteração do worktree ou commit direto comprovado | criar ou registrar commit |
 | `PUSH_PENDING` | remoto ausente, pai direto ou igual ao local | push ou registrar push |
 | `PR_PENDING` | identidade completa do PR convergente | criar ou adotar PR |
@@ -58,6 +58,14 @@ branch, caminho do worktree e ref base. As fases publicadas também exigem HEAD
 local idêntico ao checkpoint. A partir de `WAITING_CI`, o número e a URL do PR
 devem estar persistidos juntos, e a observação deve conter exatamente um PR com
 repositório, base, branch e HEAD convergentes. Uma identidade parcial bloqueia.
+
+Um run novo também persiste `base_sha`, fingerprint e JSON do contrato obtido do
+worktree recém-criado nesse SHA. O plano baseline é imutável durante o run.
+Mudanças em `package.json`, `pyproject`, workflows, scripts ou documentação são
+registradas em `candidate_contract_*`; comandos candidatos nunca são executados
+automaticamente. Se o baseline falhar após drift, o motivo é `CONTRACT_DRIFT`
+sem consumir correção Codex. Contrato histórico defeituoso pode ser reconstruído
+com `orch recover-contract --issue N`, exclusivamente a partir de `base_sha`.
 
 ## Recuperação explícita de publicação em HUMAN_REQUIRED
 
@@ -99,6 +107,16 @@ aos gates do executor, não ao planner.
 no record: item de projeto, SHA revisado, SHA merged igual ao revisado e commit
 de merge precisam estar presentes. Isso impede marcar Done após uma observação
 incompleta ou após merge não persistido.
+
+Em `HUMAN_REQUIRED`, uma observação inequívoca de PR mergeado com repositório,
+base, branch, número, URL e HEAD esperados, mais merge commit conhecido, substitui
+o checkpoint local stale. O mesmo execution_id avança para
+`PROJECT_DONE_PENDING`; Project já `Done` completa idempotentemente e Project
+stale é atualizado. O estado OPEN da Issue não é prova negativa, inclusive
+quando o target do PR é `develop` e a default branch é `main`.
+`orch watch` consulta essa prova antes de tratar `HUMAN_REQUIRED` como bloqueio;
+sem prova, preserva a execução e a vaga ocupada. A consulta automática não
+autoriza outras retomadas humanas, como repetir CI terminal ou gates locais.
 
 O resultado do Gemini só é recuperável depois que o executor persistir
 veredito, SHA revisado e findings no store. Se o processo cair após a chamada
@@ -154,7 +172,7 @@ são invalidadas; os findings continuam associados ao SHA que os originou.
 ## Recuperação explícita de FAILED histórico
 
 orch resume --issue N --recover-failed solicita reconciliação pelo domínio/store.
-A migração automática para schema 3 preserva registros anteriores e acrescenta
+A migração automática para schema 6 preserva registros anteriores e acrescenta
 os checkpoints de início de sessão e retry. Nenhuma edição manual do banco é
 necessária ou suportada por esse caminho.
 
@@ -210,9 +228,10 @@ deve mais ser retomado. Não é `COMPLETED`, não altera o Project para `Done` e
 worktree, sessão Codex, PR, HEAD, findings e journal; o evento final inclui o
 motivo sanitizado e a evidência remota observada no momento da decisão.
 
-`orch supersede --issue N --reason "..."` primeiro lê o estado remoto. A decisão
-só é possível quando existe exatamente o PR persistido, com número, URL e branch
-idênticos, em `CLOSED` sem merge comprovado. Estado remoto desconhecido, múltiplos
+`orch supersede --issue N --reason "..."` primeiro lê o estado remoto. Com PR,
+a decisão só é possível quando existe exatamente o PR persistido, com número,
+URL e branch idênticos, em `CLOSED` sem merge comprovado. Antes do PR, exige
+ausência observada de PR, merge e branch remota. Estado remoto desconhecido, múltiplos
 PRs, identidade divergente, PR aberto ou mergeado bloqueiam. HEAD remoto diferente
 é mostrado no evento como evidência, sem ser adotado. A confirmação interativa é
 obrigatória por padrão; `--yes` é a confirmação explícita para automação.
@@ -224,3 +243,21 @@ está vazio. O run deixa de bloquear apenas após reconciliação segura ou
 supersessão explícita. `SUPERSEDED` não aparece em `list_active()` nem em
 `list_historical_candidates()`, mas continua em `orch history`. A supersessão não
 inicia novo run; uma futura seleção de Issue em `Ready` recebe outro execution_id.
+
+Supersessão e limpeza são decisões separadas. Depois de superseder, `orch cleanup
+--issue N` pode remover worktree Git limpo ou um diretório órfão vazio sob a raiz
+configurada. Dirty worktree, diretório não vazio/desconhecido e caminho fora de
+`worktrees_dir` nunca são apagados automaticamente. Com consentimento explícito,
+`--quarantine-orphan` move o diretório exato para uma quarentena recuperável sob
+a mesma raiz, preservando todos os arquivos e liberando o caminho original.
+
+## Ausência de diff e observabilidade
+
+Depois de uma conclusão Codex, o estado `TESTING` observa mudanças antes de
+commit. Sem diff, a mesma sessão recebe uma retomada limitada; o contador e a
+mensagem final sanitizada são persistidos. Ao esgotar o limite, `NO_CHANGES`
+leva a `HUMAN_REQUIRED` sem tentar commit vazio nem criar nova sessão.
+
+Codex e Gemini mantêm timeout finito e emitem início, heartbeat espaçado a cada
+cinco minutos e conclusão. Gates locais anunciam nome e resultado. Essas linhas
+não contêm prompt, JSONL, stderr ou conteúdo do dossier.

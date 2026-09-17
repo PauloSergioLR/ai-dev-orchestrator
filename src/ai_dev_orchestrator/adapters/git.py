@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Protocol, Sequence
 
 from ai_dev_orchestrator.domain.worktree import GitWorktree
+from ai_dev_orchestrator.domain.base_ref import PreparedBase
 from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner
 
 
@@ -77,7 +78,7 @@ class GitWorktreeAdapter:
         remote_name: str,
         base_ref: str,
         branch: str,
-    ) -> str:
+    ) -> PreparedBase:
         """Atualiza a base remota e recusa colisões antes de criar um worktree."""
         repository_root = self.validate_repository(repository)
         self._validate_branch(repository_root, branch)
@@ -91,9 +92,32 @@ class GitWorktreeAdapter:
             ],
             "sincronizar a base remota",
         )
-        self._verify_base_ref(repository_root, remote_ref)
+        sha = self._resolve_commit(repository_root, remote_ref)
         self._ensure_remote_branch_is_new(repository_root, remote_name, branch)
-        return remote_ref
+        return PreparedBase(remote_ref, sha)
+
+    def create_detached_worktree(
+        self,
+        repository: str | Path,
+        worktree_path: str | Path,
+        commit_sha: str,
+    ) -> Path:
+        """Materializa snapshot detached temporário de um commit já identificado."""
+        repository_root = self.validate_repository(repository)
+        path = self._path_from_repository(repository_root, worktree_path)
+        if path.exists():
+            raise GitWorktreeError(f"O destino do snapshot já existe: {path}")
+        resolved = self._resolve_commit(repository_root, commit_sha)
+        if resolved.casefold() != commit_sha.casefold():
+            raise GitWorktreeError("O SHA solicitado não identifica exatamente o commit resolvido")
+        self._run(
+            [
+                "git", "-C", str(repository_root), "worktree", "add", "--detach",
+                str(path), commit_sha,
+            ],
+            "materializar snapshot detached",
+        )
+        return path
 
     def remove_worktree(self, repository: str | Path, worktree_path: str | Path) -> None:
         """Remove um worktree sem forçar a operação ou apagar sua branch."""
@@ -113,6 +137,68 @@ class GitWorktreeAdapter:
             "verificar alterações no worktree",
         )
         return not result.stdout.strip()
+
+    def worktree_is_registered(
+        self, repository: str | Path, worktree_path: str | Path
+    ) -> bool:
+        """Distingue worktree Git registrado de diretório órfão no mesmo caminho."""
+        repository_root = self.validate_repository(repository)
+        expected = self._path_from_repository(repository_root, worktree_path).resolve()
+        result = self._run(
+            ["git", "-C", str(repository_root), "worktree", "list", "--porcelain"],
+            "listar worktrees registrados",
+        )
+        registered = {
+            Path(line.removeprefix("worktree ")).resolve()
+            for line in result.stdout.splitlines()
+            if line.startswith("worktree ")
+        }
+        return expected in registered
+
+    @staticmethod
+    def remove_empty_orphan_directory(
+        worktree_path: str | Path, allowed_root: str | Path
+    ) -> None:
+        """Remove só diretório vazio sob worktrees_dir; conteúdo desconhecido é intocável."""
+        root = Path(allowed_root).resolve()
+        raw_path = Path(worktree_path)
+        if raw_path.is_symlink():
+            raise GitWorktreeError("Link simbólico não é um diretório órfão removível")
+        path = raw_path.resolve()
+        if path.parent != root or not path.is_dir():
+            raise GitWorktreeError("Diretório órfão não é um alvo removível")
+        try:
+            path.rmdir()
+        except OSError as error:
+            raise GitWorktreeError(
+                "Diretório órfão contém arquivos ou não pôde ser removido; preservado"
+            ) from error
+
+    @staticmethod
+    def quarantine_orphan_directory(
+        worktree_path: str | Path,
+        allowed_root: str | Path,
+        execution_id: str,
+    ) -> Path:
+        """Move órfão não vazio para quarentena recuperável, sem apagar conteúdo."""
+        root = Path(allowed_root).resolve()
+        raw_path = Path(worktree_path)
+        if raw_path.is_symlink():
+            raise GitWorktreeError("Link simbólico não é um diretório órfão em quarentena")
+        path = raw_path.resolve()
+        if path.parent != root or not path.is_dir() or path.name == ".orchestrator-quarantine":
+            raise GitWorktreeError("Diretório órfão não é um alvo de quarentena")
+        quarantine = root / ".orchestrator-quarantine"
+        if quarantine.is_symlink():
+            raise GitWorktreeError("Quarentena é um link simbólico; conteúdo preservado")
+        quarantine.mkdir(exist_ok=True)
+        target = quarantine / f"{execution_id}--{path.name}"
+        if target.exists() or target.is_symlink():
+            raise GitWorktreeError(
+                f"Destino de quarentena já existe; nenhum conteúdo foi movido: {target}"
+            )
+        path.rename(target)
+        return target
 
     def delete_local_branch(self, repository: str | Path, branch: str) -> None:
         """Remove apenas branch já integrada; ``-d`` recusa histórico não mergeado."""
@@ -214,6 +300,10 @@ class GitWorktreeAdapter:
         return branch
 
     def _verify_base_ref(self, repository_root: Path, base_ref: str) -> None:
+        self._resolve_commit(repository_root, base_ref)
+
+    def _resolve_commit(self, repository_root: Path, base_ref: str) -> str:
+        """Resolve uma ref móvel uma vez e devolve a identidade imutável."""
         result = self._run(
             [
                 "git", "-C", str(repository_root), "rev-parse", "--verify",
@@ -223,6 +313,7 @@ class GitWorktreeAdapter:
         )
         if not result.stdout.strip():
             raise GitWorktreeError(f"A referência base não pôde ser resolvida: {base_ref}")
+        return result.stdout.strip()
 
     @staticmethod
     def _path_from_repository(repository_root: Path, worktree_path: str | Path) -> Path:

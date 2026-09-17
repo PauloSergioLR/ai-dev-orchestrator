@@ -103,6 +103,70 @@ def test_parallel_scheduler_does_not_stop_other_run_for_human_required(tmp_path:
     assert [run.issue_number for run in store.active] == [3, 9]
 
 
+def test_human_required_continues_occupying_its_parallel_slot(tmp_path: Path) -> None:
+    store = Store()
+    store.active.append(waiting(3, ExecutionPhase.HUMAN_REQUIRED))
+    starts: list[frozenset[int]] = []
+
+    class Escalation:
+        def assess(self, run):
+            return run
+
+    class Work:
+        def reconcile_external_merge(self, issue):
+            raise AssertionError("HUMAN_REQUIRED genuíno não deve ser retomado em loop")
+
+        def start_next(self, excluded):
+            starts.append(excluded)
+            return None
+
+    with pytest.raises(KeyboardInterrupt):
+        SupervisorService(
+            config(tmp_path, 1),
+            Work(),
+            store,
+            lambda _: (_ for _ in ()).throw(KeyboardInterrupt),
+            Escalation(),
+        )._watch_parallel()
+
+    assert starts == []
+
+
+@pytest.mark.parametrize("maximum", [1, 2])
+def test_watch_reconciles_proven_external_merge_before_blocking_queue(tmp_path: Path, maximum: int) -> None:
+    store = Store()
+    human = waiting(3, ExecutionPhase.HUMAN_REQUIRED)
+    human.branch = "work/terceira"
+    human.current_head_sha = "a" * 40
+    human.pull_request_number = 30
+    human.pull_request_url = "https://example.test/acme/repo/pull/30"
+    store.active.append(human)
+
+    class Work:
+        resumed = 0
+        selected = 0
+
+        def reconcile_external_merge(self, issue):
+            assert issue == 3
+            self.resumed += 1
+            store.active.clear()
+            return WorkResult(resumed=True, resume=SimpleNamespace(issue_number=issue, phase="COMPLETED"))
+
+        def work(self):
+            self.selected += 1
+            return None
+
+        def start_next(self, excluded):
+            self.selected += 1
+            return None
+
+    work = Work()
+    SupervisorService(config(tmp_path, maximum), work, store).watch()
+
+    assert work.resumed == 1
+    assert work.selected == maximum
+
+
 def test_watch_lock_fails_closed_for_second_supervisor(tmp_path: Path) -> None:
     lock = tmp_path / "state.watch.lock"
     with _exclusive_lock(lock):

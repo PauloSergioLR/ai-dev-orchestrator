@@ -1,7 +1,9 @@
 """Testes locais da persistência SQLite de execuções."""
 
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Lock
 
 import pytest
 
@@ -9,6 +11,7 @@ from ai_dev_orchestrator.domain.execution import ExecutionPhase
 from ai_dev_orchestrator.domain.review import FindingSeverity, ReviewFinding, ReviewVerdict, StructuredReview
 from ai_dev_orchestrator.infrastructure.database import (
     ActiveExecutionError,
+    ExecutionStoreError,
     SchemaVersionError,
     SqliteExecutionStore,
 )
@@ -26,8 +29,48 @@ def test_creates_versioned_schema_and_reopens_without_losing_record(
     assert reopened.get(created.id).branch == "feat/state"
     with sqlite3.connect(path) as connection:
         assert (
-            connection.execute("SELECT version FROM schema_version").fetchone()[0] == 5
+            connection.execute("SELECT version FROM schema_version").fetchone()[0] == 6
         )
+
+
+def test_concurrent_transitions_cannot_overwrite_same_checkpoint(tmp_path: Path) -> None:
+    path = tmp_path / "concurrent.db"
+    created = SqliteExecutionStore(path).create(99, branch="work/race")
+    barrier = Barrier(2)
+    lock = Lock()
+
+    class RacingStore(SqliteExecutionStore):
+        first_read = True
+
+        def get(self, execution_id):
+            record = super().get(execution_id)
+            with lock:
+                should_wait = self.first_read
+                self.first_read = False
+            if should_wait:
+                barrier.wait(timeout=2)
+            return record
+
+    stores = (RacingStore(path), RacingStore(path))
+
+    def advance(store: RacingStore):
+        try:
+            return store.transition(
+                created.id,
+                ExecutionPhase.CODEX_RUNNING,
+                summary="claim concorrente",
+            )
+        except ExecutionStoreError as error:
+            return error
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(advance, stores))
+
+    assert sum(not isinstance(value, Exception) for value in outcomes) == 1
+    assert sum(isinstance(value, ExecutionStoreError) for value in outcomes) == 1
+    events = SqliteExecutionStore(path).events(created.id)
+    assert len(events) == 2
+    assert events[-1].phase is ExecutionPhase.CODEX_RUNNING
 
 
 def test_refuses_two_active_executions_and_keeps_ordered_journal(
@@ -130,7 +173,7 @@ def test_migrates_schema_v1_preserving_execution_and_journal(tmp_path: Path) -> 
     assert store.get_active_for_issue(37).id == execution_id
     assert [event.sequence for event in store.events(execution_id)] == [1, 2]
     with sqlite3.connect(path) as connection:
-        assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 5
+        assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 6
         assert connection.execute("SELECT name FROM sqlite_master WHERE name = 'review_findings'").fetchone()
 
 

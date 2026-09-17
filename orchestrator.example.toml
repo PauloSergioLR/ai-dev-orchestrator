@@ -33,6 +33,7 @@ max_parallel_runs = 1
 auto_merge = false
 max_local_gate_correction_attempts = 2
 merge_timeout_seconds = 30
+max_no_changes_attempts = 1
 
 [state]
 database_path = "C:/caminho/para/ai-dev-orchestrator/state/orchestrator.db"

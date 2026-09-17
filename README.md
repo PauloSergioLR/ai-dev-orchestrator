@@ -63,12 +63,15 @@ grava; ele nunca transforma texto livre em shell. Deploy, release, publicação,
 migração remota e outras operações mutáveis são exibidos pelo `doctor`, mas não
 entram nos gates automáticos.
 
-O contrato recebe um fingerprint e é congelado no run. `resume` reutiliza o JSON
-persistido, de modo que alterações posteriores da branch base não mudam
-retrospectivamente os gates. Após cada execução Codex, o control plane roda por
-conta própria todos os gates obrigatórios. Falha determinística pode retomar a
-mesma sessão no mesmo worktree; falha de ambiente, timeout ou executable ausente
-é classificada separadamente.
+O run sincroniza a base remota, persiste seu SHA concreto, cria o worktree nesse
+mesmo commit e só então resolve e congela o contrato. `resume` reutiliza o JSON
+persistido; alterações posteriores da base não mudam gates retrospectivamente.
+Workflows que não atendem Pull Requests (`workflow_dispatch`, `schedule`,
+`push`, `release`) são auditados, mas nunca viram gates locais. Se a Issue altera
+build/CI, o plano baseline continua sendo o único executado e o contrato novo é
+registrado como candidato para revisão, sem executar comandos recém-criados.
+Falha determinística pode retomar a mesma sessão; discovery, ambiente, timeout
+ou executable ausente preservam o budget de correção.
 
 Repositórios com vários componentes são representados por múltiplos `cwd`.
 Ferramentas customizadas funcionam da mesma forma, desde que documentação e
@@ -106,18 +109,20 @@ seu texto nunca é executado como comando.
 `max_parallel_runs = 1` preserva o modo sequencial. Com valor maior, o supervisor
 mantém até esse número de execuções independentes, em ordem determinística de
 prioridade e Issue; cada uma conserva seu próprio checkpoint, sessão, worktree,
-branch, PR e HEAD. Uma espera de quota ocupa seu slot lógico, mas não bloqueia os
-outros slots. O lock local ao lado do SQLite e o claim transacional por Issue
+branch, PR e HEAD. Esperas de quota, provider bloqueado e `HUMAN_REQUIRED`
+ocupam seu slot lógico, mas não bloqueiam os outros slots. O lock local ao lado do SQLite e o claim transacional por Issue
 recusam disputa entre supervisores. `Ctrl+C` encerra o supervisor sem apagar
 checkpoints.
 
 ## Execução manual de Issue
 
 ```powershell
-orch run --issue <numero> --branch <nome-da-branch>
+orch run --issue <numero>
+# override opcional: --branch <nome-da-branch>
 ```
 
-O comando lê a Issue explícita, valida seu item em `Ready`, prepara um worktree,
+Sem override, a branch é derivada do título pela mesma política do fluxo
+autônomo. O comando lê a Issue explícita, valida seu item em `Ready`, prepara um worktree,
 executa o Codex, valida localmente, cria commit, faz push, abre o Pull Request e
 move o item para `AI Review`. Em seguida, aguarda a CI do HEAD exato do PR, executa
 o review Gemini e aplica o ciclo de correção na mesma sessão Codex. Com aprovação,
@@ -151,8 +156,12 @@ não fazem parte da saída.
 
 `orch history` (ou `orch history --issue N`) mostra o histórico local, duração,
 esperas de CI/quota, revisões, correções, modelos, merge, Project e cleanup sem
-expor logs dos providers. `orch cleanup --issue N` remove somente o worktree
-limpo de uma execução `COMPLETED`; a política pode permitir também branches.
+expor logs dos providers. `orch cleanup --issue N` aceita execução `COMPLETED`
+ou `SUPERSEDED`: remove worktree Git comprovadamente limpo ou diretório órfão
+vazio sob `worktrees_dir`. Worktree dirty, diretório com conteúdo desconhecido e
+caminho fora da raiz são preservados. Para desbloquear um órfão não vazio sem
+apagá-lo, `--quarantine-orphan` o move, após confirmação, para
+`.orchestrator-quarantine`. A política pode permitir também branches.
 Por padrão, o cleanup automático e a remoção de branches permanecem desabilitados.
 
 Crie sua configuração local a partir do exemplo:
@@ -167,8 +176,9 @@ variáveis de ambiente e regras de segurança.
 
 ## Supersessão explícita de execução antiga
 
-Quando um Pull Request antigo foi fechado sem merge e a Issue será refeita, não
-apague o SQLite nem crie outra execução manualmente. Primeiro observe e encerre
+Quando um Pull Request antigo foi fechado sem merge, ou um run pré-PR precisa
+ser abandonado sem efeitos remotos, não apague o SQLite nem crie outra execução
+manualmente. Primeiro observe e encerre
 o run antigo de forma auditável:
 
 ```powershell
@@ -176,17 +186,31 @@ orch supersede --issue N --reason "PR antigo encerrado; Issue será refeita sobr
 ```
 
 O comando exibe branch, PR e HEADs persistido/remoto e pede confirmação. Para
-automação deliberada, use `--yes`. Ele só aceita o PR persistido, único, fechado
-sem merge; PR aberto exige recovery normal, e PR mergeado exige reconciliação de
-merge. Nenhum arquivo, sessão, PR, Project ou registro histórico é removido ou
+automação deliberada, use `--yes`. Com PR, ele exige identidade única, fechada
+sem merge; pré-PR exige ausência comprovada de PR, merge e branch remota. PR
+aberto exige recovery normal, e PR mergeado é reconciliado automaticamente.
+Nenhum arquivo, sessão, PR, Project ou registro histórico é removido ou
 alterado além da fase local `SUPERSEDED`. Depois disso, a Issue pode receber uma
 nova execução quando voltar a `Ready`.
+
+Se um contrato histórico estiver incorreto e o run possuir `base_sha`, use
+`orch recover-contract --issue N`. O comando materializa um snapshot detached
+temporário da base imutável, compara fingerprints e pede confirmação antes de
+adotar o baseline reconstruído na mesma execução. O worktree atual, inclusive
+dirty, não é usado como fonte e nenhum comando candidato é executado.
 
 ## Retomada após falhas de runtime
 
 Falhas de rede e timeout preservam a execução ativa e têm até três retries com
 backoff persistido. Quota aguarda reset confiável; autenticação, modelo e erros
 de protocolo exigem intervenção. Nenhum desses casos cria outra sessão ou PR.
+
+Se o Codex terminar sem diff, o orquestrador faz no máximo
+`execution.max_no_changes_attempts` retomadas na mesma sessão. Persistindo a
+ausência de mudanças, o run vai para `HUMAN_REQUIRED` com `NO_CHANGES`; o commit
+vazio não chega à camada Git como erro cru. Chamadas longas de Codex e Gemini
+emitem heartbeat a cada cinco minutos, e gates anunciam início e resultado, sem
+imprimir prompts ou saída bruta dos providers.
 
 Use orch state --issue N para o diagnóstico e orch resume --issue N para
 retomar. Depois de corrigir um bloqueio, --retry-provider solicita uma tentativa

@@ -117,6 +117,7 @@ _ALLOWED[ExecutionPhase.HUMAN_REQUIRED] = {
     ExecutionPhase.PR_PENDING,
     ExecutionPhase.PUBLISHING,
     ExecutionPhase.WAITING_CI,
+    ExecutionPhase.PROJECT_DONE_PENDING,
 }
 
 
@@ -137,6 +138,7 @@ class RunRecord:
     branch: str | None = None
     worktree_path: str | None = None
     base_ref: str | None = None
+    base_sha: str | None = None
     codex_session_id: str | None = None
     codex_start_attempted: bool = False
     pull_request_number: int | None = None
@@ -174,6 +176,11 @@ class RunRecord:
     ci_correction_attempts: int = 0
     gate_results_json: str | None = None
     ci_checks_json: str | None = None
+    candidate_contract_fingerprint: str | None = None
+    candidate_contract_json: str | None = None
+    no_changes_attempts: int = 0
+    provider_final_message: str | None = None
+    merge_origin: str | None = None
 
 
 @dataclass(frozen=True)

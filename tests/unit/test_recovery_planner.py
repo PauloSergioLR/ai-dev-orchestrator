@@ -144,6 +144,29 @@ def test_commit_accepts_dirty_worktree_including_new_files() -> None:
     assert decision.action == RecoveryAction.CREATE_COMMIT
 
 
+def test_testing_resumes_same_session_once_when_codex_produced_no_diff() -> None:
+    record = run(
+        ExecutionPhase.TESTING,
+        codex_session_id="session",
+        codex_start_attempted=True,
+    )
+
+    assert plan(record, observed(has_worktree_changes=False)).action is RecoveryAction.RESUME_NO_CHANGES
+    exhausted = run(
+        ExecutionPhase.TESTING,
+        codex_session_id="session",
+        codex_start_attempted=True,
+        no_changes_attempts=1,
+    )
+    assert plan(exhausted, observed(has_worktree_changes=False)).action is RecoveryAction.BLOCK
+
+
+def test_testing_without_diff_blocks_when_codex_started_without_persisted_session() -> None:
+    decision = plan(run(ExecutionPhase.TESTING, codex_start_attempted=True), observed(has_worktree_changes=False))
+    assert decision.action is RecoveryAction.BLOCK
+    assert "sem diff" in decision.reason
+
+
 def test_records_only_direct_commit_already_created() -> None:
     decision = plan(run(ExecutionPhase.COMMIT_PENDING), observed(local_head_sha=OTHER, local_head_parent_sha=HEAD))
     assert decision.action == RecoveryAction.RECORD_EXISTING_COMMIT

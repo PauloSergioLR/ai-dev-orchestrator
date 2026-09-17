@@ -8,6 +8,7 @@ import pytest
 
 from ai_dev_orchestrator.config import OrchestratorConfig
 from ai_dev_orchestrator.domain.issue import Issue
+from ai_dev_orchestrator.domain.base_ref import PreparedBase
 from ai_dev_orchestrator.domain.project import ProjectItem
 from ai_dev_orchestrator.services.pipeline import RunResult
 from ai_dev_orchestrator.services.resume import ResumeResult
@@ -89,20 +90,25 @@ class Issues:
 
 @dataclass
 class Pipeline:
-    calls: list[tuple[int, str, str | None]] = field(default_factory=list)
+    calls: list[tuple[int, str, str | None, str | None]] = field(default_factory=list)
 
-    def run(self, issue_number: int, branch: str, *, base_ref: str | None = None) -> RunResult:
-        self.calls.append((issue_number, branch, base_ref))
+    def run(self, issue_number: int, branch: str, *, base_ref: str | None = None,
+            base_sha: str | None = None) -> RunResult:
+        self.calls.append((issue_number, branch, base_ref, base_sha))
         return RunResult(issue_number, f"item-{issue_number}", branch, Path("worktree"), base_ref or "", "session", "fim", "Done")
 
 
 @dataclass
 class Resumer:
     calls: list[int] = field(default_factory=list)
+    phase: str = "WAITING_CI"
 
     def resume(self, issue_number: int) -> ResumeResult:
         self.calls.append(issue_number)
-        return ResumeResult(issue_number, "execution", "WAITING_CI", "work/x", "session", 9, "a" * 40, 1)
+        return ResumeResult(issue_number, "execution", self.phase, "work/x", "session", 9, "a" * 40, 1)
+
+    def reconcile_external_merge(self, issue_number: int) -> ResumeResult:
+        return self.resume(issue_number)
 
 
 @dataclass
@@ -129,7 +135,7 @@ def test_selects_ready_issue_syncs_base_and_reuses_pipeline(tmp_path: Path) -> N
     result = work.work()
 
     assert result is not None and result.run is not None and not result.resumed
-    assert pipeline.calls == [(7, "work/implementar-acao-numero", "refs/remotes/origin/main")]
+    assert pipeline.calls == [(7, "work/implementar-acao-numero", "refs/remotes/origin/main", None)]
     assert sync.calls[0][1:3] == ("origin", "main")
 
 
@@ -193,10 +199,25 @@ def test_human_required_nunca_libera_nova_issue(tmp_path: Path) -> None:
     active = (SimpleNamespace(issue_number=45, phase=__import__("ai_dev_orchestrator.domain.execution", fromlist=["ExecutionPhase"]).ExecutionPhase.HUMAN_REQUIRED),)
     work, projects, _, pipeline, resumer, sync = service(tmp_path, (item(7),), active=active)
 
+    resumer.phase = "HUMAN_REQUIRED"
     with pytest.raises(WorkError, match="supersessão"):
         work.work()
 
-    assert projects.calls == 0 and pipeline.calls == resumer.calls == sync.calls == []
+    assert projects.calls == 0 and pipeline.calls == sync.calls == []
+    assert resumer.calls == [45]
+
+
+def test_base_imutavel_e_encaminhada_ao_pipeline(tmp_path: Path) -> None:
+    work, _, _, pipeline, _, sync = service(tmp_path, (item(7),))
+    sync.prepare_remote_base = lambda *args: PreparedBase(
+        "refs/remotes/origin/main", "a" * 40
+    )
+
+    work.work()
+
+    assert pipeline.calls == [(
+        7, "work/implementar-acao-numero", "refs/remotes/origin/main", "a" * 40
+    )]
 
 
 def test_multiple_active_executions_fail_closed(tmp_path: Path) -> None:

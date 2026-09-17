@@ -33,6 +33,14 @@ REASONS = {
     "MERGE_BLOCKED": "Merge não convergiu após aprovação",
     "REMOTE_AMBIGUOUS": "Estado Git/PR/HEAD ambíguo ou divergente",
     "INTERNAL_ERROR": "Erro interno impediu a continuidade segura",
+    "PROJECT_TEST_FAILURE": "Teste do projeto falhou e exige intervenção",
+    "PROJECT_BUILD_FAILURE": "Build do projeto falhou e exige intervenção",
+    "DISCOVERY_ERROR": "Descoberta do contrato operacional falhou",
+    "INVALID_GATE": "Gate local inválido foi recusado pelo control plane",
+    "MISSING_REQUIRED_ENVIRONMENT": "Ambiente obrigatório do gate está ausente",
+    "CONTRACT_DRIFT": "Contrato candidato mudou e o gate baseline deixou de ser aplicável",
+    "NO_CHANGES": "Provider concluiu sem implementação versionável",
+    "BASE_IDENTITY_MISMATCH": "Worktree divergiu do SHA imutável da base",
 }
 
 NOTIFIABLE_PHASES = frozenset({

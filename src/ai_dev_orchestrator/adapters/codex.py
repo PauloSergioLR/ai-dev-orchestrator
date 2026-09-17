@@ -8,11 +8,13 @@ import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, Protocol, Sequence
 
 from ai_dev_orchestrator.infrastructure.process import (
     CommandResult, CommandRunner, OutputPolicy,
 )
+from ai_dev_orchestrator.infrastructure.heartbeat import heartbeat
 from ai_dev_orchestrator.domain.provider import (
     ProviderFailure, ProviderFailureKind, classify_provider_text,
     FAILURE_MESSAGES, FAILURE_PRECEDENCE, reliable_retry_at, textual_retry_at, classify_process_failure,
@@ -61,10 +63,14 @@ class CodexAdapter:
         timeout: float = CODEX_TIMEOUT_SECONDS,
         model: str = "default",
         code_review_graph_command: tuple[str, ...] = (),
+        progress: Callable[[str], None] | None = None,
+        heartbeat_seconds: float = 300,
     ) -> None:
         self.runner = runner if runner is not None else CommandRunner(timeout=timeout)
         self.model = model
         self.code_review_graph_command = code_review_graph_command
+        self.progress = progress
+        self.heartbeat_seconds = heartbeat_seconds
 
     def execute(self, worktree: str | Path, prompt: str) -> CodexExecution:
         """Inicia uma sessão persistida do Codex no worktree explicitamente informado."""
@@ -136,8 +142,13 @@ class CodexAdapter:
 
     def _run(self, arguments: list[str], input_text: str, operation: str,
              expected_session: str | None = None) -> tuple[CommandResult, str | None, str]:
-        result = self.runner.run(arguments, input_text=input_text,
-                                 stdout_policy=OutputPolicy.UTF8_STRICT)
+        label = "Codex" if operation == "executar" else "Retomada Codex"
+        with heartbeat(label, self.progress, self.heartbeat_seconds):
+            result = self.runner.run(
+                arguments,
+                input_text=input_text,
+                stdout_policy=OutputPolicy.UTF8_STRICT,
+            )
         events = []
         malformed = False
         lines = result.stdout.splitlines()

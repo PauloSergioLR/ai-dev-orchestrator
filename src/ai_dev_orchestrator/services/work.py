@@ -14,7 +14,8 @@ from ai_dev_orchestrator.adapters.github import (
     GitHubProjectStatusAdapter,
 )
 from ai_dev_orchestrator.config import OrchestratorConfig
-from ai_dev_orchestrator.domain.execution import RunRecord
+from ai_dev_orchestrator.domain.execution import ExecutionPhase, RunRecord
+from ai_dev_orchestrator.domain.base_ref import PreparedBase
 from ai_dev_orchestrator.domain.issue import Issue
 from ai_dev_orchestrator.domain.project import ProjectItem, is_eligible_for_execution
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
@@ -46,18 +47,20 @@ class IssueReader(Protocol):
 
 class PipelineRunner(Protocol):
     def run(
-        self, issue_number: int, branch: str, *, base_ref: str | None = None
+        self, issue_number: int, branch: str, *, base_ref: str | None = None,
+        base_sha: str | None = None,
     ) -> RunResult: ...
 
 
 class ExecutionResumer(Protocol):
     def resume(self, issue_number: int) -> ResumeResult: ...
+    def reconcile_external_merge(self, issue_number: int) -> ResumeResult: ...
 
 
 class BaseSynchronizer(Protocol):
     def prepare_remote_base(
         self, repository: object, remote_name: str, base_ref: str, branch: str
-    ) -> str: ...
+    ) -> PreparedBase | str: ...
 
 
 @dataclass(frozen=True)
@@ -134,11 +137,18 @@ class WorkService:
             issues = ", ".join(f"#{run.issue_number}" for run in active)
             raise WorkError(f"Execuções ativas ambíguas: {issues}")
         if active:
-            if getattr(active[0], "phase", None) is not None and active[0].phase.value == "HUMAN_REQUIRED":
-                raise WorkError(f"Execução #{active[0].issue_number} exige reconciliação ou supersessão explícita")
+            resumed = (
+                self.resume_service.reconcile_external_merge(active[0].issue_number)
+                if getattr(active[0], "phase", None) is ExecutionPhase.HUMAN_REQUIRED
+                else self.resume_service.resume(active[0].issue_number)
+            )
+            if resumed.phase == "HUMAN_REQUIRED":
+                raise WorkError(
+                    f"Execução #{active[0].issue_number} exige reconciliação ou supersessão explícita"
+                )
             return WorkResult(
                 resumed=True,
-                resume=self.resume_service.resume(active[0].issue_number),
+                resume=resumed,
             )
 
         return self.start_next()
@@ -150,6 +160,13 @@ class WorkService:
         ResumeService; esta operação não seleciona nem cria outra Issue.
         """
         return WorkResult(resumed=True, resume=self.resume_service.resume(issue_number))
+
+    def reconcile_external_merge(self, issue_number: int) -> WorkResult:
+        """Permite ao supervisor verificar apenas a resolução remota de HUMAN_REQUIRED."""
+        return WorkResult(
+            resumed=True,
+            resume=self.resume_service.reconcile_external_merge(issue_number),
+        )
 
     def start_next(self, excluded_issue_numbers: frozenset[int] = frozenset()) -> WorkResult | None:
         """Inicia a próxima Issue Ready fora do conjunto já ocupado.
@@ -166,8 +183,9 @@ class WorkService:
             return None
         item, issue = selected
         branch = branch_from_title(issue.title, issue.number)
+        print(f"Issue #{issue.number} selecionada; branch {branch}", flush=True)
         try:
-            remote_base = self.base_synchronizer.prepare_remote_base(
+            prepared = self.base_synchronizer.prepare_remote_base(
                 self.config.workspace.repository_path,
                 self.config.workspace.remote_name,
                 self.config.workspace.base_ref,
@@ -176,7 +194,14 @@ class WorkService:
         except Exception as error:
             raise WorkError(f"Falha ao sincronizar a base remota: {error}") from error
         # O pipeline relê e revalida a Issue e o item imediatamente antes da mutação.
-        result = self.pipeline.run(item.issue_number or issue.number, branch, base_ref=remote_base)
+        remote_base = prepared.ref if isinstance(prepared, PreparedBase) else prepared
+        base_sha = prepared.sha if isinstance(prepared, PreparedBase) else None
+        identity = base_sha[:12] if base_sha else remote_base
+        print(f"Base sincronizada: {identity}", flush=True)
+        arguments = {"base_ref": remote_base}
+        if base_sha is not None:
+            arguments["base_sha"] = base_sha
+        result = self.pipeline.run(item.issue_number or issue.number, branch, **arguments)
         return WorkResult(resumed=False, run=result)
 
     def _select_issue(self, excluded_issue_numbers: frozenset[int] = frozenset()) -> tuple[ProjectItem, Issue] | None:

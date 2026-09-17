@@ -22,6 +22,12 @@ class GitCleanup(Protocol):
     def delete_remote_branch(self, repository: str | Path, remote_name: str, branch: str) -> None: ...
     def local_branch_exists(self, repository: str | Path, branch: str) -> bool: ...
     def remote_branch_exists(self, repository: str | Path, remote_name: str, branch: str) -> bool: ...
+    def worktree_is_registered(self, repository: str | Path, worktree_path: str | Path) -> bool: ...
+    def remove_empty_orphan_directory(self, worktree_path: str | Path, allowed_root: str | Path) -> None: ...
+    def quarantine_orphan_directory(
+        self, worktree_path: str | Path, allowed_root: str | Path,
+        execution_id: str,
+    ) -> Path: ...
 
 
 @dataclass(frozen=True)
@@ -37,10 +43,15 @@ class CleanupService:
     def __init__(self, config: OrchestratorConfig, store: SqliteExecutionStore, git: GitCleanup) -> None:
         self.config, self.store, self.git = config, store, git
 
-    def cleanup(self, execution_id: str) -> CleanupResult:
+    def cleanup(
+        self, execution_id: str, *, quarantine_orphan: bool = False
+    ) -> CleanupResult:
         run = self.store.get(execution_id)
-        if run.phase is not ExecutionPhase.COMPLETED:
-            return self._record(run, "PRESERVED", "Execução não concluída; artefatos preservados")
+        if run.phase not in {ExecutionPhase.COMPLETED, ExecutionPhase.SUPERSEDED}:
+            return self._record(
+                run, "PRESERVED",
+                "Execução ativa; artefatos preservados até conclusão ou supersessão",
+            )
         if run.cleanup_status == "DONE":
             return CleanupResult(run.id, "DONE", "Cleanup já concluído")
         if not run.branch or not run.worktree_path:
@@ -55,10 +66,59 @@ class CleanupService:
         try:
             path = Path(run.worktree_path)
             if path.exists():
-                if not self.git.worktree_is_clean(self.config.workspace.repository_path, path):
-                    return self._record(run, "PENDING", "Worktree contém alterações não commitadas; preservado")
-                self.git.remove_worktree(self.config.workspace.repository_path, path)
-            actions = ["worktree removido"]
+                registered = getattr(self.git, "worktree_is_registered", None)
+                is_registered = (
+                    registered(self.config.workspace.repository_path, path)
+                    if registered is not None
+                    else True
+                )
+                if is_registered:
+                    if not self.git.worktree_is_clean(
+                        self.config.workspace.repository_path, path
+                    ):
+                        return self._record(
+                            run, "PENDING",
+                            "Worktree contém alterações não commitadas; preservado",
+                        )
+                    self.git.remove_worktree(
+                        self.config.workspace.repository_path, path
+                    )
+                else:
+                    remover = getattr(self.git, "remove_empty_orphan_directory", None)
+                    if remover is None:
+                        return self._record(
+                            run, "PENDING",
+                            "Diretório não registrado pelo Git; preservado por falta de prova",
+                        )
+                    try:
+                        remover(path, self.config.workspace.worktrees_dir)
+                    except Exception as error:
+                        if not quarantine_orphan:
+                            return self._record(
+                                run,
+                                "PENDING",
+                                "Diretório órfão não vazio foi preservado; use "
+                                "--quarantine-orphan para movê-lo sem apagar: "
+                                f"{error}",
+                            )
+                        quarantine = getattr(
+                            self.git, "quarantine_orphan_directory", None
+                        )
+                        if quarantine is None:
+                            return self._record(
+                                run, "PENDING",
+                                "Adapter não oferece quarentena segura; preservado",
+                            )
+                        target = quarantine(
+                            path, self.config.workspace.worktrees_dir, run.id
+                        )
+                        actions = [f"diretório órfão movido para {target}"]
+                    else:
+                        actions = ["diretório órfão vazio removido"]
+                if is_registered:
+                    actions = ["worktree Git limpo removido"]
+            else:
+                actions = ["caminho de worktree já ausente"]
             if self.config.cleanup.remove_local_branch:
                 if self.git.local_branch_exists(self.config.workspace.repository_path, run.branch):
                     self.git.delete_local_branch(self.config.workspace.repository_path, run.branch)

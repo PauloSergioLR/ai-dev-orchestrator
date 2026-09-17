@@ -18,6 +18,7 @@ from ai_dev_orchestrator.adapters.git import GitWorktreeAdapter
 from ai_dev_orchestrator.services.cleanup import CleanupService
 from ai_dev_orchestrator.services.history import HistoryService, format_duration
 from ai_dev_orchestrator.services.escalation import EscalationService
+from ai_dev_orchestrator.services.resume import ResumeError
 
 
 class SupervisorError(Exception):
@@ -67,6 +68,11 @@ class SupervisorService:
             active = self.store.list_active()
             if len(active) > 1:
                 raise SupervisorError("Mais de uma execução ativa foi encontrada")
+            if active and active[0].phase == ExecutionPhase.HUMAN_REQUIRED:
+                reconciled = self._reconcile_human(active[0])
+                if reconciled is not None:
+                    self._show_completion(reconciled)
+                    continue
             if active and (active[0].phase in PROVIDER_WAIT_PHASES or active[0].phase == ExecutionPhase.HUMAN_REQUIRED):
                 run = self.escalation.assess(active[0])
                 if run.phase == ExecutionPhase.HUMAN_REQUIRED:
@@ -129,6 +135,11 @@ class SupervisorService:
             progressed = False
             for run in active:
                 if run.phase == ExecutionPhase.HUMAN_REQUIRED:
+                    reconciled = self._reconcile_human(run)
+                    if reconciled is not None:
+                        progressed = True
+                        self._show_completion(reconciled)
+                        continue
                     self._assess_once(run)
                     continue
                 if run.phase in PROVIDER_WAIT_PHASES:
@@ -206,13 +217,34 @@ class SupervisorService:
             self.escalation.assess(run)
             self._assessed_runs.add(run.id)
 
+    def _reconcile_human(self, run) -> WorkResult | None:
+        """Consulta prova remota de merge apenas quando há identidade de PR persistida."""
+        if not all((
+            getattr(run, "branch", None),
+            getattr(run, "current_head_sha", None),
+            getattr(run, "pull_request_number", None),
+            getattr(run, "pull_request_url", None),
+        )):
+            return None
+        reconciler = getattr(self.work_service, "reconcile_external_merge", None)
+        if reconciler is None:
+            return None
+        try:
+            result = reconciler(run.issue_number)
+        except ResumeError:
+            return None
+        if (not isinstance(result, WorkResult)
+                or result.resume is None
+                or result.resume.issue_number != run.issue_number
+                or not isinstance(result.resume.phase, str)
+                or result.resume.phase == ExecutionPhase.HUMAN_REQUIRED.value):
+            return None
+        return result
+
     @staticmethod
     def _occupies_slot(run) -> bool:
-        """Bloqueios humanos não consomem capacidade de execução autônoma."""
-        return run.phase not in {
-            ExecutionPhase.HUMAN_REQUIRED,
-            ExecutionPhase.BLOCKED_PROVIDER,
-        }
+        """Toda execução não terminal preserva sua vaga e identidade isolada."""
+        return True
 
     def _show_completion(self, result: WorkResult) -> None:
         issue = result.run.issue_number if result.run else (result.resume.issue_number if result.resume else None)

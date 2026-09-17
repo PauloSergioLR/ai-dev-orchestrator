@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from ai_dev_orchestrator.domain.provider import (
     FAILURE_PRECEDENCE, reliable_retry_at, classify_process_failure,
 )
 from ai_dev_orchestrator.infrastructure.process import CommandRunner, OutputPolicy
+from ai_dev_orchestrator.infrastructure.heartbeat import heartbeat
 
 
 class AntigravityError(ProviderFailure):
@@ -27,11 +29,16 @@ class AntigravityError(ProviderFailure):
 class AntigravityAdapter:
     """Cada chamada inicia um processo novo, com prompt exclusivamente no stdin."""
 
-    def __init__(self, timeout_seconds: float, runner: CommandRunner | None = None, model: str = "default", executable: str = "agy") -> None:
+    def __init__(self, timeout_seconds: float, runner: CommandRunner | None = None,
+                 model: str = "default", executable: str = "agy",
+                 progress: Callable[[str], None] | None = None,
+                 heartbeat_seconds: float = 300) -> None:
         self.timeout_seconds = timeout_seconds
         self.runner = runner or CommandRunner(timeout=timeout_seconds)
         self.model = model
         self.executable = executable
+        self.progress = progress
+        self.heartbeat_seconds = heartbeat_seconds
 
     def check_available(self) -> str:
         """Mesmo preflight local no doctor e antes de cada chamada headless."""
@@ -78,8 +85,13 @@ class AntigravityAdapter:
         ]
         if self.model != "default":
             arguments.extend(["--model", self.model])
-        result = self.runner.run(arguments, cwd=cwd, input_text=prompt,
-                                 stdout_policy=OutputPolicy.UTF8_STRICT)
+        with heartbeat("Review Gemini", self.progress, self.heartbeat_seconds):
+            result = self.runner.run(
+                arguments,
+                cwd=cwd,
+                input_text=prompt,
+                stdout_policy=OutputPolicy.UTF8_STRICT,
+            )
         if result.error:
             # Erros locais do runner (timeout, resolução, UTF-8) não são um
             # diagnóstico remoto do provider e devem permitir nova retomada.

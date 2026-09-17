@@ -126,7 +126,10 @@ resumidos; prompts, diffs e credenciais não são persistidos.
 `name`, `capability`, `argv`, `cwd`, `timeout_seconds` e `required`. Não há campos
 de linguagem, framework ou package manager. Sem override, `orch init` descobre
 as capacidades usando CI, scripts e documentação versionados. O contrato e seu
-fingerprint ficam congelados no run para uso por restart e resume.
+fingerprint ficam congelados no run para uso por restart e resume, junto do
+`base_sha` que originou o worktree. Workflows fora de Pull Request são somente
+evidência auditada. Drift durante a Issue gera contrato candidato, mas o baseline
+continua sendo o único plano executável.
 
 Em `[providers]`, `default` (ou `auto`) preserva a seleção feita pela CLI.
 Identificadores explícitos são encaminhados ao início e à retomada. Os modelos
@@ -190,9 +193,13 @@ Os números da validação realizada neste repositório estão em
 quando o projeto possuir uma política segura de retry sem horário do provider.
 
 Em `[cleanup]`, todas as opções começam desabilitadas. Mesmo quando habilitado,
-o cleanup só atua em `COMPLETED`, recusa worktree sujo, base/destino/branches
+o cleanup só atua em `COMPLETED` ou `SUPERSEDED`, recusa worktree sujo,
+diretório órfão não vazio/desconhecido, base/destino/branches
 protegidas e só remove referência remota após a confirmação persistida do merge
 do HEAD esperado. Uma falha é registrada como pendência e não muda a conclusão.
+
+`execution.max_no_changes_attempts` (padrão `1`, máximo `3`) limita retomadas da
+mesma sessão quando o provider termina sem produzir diff versionável.
 
 ## Variáveis de ambiente
 
