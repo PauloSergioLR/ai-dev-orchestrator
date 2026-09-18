@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
+import os
 from pathlib import Path
 import re
 from time import monotonic
@@ -105,11 +106,17 @@ class LocalValidationService:
                     f"cwd do gate '{plan.name}' não existe: {plan.cwd}",
                     kind=LocalFailureKind.INVALID_GATE,
                 )
-            runner = self.runner or CommandRunner(timeout=plan.timeout_seconds)
             if self.progress:
                 self.progress(f"Gate local iniciado: {plan.name}")
             started = monotonic()
-            result = runner.run(plan.argv, cwd=cwd)
+            if self.runner is None:
+                result = CommandRunner(timeout=plan.timeout_seconds).run(
+                    plan.argv,
+                    cwd=cwd,
+                    environment=self._gate_environment(plan.argv),
+                )
+            else:
+                result = self.runner.run(plan.argv, cwd=cwd)
             duration = monotonic() - started
             if result.failure_kind is not None:
                 kind = classify_process_failure(result.failure_kind)
@@ -143,6 +150,21 @@ class LocalValidationService:
                     correctable=not missing_environment,
                 )
         return tuple(results)
+
+    @staticmethod
+    def _gate_environment(arguments: Sequence[str]) -> dict[str, str] | None:
+        """Evita que ``uv run`` herde um ambiente virtual de outro checkout."""
+        command = Path(arguments[0]).stem.casefold()
+        if (
+            command != "uv"
+            or "run" not in arguments[1:]
+            or "--active" in arguments[1:]
+            or "VIRTUAL_ENV" not in os.environ
+        ):
+            return None
+        environment = dict(os.environ)
+        environment.pop("VIRTUAL_ENV", None)
+        return environment
 
     @staticmethod
     def _summarize(diagnostic: str) -> str:

@@ -1,7 +1,10 @@
 """Testes unitários dos gates e da publicação sem processos reais."""
 
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 
@@ -50,6 +53,43 @@ def test_failed_gate_is_fail_fast_and_keeps_diagnostic() -> None:
         LocalValidationService(runner, PLANS).validate(worktree)
 
     assert len(runner.calls) == 1
+
+
+def test_uv_gate_does_not_inherit_virtualenv_from_another_checkout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    received: dict[str, object] = {}
+    foreign_environment = tmp_path.parent / "checkout-principal" / ".venv"
+
+    def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        received.update(kwargs)
+        return subprocess.CompletedProcess(args[0], 0, b"teste aprovado", b"")
+
+    monkeypatch.setenv("VIRTUAL_ENV", str(foreign_environment))
+    monkeypatch.setattr(shutil, "which", lambda command: command)
+    monkeypatch.setattr(
+        "ai_dev_orchestrator.infrastructure.process.run_captured", run
+    )
+    plan = CommandPlan(
+        "executar-os-testes", "unit", "Testes", ("uv", "run", "pytest", "-q")
+    )
+
+    result = LocalValidationService(plans=(plan,)).validate(tmp_path)
+
+    assert result[0].succeeded
+    assert "VIRTUAL_ENV" not in received["env"]
+    assert os.environ["VIRTUAL_ENV"] == str(foreign_environment)
+
+
+def test_uv_gate_with_active_preserves_virtualenv(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VIRTUAL_ENV", "ambiente-ativo")
+
+    environment = LocalValidationService._gate_environment(
+        ("uv", "run", "--active", "pytest", "-q")
+    )
+
+    assert environment is None
+    assert os.environ["VIRTUAL_ENV"] == "ambiente-ativo"
 
 
 def test_truncates_large_gate_diagnostic() -> None:
