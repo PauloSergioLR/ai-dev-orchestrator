@@ -5,9 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 import json
+import os
 from pathlib import Path
 import shutil
+import stat
 import sys
+import tempfile
 from tempfile import TemporaryDirectory
 import tomllib
 from typing import Sequence
@@ -82,14 +85,18 @@ class DoctorService:
 
     def diagnose(self, *, deep: bool = False, state: bool = False) -> list[DoctorCheck]:
         """Executa todas as verificações obrigatórias do comando doctor."""
+        codex_cli = self._check_command("Codex CLI", ["codex", "--version"])
+        local_permissions = self._check_local_permissions()
         checks = [
             self._check_python(),
             self._check_command("Git", ["git", "--version"]),
             self._check_github_cli(),
-            self._check_command("Codex CLI", ["codex", "--version"]),
+            codex_cli,
             self._check_antigravity_cli(),
             self._check_repository(),
             self._check_configuration(),
+            self._summarize_local_permissions(codex_cli, local_permissions),
+            *local_permissions,
         ]
         checks.extend(self._check_code_review_graph())
         checks.extend(self._check_notifications())
@@ -100,6 +107,170 @@ class DoctorService:
         if state:
             checks.append(self._check_state_consistency())
         return checks
+
+    def _check_local_permissions(self) -> list[DoctorCheck]:
+        """Prova escrita local sem iniciar provider nem alterar caminhos definitivos."""
+        environment_checks = [self._probe_directory_write(
+            "Temporary directory",
+            Path(tempfile.gettempdir()),
+            must_exist=True,
+        )]
+        if uv_cache := os.environ.get("UV_CACHE_DIR"):
+            environment_checks.append(self._probe_directory_write(
+                "uv cache write probe", Path(uv_cache).expanduser(), must_exist=False
+            ))
+
+        try:
+            config = load_config(self.config_path)
+        except ConfigurationError as error:
+            return [DoctorCheck(
+                "Configured path probes", CheckStatus.ERROR,
+                "não executados porque a configuração é inválida: "
+                f"{self._safe_message(error)}; impede uma execução normal",
+            ), *environment_checks]
+
+        return [
+            self._probe_directory_write(
+                "Workspace write probe",
+                config.workspace.repository_path,
+                must_exist=True,
+            ),
+            self._probe_directory_write(
+                "Worktrees write probe",
+                config.workspace.worktrees_dir,
+                must_exist=False,
+            ),
+            self._probe_directory_write(
+                "State directory",
+                config.state.database_path.parent,
+                must_exist=False,
+            ),
+            *environment_checks,
+        ]
+
+    @staticmethod
+    def _summarize_local_permissions(
+        codex_cli: DoctorCheck, checks: Sequence[DoctorCheck]
+    ) -> DoctorCheck:
+        failures = [
+            check.name
+            for check in (codex_cli, *checks)
+            if check.status is CheckStatus.ERROR
+        ]
+        if failures:
+            return DoctorCheck(
+                "Codex local permissions", CheckStatus.ERROR,
+                "falha bloqueante em " + ", ".join(failures)
+                + "; corrija a permissão/ambiente antes de iniciar uma nova execução",
+            )
+        return DoctorCheck(
+            "Codex local permissions", CheckStatus.OK,
+            "executável e escrita local validados sem iniciar provider",
+        )
+
+    def _probe_directory_write(
+        self, name: str, path: Path, *, must_exist: bool
+    ) -> DoctorCheck:
+        """Cria, lê e remove somente um artefato temporário de nome exclusivo."""
+        target = path.absolute()
+        artifact: Path | None = None
+        probe_file: Path | None = None
+        operation = "validar o caminho"
+        failure: tuple[str, Path, Exception] | None = None
+        target_missing = False
+
+        try:
+            try:
+                target_info = target.stat()
+            except FileNotFoundError:
+                target_missing = True
+            if not target_missing:
+                if not stat.S_ISDIR(target_info.st_mode):
+                    raise NotADirectoryError("o caminho existe, mas não é um diretório")
+                probe_parent = target
+            elif must_exist:
+                raise FileNotFoundError("diretório obrigatório inexistente")
+            else:
+                probe_parent = self._nearest_existing_directory(target)
+
+            operation = "criar diretório temporário exclusivo"
+            artifact = Path(tempfile.mkdtemp(prefix=".orch-doctor-", dir=probe_parent))
+            probe_file = artifact / "write-probe.txt"
+
+            operation = "criar/escrever arquivo"
+            probe_file.write_text("diagnóstico local: ação\n", encoding="utf-8")
+            operation = "ler arquivo"
+            if probe_file.read_text(encoding="utf-8") != "diagnóstico local: ação\n":
+                raise OSError("conteúdo lido difere do conteúdo gravado")
+        except (OSError, UnicodeError) as error:
+            failure = (operation, target, error)
+        finally:
+            cleanup_failure = self._cleanup_write_probe(probe_file, artifact)
+            if cleanup_failure is not None:
+                failure = cleanup_failure
+
+        if failure is not None:
+            failed_operation, affected_path, error = failure
+            return DoctorCheck(
+                name,
+                CheckStatus.ERROR,
+                f"{failed_operation} falhou em {affected_path}: "
+                f"{self._permission_cause(error)}; impede uma execução normal",
+            )
+
+        detail = f"escrita, leitura e limpeza validadas em {target}"
+        if target_missing:
+            detail += "; o diretório definitivo ainda não existe e poderá ser criado"
+        return DoctorCheck(name, CheckStatus.OK, detail)
+
+    @staticmethod
+    def _nearest_existing_directory(path: Path) -> Path:
+        candidate = path
+        while True:
+            try:
+                candidate_info = candidate.stat()
+            except FileNotFoundError:
+                parent = candidate.parent
+                if parent == candidate:
+                    raise FileNotFoundError(
+                        "nenhum diretório ancestral existente"
+                    ) from None
+                candidate = parent
+                continue
+            if not stat.S_ISDIR(candidate_info.st_mode):
+                raise NotADirectoryError(
+                    f"ancestral existente não é um diretório: {candidate}"
+                )
+            return candidate
+
+    @staticmethod
+    def _cleanup_write_probe(
+        probe_file: Path | None, artifact: Path | None
+    ) -> tuple[str, Path, Exception] | None:
+        """Limpa apenas os dois caminhos criados pelo probe, sem remoção recursiva."""
+        if artifact is None:
+            return None
+        if probe_file is not None:
+            try:
+                probe_file.unlink(missing_ok=True)
+            except OSError as error:
+                return "remover arquivo temporário", probe_file, error
+        try:
+            artifact.rmdir()
+        except OSError as error:
+            return "remover diretório temporário", artifact, error
+        return None
+
+    def _permission_cause(self, error: Exception) -> str:
+        detail = self._safe_message(error)
+        normalized = detail.casefold()
+        access_denied = (
+            isinstance(error, PermissionError)
+            or getattr(error, "winerror", None) == 5
+            or "access is denied" in normalized
+            or "acesso negado" in normalized
+        )
+        return f"acesso negado ({detail})" if access_denied else detail
 
     def _check_notifications(self) -> list[DoctorCheck]:
         """Valida apenas configuração local; nunca revela nem transmite secrets."""

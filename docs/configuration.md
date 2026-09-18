@@ -122,6 +122,21 @@ repositório e dos worktrees. Um caminho explicitamente configurado continua
 válido para preservar bancos legados. O banco contém apenas checkpoints
 resumidos; prompts, diffs e credenciais não são persistidos.
 
+Antes de uma execução, `orch doctor` valida que `repository_path` existe e
+prova escrita, leitura e remoção no workspace. O comando faz o mesmo para
+`worktrees_dir`, para o diretório pai de `database_path` e para o diretório
+temporário do sistema. Como as raízes de worktrees e estado podem ser criadas
+sob demanda, quando uma delas ainda não existe o probe usa seu ancestral
+existente mais próximo e não cria o caminho configurado. Se `UV_CACHE_DIR`
+estiver definido no ambiente, esse cache também entra no diagnóstico.
+
+Os probes criam nomes exclusivos com o prefixo `.orch-doctor-`, gravam e leem
+um conteúdo UTF-8 mínimo e removem apenas o arquivo e diretório recém-criados,
+sem limpeza recursiva. Erros informam operação, caminho, causa sanitizada e se
+bloqueiam a execução. O diagnóstico não altera ACL/permissões, não exige
+elevação, não muda a configuração global do Codex e não chama providers ou rede;
+somente `orch doctor --deep`, por opção explícita, exercita providers.
+
 `[project]` é opcional. `project.gates` aceita overrides estruturados com
 `name`, `capability`, `argv`, `cwd`, `timeout_seconds` e `required`. Não há campos
 de linguagem, framework ou package manager. Sem override, `orch init` descobre

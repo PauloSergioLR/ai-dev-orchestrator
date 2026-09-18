@@ -12,7 +12,7 @@ from pathlib import Path
 import shutil
 import signal
 import subprocess
-from typing import Sequence
+from typing import Mapping, Sequence
 
 
 COMMAND_TIMEOUT_SECONDS = 5
@@ -36,7 +36,9 @@ class ProcessCleanupError(subprocess.TimeoutExpired):
     """Timeout cuja árvore de processos não pôde ser encerrada com segurança."""
 
 
-def run_captured(command, *, capture_output, timeout, shell, check, cwd=None, input=None):
+def run_captured(
+    command, *, capture_output, timeout, shell, check, cwd=None, input=None, env=None
+):
     """Captura bytes e encerra a árvore antes de permitir retry após timeout."""
     if shell or not capture_output or check:
         raise ValueError("Contrato de processo exige captura, shell=False e check=False")
@@ -50,6 +52,8 @@ def run_captured(command, *, capture_output, timeout, shell, check, cwd=None, in
         header = json.dumps({"command": command, "has_input": input is not None}).encode("ascii")
         input = header + b"\n" + (input or b"")
         options = {"creationflags": subprocess.CREATE_NO_WINDOW}
+    if env is not None:
+        options["env"] = env
     try:
         process = subprocess.Popen(launch_command, cwd=cwd, shell=False,
                                    stdin=subprocess.PIPE if input is not None else None,
@@ -157,6 +161,7 @@ class CommandRunner:
         *,
         stdout_policy: OutputPolicy = OutputPolicy.SYSTEM_TEXT,
         stderr_policy: OutputPolicy = OutputPolicy.SYSTEM_TEXT,
+        environment: Mapping[str, str] | None = None,
     ) -> CommandResult:
         """Executa argumentos de processo e normaliza falhas esperadas."""
         command = list(arguments)
@@ -192,6 +197,8 @@ class CommandRunner:
                 options["cwd"] = cwd
             if input_bytes is not None:
                 options["input"] = input_bytes
+            if environment is not None:
+                options["env"] = environment
             completed = run_captured(command, **options)
         except FileNotFoundError:
             return CommandResult(

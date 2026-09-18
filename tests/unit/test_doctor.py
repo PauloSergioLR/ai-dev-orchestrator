@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import tempfile
 from types import SimpleNamespace
 
 import pytest
@@ -56,12 +57,16 @@ def successful_results() -> dict[tuple[str, ...], CommandResult]:
 
 
 def write_valid_config(path: Path) -> Path:
-    repository = (path.parent / "repository").as_posix()
+    repository_path = path.parent / "repository"
+    repository_path.mkdir(exist_ok=True)
+    repository = repository_path.as_posix()
     worktrees = (path.parent / "worktrees").as_posix()
+    state = (path.parent / "state" / "orchestrator.db").as_posix()
     path.write_text(
         "[github]\nowner = 'a'\nrepository = 'b'\nproject_number = 1\nready_status = 'Ready'\n"
         f"[workspace]\nrepository_path = '{repository}'\nworktrees_dir = '{worktrees}'\nbase_ref = 'main'\n"
-        "[execution]\nmax_attempts = 1\nmax_parallel_runs = 1\nauto_merge = false\n",
+        "[execution]\nmax_attempts = 1\nmax_parallel_runs = 1\nauto_merge = false\n"
+        f"[state]\ndatabase_path = '{state}'\n",
         encoding="utf-8",
     )
     return path
@@ -72,12 +77,26 @@ def test_all_checks_are_ok(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
         "ai_dev_orchestrator.services.doctor.sys",
         SimpleNamespace(version_info=SimpleNamespace(major=3, minor=13, micro=1)),
     )
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    executable = tmp_path / "repository" / "tools" / "validate.exe"
+    executable.parent.mkdir(parents=True)
+    executable.touch()
+    config_path = write_valid_config(tmp_path / "orchestrator.toml")
+    with config_path.open("a", encoding="utf-8") as config:
+        config.write(
+            "[project]\n[[project.gates]]\n"
+            "name = 'official-check'\nargv = ['tools/validate.exe']\n"
+        )
 
     checks = DoctorService(
-        FakeRunner(successful_results()), write_valid_config(tmp_path / "orchestrator.toml")
+        FakeRunner(successful_results()), config_path
     ).diagnose()
 
-    assert all(check.status is CheckStatus.OK for check in checks)
+    assert all(check.status is CheckStatus.OK for check in checks), [
+        (check.name, check.status, check.message)
+        for check in checks
+        if check.status is not CheckStatus.OK
+    ]
 
 
 def test_command_runner_handles_missing_executable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -371,6 +390,148 @@ def test_reports_missing_configuration(tmp_path: Path) -> None:
     assert "não encontrado" in check.message
 
 
+def test_environment_probe_still_runs_without_project_configuration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+
+    checks = DoctorService(
+        config_path=tmp_path / "missing.toml"
+    )._check_local_permissions()
+
+    by_name = {check.name: check for check in checks}
+    assert by_name["Configured path probes"].status is CheckStatus.ERROR
+    assert by_name["Temporary directory"].status is CheckStatus.OK
+
+
+def test_write_probe_validates_writable_directory_and_removes_only_its_artifact(
+    tmp_path: Path,
+) -> None:
+    existing = tmp_path / "arquivo-do-usuario.txt"
+    existing.write_text("preservar", encoding="utf-8")
+
+    check = DoctorService()._probe_directory_write(
+        "Workspace write probe", tmp_path, must_exist=True
+    )
+
+    assert check.status is CheckStatus.OK
+    assert existing.read_text(encoding="utf-8") == "preservar"
+    assert list(tmp_path.iterdir()) == [existing]
+
+
+@pytest.mark.parametrize("message", ["Access is denied", "Acesso negado"])
+def test_write_probe_reports_sanitized_access_denied_during_creation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, message: str
+) -> None:
+    def deny_creation(*args: object, **kwargs: object) -> str:
+        raise OSError(message)
+
+    monkeypatch.setattr(tempfile, "mkdtemp", deny_creation)
+
+    check = DoctorService()._probe_directory_write(
+        "Worktrees write probe", tmp_path, must_exist=True
+    )
+
+    assert check.status is CheckStatus.ERROR
+    assert "criar diretório temporário exclusivo" in check.message
+    assert "acesso negado" in check.message
+    assert str(tmp_path) in check.message
+    assert "impede uma execução normal" in check.message
+
+
+def test_write_probe_reports_failure_to_create_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    original_write_text = Path.write_text
+
+    def deny_file_creation(path: Path, *args: object, **kwargs: object) -> int:
+        if path.name == "write-probe.txt":
+            raise PermissionError("Acesso negado")
+        return original_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", deny_file_creation)
+
+    check = DoctorService()._probe_directory_write(
+        "Workspace write probe", tmp_path, must_exist=True
+    )
+
+    assert check.status is CheckStatus.ERROR
+    assert "criar/escrever arquivo" in check.message
+    assert "acesso negado" in check.message
+    assert not any(path.name.startswith(".orch-doctor-") for path in tmp_path.iterdir())
+
+
+def test_write_probe_reports_cleanup_failure_without_removing_user_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    existing = tmp_path / "preservar.txt"
+    existing.write_text("usuário", encoding="utf-8")
+    original_unlink = Path.unlink
+
+    def deny_probe_removal(path: Path, *args: object, **kwargs: object) -> None:
+        if path.name == "write-probe.txt":
+            raise PermissionError("Access is denied")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", deny_probe_removal)
+
+    check = DoctorService()._probe_directory_write(
+        "State directory", tmp_path, must_exist=True
+    )
+
+    assert check.status is CheckStatus.ERROR
+    assert "remover arquivo temporário" in check.message
+    assert "acesso negado" in check.message
+    assert existing.read_text(encoding="utf-8") == "usuário"
+
+
+def test_write_probe_reports_required_missing_path(tmp_path: Path) -> None:
+    missing = tmp_path / "workspace-ausente"
+
+    check = DoctorService()._probe_directory_write(
+        "Workspace write probe", missing, must_exist=True
+    )
+
+    assert check.status is CheckStatus.ERROR
+    assert str(missing) in check.message
+    assert "diretório obrigatório inexistente" in check.message
+    assert not missing.exists()
+
+
+def test_local_permissions_probe_workspace_and_separate_worktrees_directory(
+    tmp_path: Path,
+) -> None:
+    config_path = write_valid_config(tmp_path / "orchestrator.toml")
+    workspace = tmp_path / "repository"
+    worktrees = tmp_path / "worktrees"
+
+    checks = DoctorService(config_path=config_path)._check_local_permissions()
+    by_name = {check.name: check for check in checks}
+
+    assert str(workspace) in by_name["Workspace write probe"].message
+    assert str(worktrees) in by_name["Worktrees write probe"].message
+    assert all(check.status is CheckStatus.OK for check in checks), [
+        (check.name, check.status, check.message) for check in checks
+    ]
+    assert not worktrees.exists()
+
+
+def test_uv_cache_is_probed_only_when_configured(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    uv_cache = tmp_path / "uv-cache"
+    monkeypatch.setenv("UV_CACHE_DIR", str(uv_cache))
+
+    checks = DoctorService(
+        config_path=write_valid_config(tmp_path / "orchestrator.toml")
+    )._check_local_permissions()
+
+    uv_check = next(check for check in checks if check.name == "uv cache write probe")
+    assert uv_check.status is CheckStatus.OK
+    assert str(uv_cache) in uv_check.message
+    assert not uv_cache.exists()
+
+
 class CrgRunner:
     def __init__(self, results):
         self.results = results
@@ -386,7 +547,7 @@ def crg_config(tmp_path: Path) -> Path:
             "\n[code_review_graph]\nenabled = true\ncommand = ['crg']\n"
             "required_version = '2.3.8'\n"
         )
-    (tmp_path / "repository").mkdir()
+    (tmp_path / "repository").mkdir(exist_ok=True)
     return path
 
 

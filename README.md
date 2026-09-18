@@ -10,13 +10,28 @@ Execute o diagnóstico dos pré-requisitos locais com:
 orch doctor
 ```
 
-O comando apenas informa o estado de Python, CLIs, repositório Git e configuração.
+O comando informa o estado de Python, CLIs, repositório Git e configuração. Ele
+também prova escrita, leitura e limpeza no workspace, na raiz de worktrees, no
+diretório do banco de estado e no diretório temporário do sistema. Quando
+`UV_CACHE_DIR` está definido, o cache configurado do `uv` também é verificado.
+Cada probe usa um diretório exclusivo e remove somente o arquivo e o diretório
+que acabou de criar; caminhos definitivos ainda inexistentes não são
+materializados pelo diagnóstico.
+
+Falhas mostram o caminho, a operação e a causa sanitizada. No Windows,
+`Access is denied` e `Acesso negado` são identificados explicitamente. Uma
+falha bloqueante orienta corrigir o ambiente antes de iniciar outra execução,
+mas o doctor nunca executa `icacls`, `takeown`, altera ACL, configuração ou
+política de sandbox, nem apaga caches.
+
 O Antigravity CLI é o executável local usado para a revisão com Gemini.
 Ele não corrige problemas, instala ferramentas, altera autenticação ou envia prompts para IAs.
 Doctor e runtime validam as mesmas flags da CLI configurada em `review.executable`
 (padrão `agy`, confirmado na CLI oficial). No Windows, um PATH desatualizado
 pode ser contornado com o caminho absoluto em `ORCH_REVIEW__EXECUTABLE`.
-O diagnóstico local não garante autenticação, quota nem resposta do modelo;
+O diagnóstico padrão executa apenas `--version` das CLIs e probes locais; não
+inicia sessão do Codex/Gemini, não consome quota e não precisa de rede para
+provar permissões. Ele não garante autenticação, quota nem resposta do modelo;
 cada review exige um `structured_output` válido. Veja [revisão Gemini](docs/review.md).
 O reviewer analisa o dossier já coletado sem executar comandos. Se a CLI
 reportar `denied_actions`, a revisão fica bloqueada e recuperável; não amplie
