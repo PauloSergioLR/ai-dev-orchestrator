@@ -2,6 +2,7 @@
 owner = "seu-usuario"
 repository = "seu-repositorio"
 project_number = 1
+project_timeout_seconds = 60
 ready_status = "Ready"
 in_progress_status = "In Progress"
 ai_review_status = "AI Review"
