@@ -44,6 +44,7 @@ class GitHubConfig(BaseModel):
     owner: str = Field(min_length=1)
     repository: str = Field(min_length=1)
     project_number: int = Field(gt=0)
+    project_timeout_seconds: float = Field(default=60, gt=0, le=300)
     ready_status: str = Field(min_length=1)
     in_progress_status: str = Field(default="In Progress", min_length=1)
     ai_review_status: str = Field(default="AI Review", min_length=1)

@@ -76,8 +76,16 @@ def test_uses_remote_timeout_only_for_project_default_runner() -> None:
     adapter = GitHubProjectAdapter(github_config())
 
     assert isinstance(adapter.runner, CommandRunner)
-    assert adapter.runner.timeout == 20
+    assert adapter.runner.timeout == 60
     assert CommandRunner().timeout == 5
+
+
+def test_uses_configured_project_timeout() -> None:
+    config = github_config().model_copy(update={"project_timeout_seconds": 75})
+    adapter = GitHubProjectAdapter(config)
+
+    assert isinstance(adapter.runner, CommandRunner)
+    assert adapter.runner.timeout == 75
 
 
 def test_normalizes_missing_optional_project_fields_to_none() -> None:

@@ -22,7 +22,7 @@ from ai_dev_orchestrator.services.merge import MergePullRequestSnapshot, MergeRe
 
 
 GITHUB_ISSUE_TIMEOUT_SECONDS = 20
-GITHUB_PROJECT_TIMEOUT_SECONDS = 20
+GITHUB_PROJECT_TIMEOUT_SECONDS = 60
 GITHUB_PROJECT_ITEM_LIMIT = 1000
 GITHUB_PULL_REQUEST_TIMEOUT_SECONDS = 30
 GITHUB_CI_TIMEOUT_SECONDS = 30
@@ -492,7 +492,7 @@ class GitHubProjectAdapter:
         self.runner = (
             runner
             if runner is not None
-            else CommandRunner(timeout=GITHUB_PROJECT_TIMEOUT_SECONDS)
+            else CommandRunner(timeout=self.config.project_timeout_seconds)
         )
 
     def list_items(self) -> tuple[ProjectItem, ...]:
@@ -614,7 +614,7 @@ class GitHubProjectStatusAdapter:
         self.runner = (
             runner
             if runner is not None
-            else CommandRunner(timeout=GITHUB_PROJECT_TIMEOUT_SECONDS)
+            else CommandRunner(timeout=self.config.project_timeout_seconds)
         )
 
     def set_status(self, project_item_id: str, status_name: str) -> None:
