@@ -86,15 +86,17 @@ class DoctorService:
     def diagnose(self, *, deep: bool = False, state: bool = False) -> list[DoctorCheck]:
         """Executa todas as verificações obrigatórias do comando doctor."""
         codex_cli = self._check_command("Codex CLI", ["codex", "--version"])
+        github_cli = self._check_github_cli()
         local_permissions = self._check_local_permissions()
         checks = [
             self._check_python(),
             self._check_command("Git", ["git", "--version"]),
-            self._check_github_cli(),
+            github_cli,
             codex_cli,
             self._check_antigravity_cli(),
             self._check_repository(),
             self._check_configuration(),
+            self._check_github_project(github_cli),
             self._summarize_local_permissions(codex_cli, local_permissions),
             *local_permissions,
         ]
@@ -635,6 +637,103 @@ class DoctorService:
         if not result.succeeded:
             return DoctorCheck("GitHub CLI", CheckStatus.ERROR, "gh não está autenticado")
         return DoctorCheck("GitHub CLI", CheckStatus.OK, "autenticado")
+
+    def _check_github_project(self, github_cli: DoctorCheck | None = None) -> DoctorCheck:
+        """Prova a leitura real do Project com a mesma operação usada pelo work."""
+        if github_cli is not None and github_cli.status is CheckStatus.ERROR:
+            return DoctorCheck(
+                "GitHub Project", CheckStatus.ERROR,
+                "não verificado porque o GitHub CLI não está autenticado/operacional",
+            )
+        try:
+            config = load_config(self.config_path)
+        except ConfigurationError as error:
+            return DoctorCheck(
+                "GitHub Project", CheckStatus.ERROR,
+                "não verificado porque a configuração é inválida: "
+                + self._safe_message(error),
+            )
+
+        project_runner = (
+            CommandRunner(timeout=config.github.project_timeout_seconds)
+            if isinstance(self.runner, CommandRunner)
+            else self.runner
+        )
+        try:
+            items = GitHubProjectAdapter(config, project_runner).list_items()
+        except GitHubProjectError as error:
+            return DoctorCheck(
+                "GitHub Project", CheckStatus.ERROR,
+                self._github_project_failure(
+                    error,
+                    project_number=config.github.project_number,
+                    timeout_seconds=config.github.project_timeout_seconds,
+                ),
+            )
+
+        override = self._github_token_override()
+        credential = (
+            f"; credencial efetiva sobrescrita por {override}"
+            if override is not None else ""
+        )
+        return DoctorCheck(
+            "GitHub Project", CheckStatus.OK,
+            f"acesso read-only confirmado ao Project {config.github.project_number}; "
+            f"{len(items)} item(ns); timeout={config.github.project_timeout_seconds:g}s"
+            + credential,
+        )
+
+    def _github_project_failure(
+        self, error: Exception, *, project_number: int, timeout_seconds: float
+    ) -> str:
+        detail = self._safe_message(error)
+        normalized = detail.casefold()
+        override = self._github_token_override()
+        override_note = (
+            f"; {override} está definido e sobrescreve a autenticação armazenada do gh"
+            if override is not None else ""
+        )
+
+        if "timeout" in normalized or "excedeu o timeout" in normalized:
+            return (
+                f"{detail}; leitura do Project {project_number} excedeu o limite de "
+                f"{timeout_seconds:g}s; ajuste github.project_timeout_seconds se necessário"
+                + override_note
+            )
+        if "unknown owner type" in normalized:
+            action = (
+                f"; revise o owner e a autorização do token em {override}"
+                if override is not None
+                else "; confira github.owner e, se estiver correto, execute "
+                "'gh auth refresh -h github.com -s project'"
+            )
+            return f"{detail}; owner não reconhecido pela credencial atual{action}"
+        if "not found" in normalized or "could not resolve" in normalized:
+            return (
+                f"{detail}; confira github.owner e github.project_number"
+                + override_note
+            )
+        auth_markers = (
+            "insufficient scope", "insufficient scopes", "required scope",
+            "authentication", "authorization", "forbidden", "permission",
+        )
+        if any(marker in normalized for marker in auth_markers):
+            if override is not None:
+                return (
+                    f"{detail}; {override} está definido e deve possuir acesso ao GitHub Projects"
+                )
+            return (
+                f"{detail}; a credencial do gh pode não possuir acesso ao GitHub Projects; "
+                "ação sugerida: gh auth refresh -h github.com -s project"
+            )
+        return detail + override_note
+
+    @staticmethod
+    def _github_token_override() -> str | None:
+        for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+            if os.environ.get(name):
+                return name
+        return None
 
     def _check_antigravity_cli(self) -> DoctorCheck:
         """Usa a mesma configuração e o mesmo preflight do runtime."""
