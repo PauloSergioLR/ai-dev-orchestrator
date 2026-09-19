@@ -34,7 +34,7 @@ from ai_dev_orchestrator.services.review import REVIEW_PLAN_SCHEMA, STRUCTURED_R
 class FakeRunner:
     results: dict[tuple[str, ...], CommandResult]
 
-    def run(self, arguments: list[str]) -> CommandResult:
+    def run(self, arguments: list[str], **policies) -> CommandResult:
         return self.results[tuple(arguments)]
 
 
@@ -42,6 +42,10 @@ def successful_results() -> dict[tuple[str, ...], CommandResult]:
     return {
         ("git", "--version"): CommandResult(0, "git version 2.50.0\n"),
         ("gh", "auth", "status"): CommandResult(0),
+        (
+            "gh", "project", "item-list", "1", "--owner", "a", "--limit",
+            "1000", "--format", "json",
+        ): CommandResult(0, '{"items":[]}'),
         ("codex", "--version"): CommandResult(0, "codex 1.0\n"),
         ("agy", "--version"): CommandResult(0, "agy 1.0\n"),
         ("agy", "--help"): CommandResult(
@@ -314,6 +318,95 @@ def test_reports_incompatible_python(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert check.status is CheckStatus.ERROR
     assert "3.13.x" in check.message
+
+
+def test_doctor_confirms_read_only_github_project_access(tmp_path: Path) -> None:
+    runner = FakeRunner({
+        (
+            "gh", "project", "item-list", "1", "--owner", "a", "--limit",
+            "1000", "--format", "json",
+        ): CommandResult(0, '{"items":[]}'),
+    })
+
+    check = DoctorService(
+        runner, write_valid_config(tmp_path / "orchestrator.toml")
+    )._check_github_project()
+
+    assert check.status is CheckStatus.OK
+    assert "Project 1" in check.message
+    assert "timeout=60s" in check.message
+
+
+def test_doctor_reports_project_timeout_with_configurable_action(tmp_path: Path) -> None:
+    runner = FakeRunner({
+        (
+            "gh", "project", "item-list", "1", "--owner", "a", "--limit",
+            "1000", "--format", "json",
+        ): CommandResult(None, error="Comando excedeu o timeout de 60s"),
+    })
+
+    check = DoctorService(
+        runner, write_valid_config(tmp_path / "orchestrator.toml")
+    )._check_github_project()
+
+    assert check.status is CheckStatus.ERROR
+    assert "timeout" in check.message.casefold()
+    assert "github.project_timeout_seconds" in check.message
+
+
+def test_doctor_reports_unknown_owner_with_project_scope_action(tmp_path: Path) -> None:
+    runner = FakeRunner({
+        (
+            "gh", "project", "item-list", "1", "--owner", "a", "--limit",
+            "1000", "--format", "json",
+        ): CommandResult(1, stderr="unknown owner type"),
+    })
+
+    check = DoctorService(
+        runner, write_valid_config(tmp_path / "orchestrator.toml")
+    )._check_github_project()
+
+    assert check.status is CheckStatus.ERROR
+    assert "owner não reconhecido" in check.message
+    assert "gh auth refresh -h github.com -s project" in check.message
+
+
+def test_doctor_reports_project_not_found_separately(tmp_path: Path) -> None:
+    runner = FakeRunner({
+        (
+            "gh", "project", "item-list", "1", "--owner", "a", "--limit",
+            "1000", "--format", "json",
+        ): CommandResult(1, stderr="Project not found"),
+    })
+
+    check = DoctorService(
+        runner, write_valid_config(tmp_path / "orchestrator.toml")
+    )._check_github_project()
+
+    assert check.status is CheckStatus.ERROR
+    assert "github.owner" in check.message
+    assert "github.project_number" in check.message
+    assert "auth refresh" not in check.message
+
+
+def test_doctor_identifies_environment_token_override_without_leaking_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "segredo-do-teste")
+    runner = FakeRunner({
+        (
+            "gh", "project", "item-list", "1", "--owner", "a", "--limit",
+            "1000", "--format", "json",
+        ): CommandResult(1, stderr="HTTP 403: insufficient scopes"),
+    })
+
+    check = DoctorService(
+        runner, write_valid_config(tmp_path / "orchestrator.toml")
+    )._check_github_project()
+
+    assert check.status is CheckStatus.ERROR
+    assert "GH_TOKEN" in check.message
+    assert "segredo-do-teste" not in check.message
 
 
 def test_reports_unauthenticated_github_cli() -> None:
