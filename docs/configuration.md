@@ -17,6 +17,7 @@ repositório.
 owner = "seu-usuario"
 repository = "seu-repositorio"
 project_number = 1
+project_timeout_seconds = 60
 ready_status = "Ready"
 in_progress_status = "In Progress"
 status_field_name = "Status"
@@ -75,6 +76,9 @@ remove_remote_branch = false
 
 Em `[github]`, `owner`, `repository` e `ready_status` devem ser textos não
 vazios. `project_number` deve ser um inteiro maior que zero.
+`project_timeout_seconds` controla o limite das leituras/mutações do GitHub
+Project usadas por `doctor`, `work` e atualização de Status. O padrão é `60`
+segundos; valores devem ser positivos e no máximo `300`.
 
 Em `[execution]`, `max_attempts` e `max_parallel_runs` devem ser inteiros
 maiores que zero. `auto_merge` deve ser estritamente `true` ou `false` e
@@ -121,6 +125,15 @@ diretório pai é criado quando necessário. Se omitido, o caminho determinísti
 repositório e dos worktrees. Um caminho explicitamente configurado continua
 válido para preservar bancos legados. O banco contém apenas checkpoints
 resumidos; prompts, diffs e credenciais não são persistidos.
+
+Antes de uma execução, `orch doctor` também executa uma leitura read-only do
+GitHub Project configurado usando a mesma operação de listagem usada por `work`.
+Assim, autenticação insuficiente, owner/Project incorretos e timeout são
+detectados antes de criar uma execução. Quando a credencial armazenada do
+`gh` não possui acesso a Projects, o diagnóstico orienta
+`gh auth refresh -h github.com -s project`; se `GH_TOKEN` ou `GITHUB_TOKEN`
+estiver definido, o doctor informa qual variável está sobrescrevendo a
+autenticação sem exibir seu valor.
 
 Antes de uma execução, `orch doctor` valida que `repository_path` existe e
 prova escrita, leitura e remoção no workspace. O comando faz o mesmo para
@@ -225,6 +238,7 @@ aninhados, use dois sublinhados entre o grupo e o campo:
 ORCH_GITHUB__OWNER
 ORCH_GITHUB__REPOSITORY
 ORCH_GITHUB__PROJECT_NUMBER
+ORCH_GITHUB__PROJECT_TIMEOUT_SECONDS
 ORCH_GITHUB__READY_STATUS
 ORCH_GITHUB__IN_PROGRESS_STATUS
 ORCH_GITHUB__AI_REVIEW_STATUS
