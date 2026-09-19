@@ -78,8 +78,16 @@ def test_uses_remote_timeout_without_changing_default_process_timeout() -> None:
     adapter = GitHubProjectStatusAdapter(github_config())
 
     assert isinstance(adapter.runner, CommandRunner)
-    assert adapter.runner.timeout == 20
+    assert adapter.runner.timeout == 60
     assert CommandRunner().timeout == 5
+
+
+def test_status_adapter_uses_configured_project_timeout() -> None:
+    config = github_config().model_copy(update={"project_timeout_seconds": 75})
+    adapter = GitHubProjectStatusAdapter(config)
+
+    assert isinstance(adapter.runner, CommandRunner)
+    assert adapter.runner.timeout == 75
 
 
 def test_rejects_missing_status_before_mutation() -> None:
