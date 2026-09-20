@@ -281,6 +281,20 @@ Validação após a integração, no Windows:
 - XML final: `.pytest-tmp-audit-dist/merge-final.xml`. Os três skips continuam
   sendo os dois probes live/opt-in e o teste SIGKILL/lifeline exclusivo POSIX.
 
+A primeira CI da integração executou a suíte com sucesso nas duas plataformas:
+1.086 aprovados/3 skips no Windows e 1.076 aprovados/13 skips no Ubuntu. No Ubuntu,
+os skips são os dois probes live e 11 casos específicos de Windows; o teste
+SIGKILL/lifeline POSIX foi executado e aprovado. A etapa seguinte de instalação
+offline revelou que `uv sync --frozen` preenche os artefatos do cache sem garantir
+os metadados do índice necessários a uma nova resolução pelo `uv pip install`.
+
+O verificador passou a preparar as dependências pelo lock congelado no venv
+temporário, sem instalar o projeto, instalar somente o wheel e executar
+`uv pip check` antes dos imports isolados. Um cache novo reproduziu a falha do
+verificador anterior; com o mesmo cache, a versão corrigida instalou o wheel,
+validou as 16 distribuições e importou CLI/política fora do checkout, offline.
+Ruff, build e whitespace também foram aprovados após essa correção.
+
 Os resultados remotos da matriz Ubuntu/Windows são registrados nos checks e no
 corpo do PR #98, por execução e commit. Eles complementam o retrato local original;
 a limitação residual de contenção POSIX descrita acima permanece documentada.

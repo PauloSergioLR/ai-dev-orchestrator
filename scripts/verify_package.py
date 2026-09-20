@@ -1,4 +1,4 @@
-"""Instala o wheel offline em ambiente temporário e verifica recursos fora do checkout."""
+"""Instala dependências do lock e wheel offline; verifica fora do checkout."""
 
 from pathlib import Path
 import os
@@ -25,7 +25,18 @@ def main() -> None:
         subprocess.run([uv, "venv", "--python", sys.executable, str(venv)],
                        cwd=root, env=environment, check=True, timeout=60)
         python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-        subprocess.run([uv, "pip", "install", "--python", str(python), str(wheel)],
+        # O sync já armazena os artefatos do lock, mas pode não consultar o índice.
+        # Reutiliza essas URLs exatas sem resolver dependências pelo índice offline.
+        subprocess.run([
+            uv, "sync", "--frozen", "--no-dev", "--no-install-project",
+            "--project", str(Path(__file__).resolve().parents[1]),
+            "--python", str(python),
+        ], cwd=root, env={**environment, "UV_PROJECT_ENVIRONMENT": str(venv)},
+            check=True, timeout=60)
+        subprocess.run([uv, "pip", "install", "--no-deps", "--python", str(python), str(wheel)],
+                       cwd=root, env=environment, check=True, timeout=60)
+        # Verifica o metadata do wheel; --no-deps não pode ocultar requisito ausente.
+        subprocess.run([uv, "pip", "check", "--python", str(python)],
                        cwd=root, env=environment, check=True, timeout=60)
         subprocess.run([
             str(python), "-I", "-c",
