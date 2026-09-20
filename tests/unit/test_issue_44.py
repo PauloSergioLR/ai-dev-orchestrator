@@ -393,7 +393,9 @@ def test_supervisor_aguarda_sem_chamar_work_antes_do_retry(tmp_path: Path) -> No
         SupervisorService(config, Work(), store, interrupt).watch()
 
     assert sleeps == [config.supervisor.max_sleep_seconds]
-    assert not config.state.database_path.with_suffix(".watch.lock").exists()
+    from ai_dev_orchestrator.services.supervisor import _exclusive_lock
+    with _exclusive_lock(config.state.database_path.with_suffix(".watch.lock")):
+        pass
 
 
 def test_supervisor_converte_quota_de_nova_execucao_em_espera(tmp_path: Path) -> None:

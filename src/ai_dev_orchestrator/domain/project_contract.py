@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 from hashlib import sha256
 import json
+from math import isfinite
 from pathlib import Path
 
 
@@ -52,8 +53,10 @@ class CommandPlan:
             raise ValueError("Gate precisa de nome e argv não vazio")
         if any(not isinstance(value, str) or not value or "\x00" in value for value in self.argv):
             raise ValueError("argv contém argumento inválido")
-        if self.timeout_seconds <= 0:
-            raise ValueError("timeout do gate deve ser positivo")
+        if not isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
+            raise ValueError("timeout do gate deve ser positivo e finito")
+        if not isfinite(self.confidence) or not 0 <= self.confidence <= 1:
+            raise ValueError("confidence do gate deve estar entre zero e um")
         if Path(self.cwd).is_absolute() or ".." in Path(self.cwd).parts:
             raise ValueError("cwd do gate deve ser relativo e permanecer no worktree")
 

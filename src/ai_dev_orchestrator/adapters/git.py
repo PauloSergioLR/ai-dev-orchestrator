@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Protocol, Sequence
 
 from ai_dev_orchestrator.domain.worktree import GitWorktree
 from ai_dev_orchestrator.domain.base_ref import PreparedBase
 from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner
+from ai_dev_orchestrator.infrastructure.redaction import RedactedError
 
 
 GIT_TIMEOUT_SECONDS = 20
 
 
-class GitWorktreeError(Exception):
+class GitWorktreeError(RedactedError):
     """Indica uma falha esperada ao preparar ou remover um Git worktree."""
 
 
@@ -71,6 +73,22 @@ class GitWorktreeAdapter:
             branch=branch,
             base_ref=base_ref,
         )
+
+    def verify_remote_identity(self, repository: str | Path, remote_name: str, expected_repository: str) -> None:
+        """Fetch e push devem apontar exclusivamente ao mesmo repositório GitHub."""
+        for extra in ([], ["--push"]):
+            output = self._run(
+                ["git", "-C", str(repository), "remote", "get-url", *extra, "--all", remote_name],
+                "verificar identidade do remote",
+            ).stdout.splitlines()
+            if len(output) != 1:
+                raise GitWorktreeError("Remote ausente ou com múltiplos destinos; identidade ambígua")
+            match = re.fullmatch(
+                r"(?:https://github\.com/|ssh://git@github\.com/|git@github\.com:)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?",
+                output[0].strip(),
+            )
+            if match is None or match.group(1).casefold() != expected_repository.casefold():
+                raise GitWorktreeError("Identidade do remote diverge do repositório configurado")
 
     def prepare_remote_base(
         self,
@@ -133,7 +151,7 @@ class GitWorktreeAdapter:
         repository_root = self.validate_repository(repository)
         path = self._path_from_repository(repository_root, worktree_path)
         result = self._run(
-            ["git", "-C", str(path), "status", "--porcelain"],
+            ["git", "-C", str(path), "status", "--porcelain", "--ignored", "--untracked-files=all"],
             "verificar alterações no worktree",
         )
         return not result.stdout.strip()
@@ -156,16 +174,58 @@ class GitWorktreeAdapter:
         return expected in registered
 
     @staticmethod
+    def validate_cleanup_path(worktree_path: str | Path, allowed_root: str | Path) -> Path:
+        """Exige filho direto e recusa links/junctions em toda a cadeia de diretórios."""
+        raw = Path(worktree_path)
+        root = Path(allowed_root)
+        if not raw.is_absolute() or not root.is_absolute():
+            raise GitWorktreeError("Cleanup exige caminhos absolutos")
+        for candidate in (raw, root, *raw.parents, *root.parents):
+            if candidate.is_symlink() or candidate.is_junction():
+                raise GitWorktreeError("Cleanup recusa link simbólico ou junction no caminho")
+        path = raw.resolve()
+        if path.parent != root.resolve() or path.name == ".orchestrator-quarantine":
+            raise GitWorktreeError("Caminho não é um alvo de quarentena ou cleanup sob worktrees_dir")
+        return path
+
+    def verify_cleanup_worktree(
+        self, repository: str | Path, worktree_path: str | Path,
+        branch: str, expected_sha: str,
+    ) -> None:
+        """Confirma que o worktree ainda pertence ao repositório, branch e commit registrados."""
+        root = self.validate_repository(repository)
+        if root.resolve() != Path(repository).resolve():
+            raise GitWorktreeError("Raiz do repositório diverge da configuração")
+        expected_common = self._run(
+            ["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            "identificar o repositório",
+        ).stdout.strip()
+        actual_common = self._run(
+            ["git", "-C", str(worktree_path), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            "identificar o repositório do worktree",
+        ).stdout.strip()
+        actual_branch = self._run(
+            ["git", "-C", str(worktree_path), "symbolic-ref", "--quiet", "HEAD"],
+            "identificar a branch do worktree",
+        ).stdout.strip()
+        if (not expected_common or not actual_common
+                or Path(expected_common).resolve() != Path(actual_common).resolve()
+                or actual_branch != f"refs/heads/{branch}"
+                or self._resolve_commit(Path(worktree_path), "HEAD") != expected_sha):
+            raise GitWorktreeError("Identidade atual do worktree diverge da execução; preservado")
+
+    def local_branch_head(self, repository: str | Path, branch: str) -> str | None:
+        if not self.local_branch_exists(repository, branch):
+            return None
+        return self._resolve_commit(Path(repository), f"refs/heads/{branch}")
+
+    @staticmethod
     def remove_empty_orphan_directory(
         worktree_path: str | Path, allowed_root: str | Path
     ) -> None:
         """Remove só diretório vazio sob worktrees_dir; conteúdo desconhecido é intocável."""
-        root = Path(allowed_root).resolve()
-        raw_path = Path(worktree_path)
-        if raw_path.is_symlink():
-            raise GitWorktreeError("Link simbólico não é um diretório órfão removível")
-        path = raw_path.resolve()
-        if path.parent != root or not path.is_dir():
+        path = GitWorktreeAdapter.validate_cleanup_path(worktree_path, allowed_root)
+        if not path.is_dir():
             raise GitWorktreeError("Diretório órfão não é um alvo removível")
         try:
             path.rmdir()
@@ -182,16 +242,15 @@ class GitWorktreeAdapter:
     ) -> Path:
         """Move órfão não vazio para quarentena recuperável, sem apagar conteúdo."""
         root = Path(allowed_root).resolve()
-        raw_path = Path(worktree_path)
-        if raw_path.is_symlink():
-            raise GitWorktreeError("Link simbólico não é um diretório órfão em quarentena")
-        path = raw_path.resolve()
+        path = GitWorktreeAdapter.validate_cleanup_path(worktree_path, allowed_root)
         if path.parent != root or not path.is_dir() or path.name == ".orchestrator-quarantine":
             raise GitWorktreeError("Diretório órfão não é um alvo de quarentena")
         quarantine = root / ".orchestrator-quarantine"
-        if quarantine.is_symlink():
+        if quarantine.is_symlink() or quarantine.is_junction():
             raise GitWorktreeError("Quarentena é um link simbólico; conteúdo preservado")
         quarantine.mkdir(exist_ok=True)
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", execution_id):
+            raise GitWorktreeError("Identificador da execução inválido para quarentena")
         target = quarantine / f"{execution_id}--{path.name}"
         if target.exists() or target.is_symlink():
             raise GitWorktreeError(
@@ -200,11 +259,23 @@ class GitWorktreeAdapter:
         path.rename(target)
         return target
 
-    def delete_local_branch(self, repository: str | Path, branch: str) -> None:
-        """Remove apenas branch já integrada; ``-d`` recusa histórico não mergeado."""
+    def delete_local_branch(self, repository: str | Path, branch: str, expected_sha: str) -> None:
+        """Remove ref integrada somente se ainda apontar para o commit comprovado."""
         repository_root = self.validate_repository(repository)
+        self._validate_branch(repository_root, branch)
+        self._validate_sha(expected_sha)
+        registered = self._run(
+            ["git", "-C", str(repository_root), "worktree", "list", "--porcelain"],
+            "confirmar branch sem worktree",
+        ).stdout.splitlines()
+        if f"branch refs/heads/{branch}" in registered:
+            raise GitWorktreeError("Branch ainda está em uso por worktree; preservada")
         self._run(
-            ["git", "-C", str(repository_root), "branch", "-d", "--", branch],
+            ["git", "-C", str(repository_root), "merge-base", "--is-ancestor", expected_sha, "HEAD"],
+            "confirmar integração da branch local",
+        )
+        self._run(
+            ["git", "-C", str(repository_root), "update-ref", "-d", f"refs/heads/{branch}", expected_sha],
             "remover a branch local",
         )
 
@@ -219,13 +290,20 @@ class GitWorktreeAdapter:
             self._raise_git_failure(result, "verificar a branch local")
         return result.returncode == 0
 
-    def delete_remote_branch(self, repository: str | Path, remote_name: str, branch: str) -> None:
-        """Solicita remoção remota sem force; a elegibilidade é decidida no serviço."""
+    def delete_remote_branch(self, repository: str | Path, remote_name: str, branch: str, expected_sha: str) -> None:
+        """Exclui somente a ref remota cujo SHA ainda é exatamente o mergeado."""
         repository_root = self.validate_repository(repository)
+        self._validate_branch(repository_root, branch)
+        self._validate_sha(expected_sha)
         self._run(
-            ["git", "-C", str(repository_root), "push", remote_name, "--delete", branch],
+            ["git", "-C", str(repository_root), "push", f"--force-with-lease=refs/heads/{branch}:{expected_sha}", "--", remote_name, f":refs/heads/{branch}"],
             "remover a branch remota",
         )
+
+    @staticmethod
+    def _validate_sha(sha: str) -> None:
+        if not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", sha):
+            raise GitWorktreeError("SHA esperado para exclusão é inválido")
 
     def remote_branch_exists(self, repository: str | Path, remote_name: str, branch: str) -> bool:
         repository_root = self.validate_repository(repository)

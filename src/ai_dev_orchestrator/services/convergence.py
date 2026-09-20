@@ -7,12 +7,13 @@ import time
 from typing import Callable, TypeVar
 
 from ai_dev_orchestrator.config import ConvergenceConfig
+from ai_dev_orchestrator.infrastructure.redaction import RedactedError
 
 
 T = TypeVar("T")
 
 
-class ConvergenceError(Exception):
+class ConvergenceError(RedactedError):
     """Falha controlada ao observar um efeito remoto."""
 
 

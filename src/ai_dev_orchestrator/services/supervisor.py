@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
-import os
 from pathlib import Path
 import time
 from typing import Callable, Iterator
@@ -12,6 +11,7 @@ from typing import Callable, Iterator
 from ai_dev_orchestrator.config import OrchestratorConfig
 from ai_dev_orchestrator.domain.execution import ExecutionPhase, PROVIDER_WAIT_PHASES
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
+from ai_dev_orchestrator.infrastructure.ownership import OwnershipError, exclusive_ownership
 from ai_dev_orchestrator.services.pipeline import RunPipelineError
 from ai_dev_orchestrator.services.work import WorkResult, WorkService
 from ai_dev_orchestrator.adapters.git import GitWorktreeAdapter
@@ -272,14 +272,8 @@ def _is_waiting(result: WorkResult) -> bool:
 
 @contextmanager
 def _exclusive_lock(path: Path) -> Iterator[None]:
-    path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError as error:
+        with exclusive_ownership(path, reentrant=False):
+            yield
+    except OwnershipError as error:
         raise SupervisorError("Já existe uma instância de orch watch ativa") from error
-    try:
-        os.write(descriptor, str(os.getpid()).encode("ascii"))
-        yield
-    finally:
-        os.close(descriptor)
-        path.unlink(missing_ok=True)

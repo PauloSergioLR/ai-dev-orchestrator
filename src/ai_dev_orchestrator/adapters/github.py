@@ -17,6 +17,7 @@ from ai_dev_orchestrator.domain.project import (
     ProjectStatusOption,
 )
 from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner, OutputPolicy
+from ai_dev_orchestrator.infrastructure.redaction import RedactedError
 from ai_dev_orchestrator.services.validation import GateResult
 from ai_dev_orchestrator.services.merge import MergePullRequestSnapshot, MergeResult, _is_sha
 
@@ -29,15 +30,15 @@ GITHUB_CI_TIMEOUT_SECONDS = 30
 GITHUB_MERGE_TIMEOUT_SECONDS = 30
 
 
-class GitHubIssueError(Exception):
+class GitHubIssueError(RedactedError):
     """Indica que uma issue não pôde ser carregada do GitHub."""
 
 
-class GitHubProjectError(Exception):
+class GitHubProjectError(RedactedError):
     """Indica que os itens de um GitHub Project não puderam ser carregados."""
 
 
-class GitHubProjectStatusError(Exception):
+class GitHubProjectStatusError(RedactedError):
     """Indica que o Status de um item do GitHub Project não pôde ser atualizado."""
 
 
@@ -87,7 +88,10 @@ class GitHubIssueAdapter:
         except json.JSONDecodeError as error:
             raise GitHubIssueError("GitHub CLI retornou JSON inválido para a issue") from error
 
-        return self._parse_issue(payload)
+        issue = self._parse_issue(payload)
+        if issue.number != number:
+            raise GitHubIssueError("Resposta da issue não corresponde ao número solicitado")
+        return issue
 
     @classmethod
     def _parse_issue(cls, payload: Any) -> Issue:
@@ -112,7 +116,7 @@ class GitHubIssueAdapter:
     @staticmethod
     def _required_int(payload: dict[str, Any], field: str) -> int:
         value = payload.get(field)
-        if isinstance(value, bool) or not isinstance(value, int):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise GitHubIssueError(f"Resposta da issue inválida: campo '{field}' deve ser inteiro")
         return value
 
@@ -138,11 +142,11 @@ class GitHubIssueAdapter:
         return tuple(names)
 
 
-class GitHubPullRequestError(Exception):
+class GitHubPullRequestError(RedactedError):
     """Indica que um Pull Request não pôde ser criado."""
 
 
-class GitHubCiError(Exception):
+class GitHubCiError(RedactedError):
     """Indica que a CI de um Pull Request não pôde ser consultada com segurança."""
 
 
@@ -222,7 +226,7 @@ class GitHubPullRequestAdapter:
         """Lê os dados de um único PR pelo CLI estruturado e seu patch real."""
         view = self.runner.run([
             "gh", "pr", "view", str(pull_request_number), "--repo", self.config.repository_full_name,
-            "--json", "number,url,state,baseRefName,headRefName,headRefOid,changedFiles,files",
+            "--json", "number,url,state,baseRefName,baseRefOid,headRefName,headRefOid,changedFiles,files",
         ], stdout_policy=OutputPolicy.UTF8_STRICT)
         if view.error or not view.succeeded:
             detail = view.error or view.stderr.strip() or view.stdout.strip()
@@ -231,7 +235,7 @@ class GitHubPullRequestAdapter:
             payload = json.loads(view.stdout)
         except json.JSONDecodeError as error:
             raise GitHubPullRequestError("GitHub CLI retornou JSON inválido para o Pull Request") from error
-        if not isinstance(payload, dict) or payload.get("number") != pull_request_number:
+        if not isinstance(payload, dict) or isinstance(payload.get("number"), bool) or payload.get("number") != pull_request_number:
             raise GitHubPullRequestError("Resposta do Pull Request não corresponde ao número solicitado")
         if not isinstance(payload.get("changedFiles"), int) or isinstance(payload["changedFiles"], bool) or payload["changedFiles"] < 0:
             raise GitHubPullRequestError("Resposta do Pull Request inválida: campo 'changedFiles'")
@@ -260,7 +264,7 @@ class GitHubPullRequestAdapter:
         try:
             payload["commits"] = [self._required_sha(x) for x in payload["commits"]]
             payload["files"] = [self._required_string(x, "path") for x in payload["files"]]
-        except (TypeError, ValueError) as error:
+        except (KeyError, TypeError, ValueError) as error:
             raise GitHubPullRequestError(
                 "Resposta REST paginada contém commits ou arquivos inválidos"
             ) from error
@@ -276,6 +280,22 @@ class GitHubPullRequestAdapter:
                 "Diff do Pull Request não contém a quantidade completa de arquivos; revisão recusada"
             )
         payload["diff"] = diff.stdout
+        identity_fields = ("number", "url", "state", "baseRefName", "baseRefOid", "headRefName", "headRefOid")
+        if (not all(isinstance(payload.get(key), str) and payload[key] for key in identity_fields[1:])
+                or not _is_sha(payload["headRefOid"]) or not _is_sha(payload["baseRefOid"])):
+            raise GitHubPullRequestError("Identidade do Pull Request para revisão está incompleta")
+        confirmation = self.runner.run([
+            "gh", "pr", "view", str(pull_request_number), "--repo", self.config.repository_full_name,
+            "--json", ",".join(identity_fields),
+        ], stdout_policy=OutputPolicy.UTF8_STRICT)
+        if confirmation.error or not confirmation.succeeded:
+            raise GitHubPullRequestError("Não foi possível confirmar identidade do Pull Request após ler diff")
+        try:
+            final = json.loads(confirmation.stdout)
+        except json.JSONDecodeError as error:
+            raise GitHubPullRequestError("Confirmação do Pull Request contém JSON inválido") from error
+        if not isinstance(final, dict) or any(final.get(key) != payload[key] for key in identity_fields):
+            raise GitHubPullRequestError("Identidade/HEAD do Pull Request mudou durante a leitura; revisão recusada")
         return payload
 
     def get_merge_snapshot(self, pull_request_number: int) -> MergePullRequestSnapshot:
@@ -289,6 +309,8 @@ class GitHubPullRequestAdapter:
             raise GitHubPullRequestError(f"Não foi possível ler estado final do Pull Request #{pull_request_number}: {detail}")
         try:
             payload = json.loads(result.stdout)
+            if not isinstance(payload, dict):
+                raise TypeError("objeto JSON esperado")
             commit = payload.get("mergeCommit")
             commit_sha = commit.get("oid", "") if isinstance(commit, dict) else ""
             snapshot = MergePullRequestSnapshot(
@@ -299,6 +321,7 @@ class GitHubPullRequestAdapter:
         except (json.JSONDecodeError, KeyError, TypeError) as error:
             raise GitHubPullRequestError("Resposta final do Pull Request é inválida") from error
         if (not isinstance(snapshot.number, int) or isinstance(snapshot.number, bool)
+                or snapshot.number != pull_request_number or not isinstance(snapshot.is_draft, bool)
                 or not all(isinstance(value, str) for value in (
                     snapshot.url, snapshot.state, snapshot.base, snapshot.head_branch,
                     snapshot.head_sha, snapshot.mergeable)) or not _is_sha(snapshot.head_sha)):
@@ -729,6 +752,7 @@ class GitHubProjectStatusAdapter:
             raise GitHubProjectStatusError(
                 "Campos do Project inválidos: campo 'fields' deve ser uma lista"
             )
+        found = []
         for raw_field in raw_fields:
             if not isinstance(raw_field, dict):
                 raise GitHubProjectStatusError(
@@ -736,8 +760,10 @@ class GitHubProjectStatusAdapter:
                 )
             name = cls._required_string(raw_field, "name", "campos do Project")
             if name == status_field_name:
-                return cls._parse_project_field(raw_field)
-        return None
+                found.append(cls._parse_project_field(raw_field))
+        if len(found) > 1:
+            raise GitHubProjectStatusError("Campo Status duplicado; identidade ambígua")
+        return found[0] if found else None
 
     @classmethod
     def _parse_project_field(cls, payload: Any) -> ProjectStatusField:
@@ -751,6 +777,8 @@ class GitHubProjectStatusAdapter:
                 "Campos do Project inválidos: campo 'options' deve ser uma lista"
             )
         options = tuple(cls._parse_status_option(option) for option in raw_options)
+        if len({option.id for option in options}) != len(options) or len({option.name for option in options}) != len(options):
+            raise GitHubProjectStatusError("Opções de Status duplicadas; identidade ambígua")
         return ProjectStatusField(
             id=cls._required_string(payload, "id", "campos do Project"),
             name=cls._required_string(payload, "name", "campos do Project"),

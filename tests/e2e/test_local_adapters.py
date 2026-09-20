@@ -110,7 +110,7 @@ class ReviewReader:
 
     def get_review_data(self, number: int):
         return {
-            "number": number, "url": "https://example.test/pr/1", "baseRefName": "main",
+            "number": number, "url": "https://example.test/pr/1", "baseRefName": "main", "state": "OPEN",
             "headRefName": "work/e2e", "headRefOid": self.head, "commits": [self.head],
             "files": ["src/process.py"], "diff": "diff --git a/x b/x",
         }
@@ -137,7 +137,11 @@ def test_falha_em_cada_etapa_do_review_nao_libera_review_ou_merge(tmp_path: Path
     pipeline = object.__new__(RunPipeline)
     pipeline.review_reader = ReviewReader(head)
     pipeline.reviewer = reviewer
-    pipeline.config = SimpleNamespace(review=SimpleNamespace(blocking_severities=("CRITICAL", "HIGH", "MEDIUM")))
+    pipeline.config = SimpleNamespace(
+        review=SimpleNamespace(blocking_severities=("CRITICAL", "HIGH", "MEDIUM")),
+        github=SimpleNamespace(pull_request_base="main"),
+    )
+    pipeline.git_publisher = None
     worktree = GitWorktree(tmp_path, tmp_path, "work/e2e", "main")
     issue = Issue(67, "review e2e", "body", "OPEN", "url", (), ())
     pull_request = PullRequest(1, "https://example.test/pr/1", "PR", "main", "work/e2e")

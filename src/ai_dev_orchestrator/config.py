@@ -39,7 +39,7 @@ class ConfigurationError(Exception):
 class GitHubConfig(BaseModel):
     """Configuração de identificação do repositório no GitHub."""
 
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, allow_inf_nan=False)
 
     owner: str = Field(min_length=1)
     repository: str = Field(min_length=1)
@@ -104,7 +104,7 @@ class GitHubConfig(BaseModel):
 class ExecutionConfig(BaseModel):
     """Limites locais para as futuras execuções do orquestrador."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     max_attempts: int = Field(gt=0)
     max_parallel_runs: int = Field(gt=0)
@@ -117,7 +117,7 @@ class ExecutionConfig(BaseModel):
 class StateConfig(BaseModel):
     """Local durável fora do worktree usado para auditar execuções."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     database_path: Path = Field(
         default_factory=lambda: Path.home() / ".ai-dev-orchestrator" / "orchestrator.db"
@@ -134,7 +134,7 @@ class StateConfig(BaseModel):
 class CiConfig(BaseModel):
     """Política local para aguardar os checks obrigatórios do Pull Request."""
 
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, allow_inf_nan=False)
 
     required_checks: tuple[str, ...] = ("test",)
     poll_interval_seconds: float = Field(default=5, gt=0)
@@ -158,7 +158,7 @@ class CiConfig(BaseModel):
 class ConvergenceConfig(BaseModel):
     """Limites para observar a consistência eventual após efeitos no GitHub."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     poll_interval_seconds: float = Field(default=1, gt=0)
     timeout_seconds: float = Field(default=30, gt=0)
@@ -167,7 +167,7 @@ class ConvergenceConfig(BaseModel):
 class ReviewConfig(BaseModel):
     """Política local do reviewer independente."""
 
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, allow_inf_nan=False)
 
     provider: str = Field(default="antigravity", min_length=1)
     executable: str = Field(default="agy", min_length=1)
@@ -196,7 +196,7 @@ class ReviewConfig(BaseModel):
 class WorkspaceConfig(BaseModel):
     """Locais e referência usados para preparar um worktree."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     repository_path: Path
     worktrees_dir: Path
@@ -222,10 +222,13 @@ class WorkspaceConfig(BaseModel):
 class ProviderConfig(BaseModel):
     """Seleção estável de modelos, sem guardar credenciais."""
 
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, allow_inf_nan=False)
 
     codex_model: str = Field(default="default", min_length=1)
     gemini_model: str = Field(default="default", min_length=1)
+    codex_timeout_seconds: float = Field(default=7200, gt=0, le=86400)
+    codex_idle_timeout_seconds: float = Field(default=1800, gt=0, le=86400)
+    codex_heartbeat_seconds: float = Field(default=60, gt=0, le=3600)
 
     @field_validator("codex_model", "gemini_model")
     @classmethod
@@ -236,7 +239,7 @@ class ProviderConfig(BaseModel):
 class CodeReviewGraphConfig(BaseModel):
     """Integração externa, opcional e fail-open com o Code Review Graph."""
 
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, allow_inf_nan=False)
 
     enabled: StrictBool = False
     command: tuple[str, ...] = (
@@ -256,7 +259,7 @@ class CodeReviewGraphConfig(BaseModel):
 class SupervisorConfig(BaseModel):
     """Política conservadora do modo desacompanhado."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     poll_interval_seconds: float = Field(default=60, gt=0)
     max_sleep_seconds: float = Field(default=300, gt=0)
@@ -266,7 +269,7 @@ class SupervisorConfig(BaseModel):
 class NotificationConfig(BaseModel):
     """Canais opcionais; credenciais são lidas somente do ambiente."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
     enabled: StrictBool = True
     channels: tuple[Literal["email", "discord", "telegram"], ...] = ()
     discord_enabled: StrictBool = True
@@ -282,7 +285,7 @@ class NotificationConfig(BaseModel):
 class CleanupConfig(BaseModel):
     """Política explícita e conservadora para artefatos já concluídos."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     auto_cleanup: StrictBool = False
     remove_local_branch: StrictBool = False
@@ -292,7 +295,7 @@ class CleanupConfig(BaseModel):
 class ProjectGateConfig(BaseModel):
     """Override opcional de uma capacidade, sempre em argv estruturado."""
 
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, allow_inf_nan=False)
     name: str = Field(min_length=1)
     capability: str = Field(default="project-validation", min_length=1)
     argv: tuple[str, ...]
@@ -319,7 +322,7 @@ class ProjectGateConfig(BaseModel):
 class ProjectConfig(BaseModel):
     """Somente overrides; stack e comandos não são campos obrigatórios."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
     gates: tuple[ProjectGateConfig, ...] = ()
 
 

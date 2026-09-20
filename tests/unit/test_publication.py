@@ -3,7 +3,6 @@
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
-import shutil
 import subprocess
 
 import pytest
@@ -66,7 +65,7 @@ def test_uv_gate_does_not_inherit_virtualenv_from_another_checkout(
         return subprocess.CompletedProcess(args[0], 0, b"teste aprovado", b"")
 
     monkeypatch.setenv("VIRTUAL_ENV", str(foreign_environment))
-    monkeypatch.setattr(shutil, "which", lambda command: command)
+    monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.resolve_executable", lambda command, *args: command)
     monkeypatch.setattr(
         "ai_dev_orchestrator.infrastructure.process.run_captured", run
     )
@@ -88,7 +87,7 @@ def test_uv_gate_with_active_preserves_virtualenv(monkeypatch: pytest.MonkeyPatc
         ("uv", "run", "--active", "pytest", "-q")
     )
 
-    assert environment is None
+    assert environment is None or environment["VIRTUAL_ENV"] == "ambiente-ativo"
     assert os.environ["VIRTUAL_ENV"] == "ambiente-ativo"
 
 

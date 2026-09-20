@@ -33,5 +33,11 @@ jobs:
         run: uv run ruff check .
       - name: Executar os testes
         run: uv run pytest
+        env:
+          ORCH_TEST_ANTIGRAVITY_LIVE: "0"
+      - name: Construir os artefatos de distribuição
+        run: uv build
+      - name: Validar instalação offline fora do checkout
+        run: uv run python scripts/verify_package.py dist/ai_dev_orchestrator-0.1.0-py3-none-any.whl
       - name: Validar whitespace do diff
         run: git diff --check

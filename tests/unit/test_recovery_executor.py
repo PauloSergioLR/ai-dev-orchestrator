@@ -110,7 +110,7 @@ def pull_request(**changes: object) -> PullRequestObservation:
     values: dict[str, object] = {
         "number": 37, "url": URL, "repository_full_name": "owner/repository",
         "base": "main", "head_branch": BRANCH, "head_sha": HEAD,
-        "state": PullRequestState.OPEN,
+        "state": PullRequestState.OPEN, "issue_numbers": (37,),
     }
     values.update(changes)
     return PullRequestObservation(**values)  # type: ignore[arg-type]
@@ -138,7 +138,7 @@ def context(tmp_path: Path):
 
 
 def at(store: SqliteExecutionStore, phase: ExecutionPhase, **updates: object) -> RunRecord:
-    run = store.create(37, project_item_id="project", branch=BRANCH, worktree_path="C:/worktree", base_ref="main")
+    run = store.create(37, project_item_id="project", branch=BRANCH, worktree_path="C:/worktree", base_ref="main", base_sha=HEAD)
     if phase == ExecutionPhase.PREPARING:
         return run
     run = store.transition(run.id, ExecutionPhase.CODEX_RUNNING, summary="code", current_head_sha=HEAD)

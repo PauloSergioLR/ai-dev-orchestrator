@@ -34,6 +34,22 @@ def test_version_is_available() -> None:
     assert result.output == f"{__version__}\n"
 
 
+def test_erro_cli_redige_credencial_antes_de_exibir(monkeypatch):
+    from ai_dev_orchestrator.config import ConfigurationError
+
+    secret = "credencial-sintetica-nao-real"
+    monkeypatch.setenv("SERVICE_API_KEY", secret)
+
+    def invalid_config():
+        raise ConfigurationError("Falha: " + secret)
+
+    monkeypatch.setattr("ai_dev_orchestrator.cli.load_config", invalid_config)
+    result = runner.invoke(app, ["run", "--issue", "17", "--branch", "feat/x"])
+    assert result.exit_code == 1
+    assert secret not in result.output
+    assert "[redigido]" in result.output
+
+
 def test_run_validates_required_options() -> None:
     assert runner.invoke(app, ["run", "--branch", "feat/test"]).exit_code != 0
     assert runner.invoke(app, ["run", "--issue", "0", "--branch", "feat/test"]).exit_code != 0
@@ -260,7 +276,7 @@ def test_inspect_json_exibe_review_e_nao_altera_sqlite(monkeypatch, tmp_path: Pa
     output = json.loads(result.output)
     assert output["execution_id"] == run.id
     assert output["review"]["verdict"] == "REJECTED"
-    assert output["findings"] == [{"severity": "HIGH", "title": "Falha de autenticação", "path": "src/Authorization=[redigido]", "line": 12, "criterion": "segurança"}]
+    assert output["findings"] == [{"severity": "HIGH", "title": "Falha de autenticação", "path": "src/Authorization: [redigido]", "line": 12, "criterion": "segurança"}]
     with sqlite3.connect(path) as connection:
         after = connection.execute("SELECT phase, updated_at FROM executions").fetchall(), connection.execute("SELECT COUNT(*) FROM execution_events").fetchone()
     assert after == before

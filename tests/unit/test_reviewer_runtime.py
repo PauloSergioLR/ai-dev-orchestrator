@@ -2,7 +2,6 @@
 
 import json
 from pathlib import Path
-import shutil
 import subprocess
 
 import pytest
@@ -32,7 +31,7 @@ def test_doctor_and_runtime_resolve_same_configured_executable(tmp_path, monkeyp
     path = configuration(tmp_path, executable)
     resolved, calls = [], []
 
-    def which(command):
+    def which(command, *args):
         resolved.append(command)
         return command if available else None
 
@@ -46,7 +45,7 @@ def test_doctor_and_runtime_resolve_same_configured_executable(tmp_path, monkeyp
             output = '{"status":"SUCCESS","structured_output":{"message":"ok"}}'
         return subprocess.CompletedProcess(args, 0, output.encode("utf-8"), b"")
 
-    monkeypatch.setattr(shutil, "which", which)
+    monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.resolve_executable", which)
     monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.run_captured", run)
     config = load_config(path)
     adapter = AntigravityAdapter(12, executable=config.review.executable)

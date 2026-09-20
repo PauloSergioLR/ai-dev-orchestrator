@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 import itertools
 import json
 from pathlib import Path
-import shutil
 import subprocess
 
 import pytest
@@ -142,7 +141,7 @@ def test_mensagem_do_agente_nao_e_sinal_de_quota(tmp_path):
 
 @pytest.mark.parametrize("provider", ["codex", "antigravity"])
 def test_provider_nao_aceita_cp1252_como_json(monkeypatch, tmp_path, provider):
-    monkeypatch.setattr(shutil, "which", lambda name: name)
+    monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.resolve_executable", lambda name, *args: name)
     def run(args, **kwargs):
         if args[-1] == "--version":
             return subprocess.CompletedProcess(args, 0, b"1.1.27", b"")
@@ -161,7 +160,7 @@ def test_provider_nao_aceita_cp1252_como_json(monkeypatch, tmp_path, provider):
 
 
 def test_timeout_parcial_codex_nao_perde_thread(monkeypatch, tmp_path):
-    monkeypatch.setattr(shutil, "which", lambda name: name)
+    monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.resolve_executable", lambda name, *args: name)
     def run(*args, **kwargs):
         raise subprocess.TimeoutExpired(args[0], 1,
             output=b'{"type":"thread.started","thread_id":"partial"}\n', stderr=b"")
@@ -173,7 +172,7 @@ def test_timeout_parcial_codex_nao_perde_thread(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("timeout", [False, True])
 def test_prefixo_utf8_preserva_id_sem_aceitar_linha_corrompida(monkeypatch, tmp_path, timeout):
-    monkeypatch.setattr(shutil, "which", lambda name: name)
+    monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.resolve_executable", lambda name, *args: name)
     output = b'{"type":"thread.started","thread_id":"partial"}\n{"type":"error","message":"\xe7"}\n'
     def run(*args, **kwargs):
         if timeout:

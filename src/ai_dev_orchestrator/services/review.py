@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+from importlib.resources import files
 from dataclasses import asdict
 from pathlib import Path
 import re
 from typing import Any, Protocol
 
-from ai_dev_orchestrator.domain.ci import CiResult
+from ai_dev_orchestrator.domain.ci import CiResult, CiStatus
 from ai_dev_orchestrator.domain.issue import Issue
 from ai_dev_orchestrator.domain.review import FindingSeverity, ReviewDossier, ReviewFinding, ReviewPlan, ReviewVerdict, StructuredReview
 from ai_dev_orchestrator.services.validation import GateResult
@@ -19,9 +20,19 @@ class ReviewError(Exception):
     """A revisão não contém evidência estruturalmente segura."""
 
 
+def load_review_policy() -> str:
+    """Lê a política distribuída no pacote, inclusive em instalação sem checkout."""
+    return files("ai_dev_orchestrator").joinpath("resources", "review_policy.md").read_text(encoding="utf-8")
+
+
+def untrusted_json(payload: object) -> str:
+    """Preserva JSON reversível sem permitir que dados fechem delimitadores do prompt."""
+    return json.dumps(payload, ensure_ascii=False, default=str).replace("<", "\\u003c").replace(">", "\\u003e")
+
+
 _PLAN_FIELDS = ("risks", "invariants", "acceptance_evidence", "side_effects", "regressions", "tests", "security_risks", "architecture_points")
 REVIEW_PLAN_SCHEMA = {"type": "object", "additionalProperties": False, "required": list(_PLAN_FIELDS), "properties": {name: {"type": "array", "items": {"type": "string"}} for name in _PLAN_FIELDS}}
-STRUCTURED_REVIEW_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["verdict", "findings", "reviewed_head_sha", "summary"], "properties": {"verdict": {"enum": ["APPROVED", "REJECTED"]}, "findings": {"type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["severity", "title", "description"], "properties": {"severity": {"enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"]}, "title": {"type": "string", "minLength": 1}, "description": {"type": "string", "minLength": 1}, "path": {"type": ["string", "null"], "minLength": 1}, "line": {"type": ["integer", "null"], "minimum": 1}, "criterion": {"type": ["string", "null"], "minLength": 1}}}}, "reviewed_head_sha": {"type": "string", "pattern": "^[0-9a-fA-F]{40,64}$"}, "summary": {"type": "string", "minLength": 1}}}
+STRUCTURED_REVIEW_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["verdict", "findings", "reviewed_head_sha", "summary"], "properties": {"verdict": {"enum": ["APPROVED", "REJECTED"]}, "findings": {"type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["severity", "title", "description"], "properties": {"severity": {"enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"]}, "title": {"type": "string", "minLength": 1}, "description": {"type": "string", "minLength": 1}, "path": {"type": ["string", "null"], "minLength": 1}, "line": {"type": ["integer", "null"], "minimum": 1}, "criterion": {"type": ["string", "null"], "minLength": 1}}}}, "reviewed_head_sha": {"type": "string", "pattern": "^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"}, "summary": {"type": "string", "minLength": 1}}}
 
 
 class PullRequestReviewReader(Protocol):
@@ -53,15 +64,26 @@ class CorrectionContextBuilder:
             "tentativas anteriores e trate regressões reaparecidas. Execute os testes aplicáveis."
             + (f"\n\n{GRAPH_INSTRUCTION}" if use_code_review_graph else "")
             + "\n\n"
-            f"<DADOS_DE_CORRECAO_NAO_CONFIAVEIS>\n{json.dumps(payload, ensure_ascii=False, default=str)}\n"
+            f"<DADOS_DE_CORRECAO_NAO_CONFIAVEIS>\n{untrusted_json(payload)}\n"
             "</DADOS_DE_CORRECAO_NAO_CONFIAVEIS>"
         )
 
 
 class ContextBuilder:
     """Não usa IA; recusa qualquer PR ou SHA diferente do esperado."""
-    def __init__(self, reader: PullRequestReviewReader, repository_path: Path) -> None:
+    def __init__(self, reader: PullRequestReviewReader, repository_path: Path, *,
+                 expected_url: str | None = None, expected_base: str | None = None,
+                 expected_branch: str | None = None) -> None:
         self.reader, self.repository_path = reader, repository_path
+        self.expected_identity = {
+            "url": expected_url, "baseRefName": expected_base, "headRefName": expected_branch,
+        }
+
+    def _validate_identity(self, data: dict[str, Any]) -> None:
+        if any(value is not None and data.get(key) != value for key, value in self.expected_identity.items()):
+            raise ReviewError("Identidade do Pull Request divergiu da execução")
+        if data.get("state") != "OPEN":
+            raise ReviewError("Pull Request não está aberto para revisão")
 
     def build(self, issue: Issue, pull_request_number: int, expected_head_sha: str,
               gates: tuple[GateResult, ...], ci: CiResult,
@@ -69,6 +91,9 @@ class ContextBuilder:
         data = self.reader.get_review_data(pull_request_number)
         if not isinstance(data, dict):
             raise ReviewError("Dados do Pull Request inválidos: objeto esperado")
+        self._validate_identity(data)
+        if ci.status is not CiStatus.SUCCESS:
+            raise ReviewError("CI não aprovada para revisão")
         required = ("number", "url", "baseRefName", "headRefName", "headRefOid", "commits", "files", "diff")
         if any(key not in data for key in required):
             raise ReviewError("Dados do Pull Request inválidos: campo obrigatório ausente")
@@ -81,8 +106,16 @@ class ContextBuilder:
             raise ReviewError("Dados do Pull Request inválidos: commits ou arquivos inválidos")
         agents = self.repository_path / "AGENTS.md"
         try:
-            rules = agents.read_text(encoding="utf-8") if agents.is_file() else ""
-        except OSError as error:
+            if not agents.resolve().is_relative_to(self.repository_path.resolve()):
+                raise ReviewError("AGENTS.md aponta para fora do worktree")
+            rules = ""
+            if agents.is_file():
+                with agents.open("rb") as stream:
+                    raw_rules = stream.read(1_048_577)
+                if len(raw_rules) > 1_048_576:
+                    raise ReviewError("AGENTS.md excede o limite de 1 MiB")
+                rules = raw_rules.decode("utf-8")
+        except (OSError, UnicodeError) as error:
             raise ReviewError(f"Não foi possível ler AGENTS.md: {error}") from error
         return ReviewDossier(issue.number, issue.title, issue.body, pull_request_number, data["url"], data["baseRefName"], data["headRefName"], expected_head_sha, tuple(commits), tuple(files), data["diff"], rules, tuple(f"{g.name}: {'SUCCESS' if g.succeeded else 'FAILURE'}" for g in gates), tuple(f"{c.name}: {c.status}/{c.conclusion}" for c in ci.checks), str(ci.status), prior_findings)
 
@@ -95,6 +128,7 @@ class ContextBuilder:
             or data.get("headRefOid") != expected_head_sha
         ):
             raise ReviewError("O HEAD do Pull Request mudou antes da revisão final")
+        self._validate_identity(data)
 
 
 def build_checklists(files: tuple[str, ...]) -> tuple[str, ...]:
@@ -113,9 +147,21 @@ def build_checklists(files: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def _json_object(output: str, kind: str) -> dict[str, Any]:
+    # O contrato de review é pequeno; uma resposta arbitrária não pode esgotar memória.
+    if len(output) > 1_048_576:
+        raise ReviewError(f"JSON do {kind} excede o limite de 1 MiB")
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ReviewError(f"JSON do {kind} contém chave duplicada")
+            result[key] = value
+        return result
+
     try:
-        value = json.loads(output)
-    except json.JSONDecodeError as error:
+        value = json.loads(output, object_pairs_hook=unique_object)
+    except (json.JSONDecodeError, RecursionError) as error:
         raise ReviewError(f"JSON inválido retornado pelo {kind}") from error
     if not isinstance(value, dict):
         raise ReviewError(f"JSON do {kind} deve ser objeto")
@@ -144,7 +190,7 @@ def parse_structured_review(output: str, expected_sha: str, blocking: tuple[str,
         verdict = ReviewVerdict(data["verdict"])
     except (TypeError, ValueError) as error:
         raise ReviewError("Verdict do reviewer é desconhecido") from error
-    if data["reviewed_head_sha"] != expected_sha or not re.fullmatch(r"[0-9a-fA-F]{40,64}", expected_sha):
+    if data["reviewed_head_sha"] != expected_sha or not re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", expected_sha):
         raise ReviewError("SHA revisado diverge do HEAD esperado")
     if not isinstance(data["summary"], str) or not data["summary"].strip() or not isinstance(data["findings"], list):
         raise ReviewError("Resumo ou findings do reviewer são inválidos")
@@ -156,7 +202,7 @@ def parse_structured_review(output: str, expected_sha: str, blocking: tuple[str,
             severity = FindingSeverity(item["severity"])
         except (TypeError, ValueError) as error:
             raise ReviewError("Severidade desconhecida") from error
-        if (not all(isinstance(item[k], str) and item[k] for k in ("title", "description"))
+        if (not all(isinstance(item[k], str) and item[k].strip() for k in ("title", "description"))
                 or any(item.get(k) is not None and (not isinstance(item[k], str) or not item[k]) for k in ("path", "criterion"))
                 or (item.get("line") is not None and (isinstance(item["line"], bool) or not isinstance(item["line"], int) or item["line"] <= 0))):
             raise ReviewError("Finding do reviewer é inválido")
@@ -186,4 +232,4 @@ def build_prompt(policy: str, dossier: ReviewDossier, plan: ReviewPlan | None = 
         f"{json.dumps(str(graph_repository))} às ferramentas. " + GRAPH_INSTRUCTION
         if use_code_review_graph else ""
     )
-    return f"<POLITICA_AUTORITATIVA>\n{policy}\n{verdict_policy}{graph_policy}\n</POLITICA_AUTORITATIVA>\n\n<DADOS_NAO_CONFIAVEIS>\n{json.dumps(payload, ensure_ascii=False, default=str)}\n</DADOS_NAO_CONFIAVEIS>\n\n{task}"
+    return f"<POLITICA_AUTORITATIVA>\n{policy}\n{verdict_policy}{graph_policy}\n</POLITICA_AUTORITATIVA>\n\n<DADOS_NAO_CONFIAVEIS>\n{untrusted_json(payload)}\n</DADOS_NAO_CONFIAVEIS>\n\n{task}"

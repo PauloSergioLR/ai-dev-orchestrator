@@ -34,6 +34,9 @@ remote_name = "origin"
 
 [providers]
 codex_model = "default"
+codex_timeout_seconds = 7200
+codex_idle_timeout_seconds = 1800
+codex_heartbeat_seconds = 60
 gemini_model = "default"
 
 [code_review_graph]
@@ -261,6 +264,9 @@ ORCH_CONVERGENCE__TIMEOUT_SECONDS
 ORCH_REVIEW__MAX_CORRECTION_ATTEMPTS
 ORCH_STATE__DATABASE_PATH
 ORCH_PROVIDERS__CODEX_MODEL
+ORCH_PROVIDERS__CODEX_TIMEOUT_SECONDS
+ORCH_PROVIDERS__CODEX_IDLE_TIMEOUT_SECONDS
+ORCH_PROVIDERS__CODEX_HEARTBEAT_SECONDS
 ORCH_PROVIDERS__GEMINI_MODEL
 ORCH_SUPERVISOR__POLL_INTERVAL_SECONDS
 ORCH_SUPERVISOR__MAX_SLEEP_SECONDS
@@ -278,6 +284,31 @@ senhas ou qualquer credencial neste arquivo. Autenticação futura deve usar as
 ferramentas autenticadas ou um mecanismo de segredos específico.
 
 ## Retentativas de runtime
+
+O Codex possui três limites em `[providers]`: `codex_timeout_seconds` limita a
+chamada inteira (padrão 7200 s, máximo 86400 s); `codex_idle_timeout_seconds`
+limita o tempo sem bytes em stdout/stderr (padrão 1800 s, máximo 86400 s);
+`codex_heartbeat_seconds` controla o diagnóstico periódico (padrão 60 s, máximo
+3600 s). Todos são positivos e finitos. Configurações antigas recebem os novos
+defaults. Atividade reinicia apenas o relógio de silêncio; não elimina o limite
+total. Saída periódica é indício de atividade, não prova de progresso útil.
+
+O heartbeat mostra tempo, quantidade de bytes e silêncio observado, sem copiar
+conteúdo do provider. Timeout preserva saída parcial para classificação e
+identificação da sessão. O runner encerra a árvore antes de permitir retry;
+falha ao comprovar encerramento exige intervenção. A captura combinada de
+stdout/stderr tem teto de 16 MiB; excedê-lo é falha de protocolo, sem retry
+automático. O reviewer continua usando `review.timeout_seconds` (padrão 900 s)
+e heartbeat de 300 s.
+
+No Windows, argumentos para `.cmd`/`.bat` com metacaracteres de shell são
+recusados, inclusive quando esses caracteres aparecem no caminho. Use o
+executável nativo para esses casos. Espaços e Unicode são suportados. Gates
+Python recebem ambiente temporário próprio, sem opções herdadas de pytest,
+PYTHONPATH ou venv de outro checkout; `uv --active` mantém a escolha explícita
+do venv. Gates de outras stacks preservam seu ambiente. Permissão negada em
+temporários, venv ou caches reconhecidos é falha ambiental e não consome
+tentativa de correção de código.
 
 Falhas de rede e timeout usam até três retries, com intervalos persistidos de
 30, 60 e 120 segundos. Esse contador é independente de max_correction_attempts:

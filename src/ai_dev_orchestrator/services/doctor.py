@@ -18,9 +18,12 @@ from typing import Sequence
 from ai_dev_orchestrator.adapters.antigravity import AntigravityAdapter, AntigravityError
 from ai_dev_orchestrator.adapters.notifications import configuration_error, missing_environment
 from ai_dev_orchestrator.adapters.codex import CodexAdapter, CodexError
+from ai_dev_orchestrator.adapters.git import GitWorktreeAdapter, GitWorktreeError
 from ai_dev_orchestrator.adapters.github import (
     GitHubProjectAdapter,
     GitHubProjectError,
+    GitHubProjectStatusAdapter,
+    GitHubProjectStatusError,
     GitHubPullRequestAdapter,
     GitHubPullRequestError,
 )
@@ -71,6 +74,9 @@ class DoctorCheck:
     message: str
     scope: CheckScope = CheckScope.LOCAL_CAPABILITY
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "message", sanitize_diagnostic_text(self.message) or "")
+
 
 class DoctorService:
     """Agrupa verificações locais e sem efeitos colaterais."""
@@ -112,11 +118,16 @@ class DoctorService:
 
     def _check_local_permissions(self) -> list[DoctorCheck]:
         """Prova escrita local sem iniciar provider nem alterar caminhos definitivos."""
-        environment_checks = [self._probe_directory_write(
-            "Temporary directory",
-            Path(tempfile.gettempdir()),
-            must_exist=True,
-        )]
+        try:
+            temporary_directory = Path(tempfile.gettempdir())
+        except OSError as error:
+            environment_checks = [DoctorCheck(
+                "Temporary directory", CheckStatus.ERROR, self._safe_message(error),
+            )]
+        else:
+            environment_checks = [self._probe_directory_write(
+                "Temporary directory", temporary_directory, must_exist=True,
+            )]
         if uv_cache := os.environ.get("UV_CACHE_DIR"):
             environment_checks.append(self._probe_directory_write(
                 "uv cache write probe", Path(uv_cache).expanduser(), must_exist=False
@@ -661,7 +672,16 @@ class DoctorService:
         )
         try:
             items = GitHubProjectAdapter(config, project_runner).list_items()
-        except GitHubProjectError as error:
+            status_adapter = GitHubProjectStatusAdapter(config, project_runner)
+            status_field = status_adapter.resolve_status_field()
+            required_statuses = {
+                config.github.status_for(state) for state in (
+                    "ready", "implementing", "waiting_ci", "ai_review", "human_required", "completed",
+                )
+            } | set(config.github.status_mapping.values())
+            for name in sorted(required_statuses):
+                status_adapter.resolve_status_option(status_field, name)
+        except (GitHubProjectError, GitHubProjectStatusError) as error:
             return DoctorCheck(
                 "GitHub Project", CheckStatus.ERROR,
                 self._github_project_failure(
@@ -752,20 +772,32 @@ class DoctorService:
         )
 
     def _check_repository(self) -> DoctorCheck:
-        repository = self.runner.run(["git", "rev-parse", "--is-inside-work-tree"])
+        try:
+            config = load_config(self.config_path)
+        except ConfigurationError as error:
+            return DoctorCheck("Repository", CheckStatus.ERROR, self._safe_message(error))
+        repository = self.runner.run(
+            ["git", "rev-parse", "--is-inside-work-tree"], cwd=config.workspace.repository_path,
+        )
         if repository.error:
             return DoctorCheck("Repository", CheckStatus.ERROR, repository.error)
         if not repository.succeeded or repository.stdout.strip() != "true":
             return DoctorCheck("Repository", CheckStatus.ERROR, "diretório não é um repositório Git")
 
-        remote = self.runner.run(["git", "remote"])
+        remote = self.runner.run(["git", "remote"], cwd=config.workspace.repository_path)
         if remote.error:
             return DoctorCheck("Repository", CheckStatus.ERROR, remote.error)
         if not remote.succeeded:
             return DoctorCheck("Repository", CheckStatus.ERROR, self._command_failure(remote))
-        if not remote.stdout.strip():
-            return DoctorCheck("Repository", CheckStatus.ERROR, "nenhum remote configurado")
-        return DoctorCheck("Repository", CheckStatus.OK, "remote configurado")
+        if config.workspace.remote_name not in remote.stdout.splitlines():
+            return DoctorCheck("Repository", CheckStatus.ERROR, "remote configurado não existe no repositório")
+        try:
+            GitWorktreeAdapter(self.runner).verify_remote_identity(
+                config.workspace.repository_path, config.workspace.remote_name, config.github.repository_full_name,
+            )
+        except GitWorktreeError as error:
+            return DoctorCheck("Repository", CheckStatus.ERROR, str(error))
+        return DoctorCheck("Repository", CheckStatus.OK, "repositório e remote configurados confirmados")
 
     def _check_configuration(self) -> DoctorCheck:
         try:

@@ -41,6 +41,8 @@ class Runner:
     def run(self, arguments: list[str], **policies) -> CommandResult:
         key = tuple(str(value) for value in arguments)
         self.calls.append(key)
+        if "get-url" in key and key not in self.results:
+            return CommandResult(0, "https://github.com/owner/repo.git")
         return self.results.get(key, CommandResult(1, stderr="comando não previsto"))
 
 
@@ -204,7 +206,11 @@ def test_remote_head_uses_configured_repository_and_remote(tmp_path: Path) -> No
     value = RecoveryObserver(config(tmp_path), SqliteExecutionStore(tmp_path / "state.db"), runner)
 
     assert value._remote_head(run(tmp_path)) == HEAD
-    assert runner.calls == [expected]
+    assert runner.calls[-1] == expected
+    assert [call[3:] for call in runner.calls[:-1]] == [
+        ("remote", "get-url", "--all", "upstream"),
+        ("remote", "get-url", "--push", "--all", "upstream"),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -227,7 +233,7 @@ def test_remote_absence_differs_from_read_failure(
 def test_pr_empty_success_differs_from_invalid_or_failed_query(tmp_path: Path) -> None:
     prefix = ("gh", "pr", "list", "--repo", "owner/repo", "--head", "feat/recovery",
               "--state", "all", "--json",
-              "number,url,state,baseRefName,headRefName,headRefOid,isDraft,mergedAt,mergeCommit")
+              "number,url,state,baseRefName,headRefName,headRefOid,isDraft,mergedAt,mergeCommit,closingIssuesReferences")
     assert observer(tmp_path, {prefix: CommandResult(0, "[]")})._pull_requests("feat/recovery") == ()
     for result in (CommandResult(1, stderr="offline"), CommandResult(0, "{")):
         with pytest.raises(RecoveryObservationError):
@@ -237,7 +243,7 @@ def test_pr_empty_success_differs_from_invalid_or_failed_query(tmp_path: Path) -
 def test_pr_query_preserves_all_matches_and_states(tmp_path: Path) -> None:
     key = ("gh", "pr", "list", "--repo", "owner/repo", "--head", "feat/recovery",
            "--state", "all", "--json",
-           "number,url,state,baseRefName,headRefName,headRefOid,isDraft,mergedAt,mergeCommit")
+           "number,url,state,baseRefName,headRefName,headRefOid,isDraft,mergedAt,mergeCommit,closingIssuesReferences")
     payload = [
         {"number": 1, "url": "u1", "state": "OPEN", "baseRefName": "main",
          "headRefName": "feat/recovery", "headRefOid": HEAD, "mergedAt": None},
@@ -275,7 +281,7 @@ def test_ci_project_and_verified_merge_are_normalized(tmp_path: Path) -> None:
         ),
         verify_merge_commit=lambda merge, head: verified.append((merge, head)),
     )
-    value.projects = SimpleNamespace(list_items=lambda: (SimpleNamespace(id="item", status="Done"),))
+    value.projects = SimpleNamespace(list_items=lambda: (SimpleNamespace(id="item", is_issue=True, issue_number=37, repository="owner/repo", status="Done"),))
 
     assert value._ci(run(tmp_path), (pull,)).head_sha == HEAD
     assert value._merge(run(tmp_path), (pull,)).state == MergeState.MERGED
@@ -288,11 +294,11 @@ def test_project_unknown_not_done_and_done_are_distinct(tmp_path: Path) -> None:
     value.projects = SimpleNamespace(list_items=lambda: ())
     assert value._project(run(tmp_path, project_item_id="item")) == ProjectState.UNKNOWN
     value.projects = SimpleNamespace(
-        list_items=lambda: (SimpleNamespace(id="item", status="In Progress"),)
+        list_items=lambda: (SimpleNamespace(id="item", is_issue=True, issue_number=37, repository="owner/repo", status="In Progress"),)
     )
     assert value._project(run(tmp_path, project_item_id="item")) == ProjectState.NOT_DONE
     value.projects = SimpleNamespace(
-        list_items=lambda: (SimpleNamespace(id="item", status="Done"),)
+        list_items=lambda: (SimpleNamespace(id="item", is_issue=True, issue_number=37, repository="owner/repo", status="Done"),)
     )
     assert value._project(run(tmp_path, project_item_id="item")) == ProjectState.DONE
 
@@ -311,6 +317,14 @@ def test_unproved_merge_never_becomes_merged(tmp_path: Path) -> None:
 
     with pytest.raises(RecoveryObservationError):
         value._merge(run(tmp_path), (pull,))
+
+
+@pytest.mark.parametrize("repository,issue", [("outro/repo", 37), ("owner/repo", 99)])
+def test_project_item_exige_mesma_issue_e_repositorio(tmp_path, repository, issue):
+    value = observer(tmp_path, {})
+    value.projects = SimpleNamespace(list_items=lambda: (SimpleNamespace(
+        id="item", is_issue=True, issue_number=issue, repository=repository, status="Done"),))
+    assert value._project(run(tmp_path, project_item_id="item")) == ProjectState.UNKNOWN
 
 
 

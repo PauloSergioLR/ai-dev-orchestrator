@@ -2,7 +2,6 @@
 
 from hashlib import sha256
 from collections.abc import Callable, Mapping
-import os
 import re
 from typing import Protocol
 
@@ -13,6 +12,7 @@ from ai_dev_orchestrator.adapters.notifications import (
 )
 from ai_dev_orchestrator.config import OrchestratorConfig
 from ai_dev_orchestrator.domain.execution import ExecutionPhase, ExecutionStore, RunRecord, PROVIDER_WAIT_PHASES, TERMINAL_PHASES
+from ai_dev_orchestrator.infrastructure.redaction import redact_secrets
 
 
 class NotificationChannel(Protocol):
@@ -54,10 +54,7 @@ CHAT_NOTIFICATION_CHANNELS = frozenset({"discord", "telegram"})
 
 
 def safe_context(value: object) -> str:
-    text = str(value or "-").replace("\n", " ").replace("\r", " ")
-    for name, secret in os.environ.items():
-        if any(part in name.upper() for part in ("TOKEN", "PASSWORD", "SECRET", "WEBHOOK")) and secret:
-            text = text.replace(secret, "[redigido]")
+    text = redact_secrets(str(value or "-")).replace("\n", " ").replace("\r", " ")
     return re.sub(r"https?://\S+", "[URL omitida]", text)[:150]
 
 
@@ -141,7 +138,7 @@ class EscalationService:
             and ExecutionPhase.HUMAN_REQUIRED.value in self.config.notifications.events
         ):
             for name, channel in self.channels.items():
-                self._attempt(run, key, name, lambda channel=channel: channel.send(message))
+                self._attempt(run, key, name, lambda channel=channel: channel.send(redact_secrets(message)))
 
     def deliver_event(self, run: RunRecord) -> None:
         """Despacha uma transição relevante uma vez por contexto material."""
@@ -172,7 +169,7 @@ class EscalationService:
         for name, channel in self.channels.items():
             if name in CHAT_NOTIFICATION_CHANNELS:
                 continue
-            self._attempt(run, key, name, lambda channel=channel: channel.send(message))
+            self._attempt(run, key, name, lambda channel=channel: channel.send(redact_secrets(message)))
 
     def _project(self, run: RunRecord, status: str) -> None:
         assert self.status_writer is not None and run.project_item_id is not None

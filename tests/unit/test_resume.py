@@ -26,7 +26,7 @@ POLICY = RecoveryPolicy("owner/repo", "main", True, 3)
 
 def pr(head: str = HEAD) -> PullRequestObservation:
     return PullRequestObservation(37, URL, "owner/repo", "main", "feat/recovery", head,
-                                  PullRequestState.OPEN)
+                                  PullRequestState.OPEN, (37,))
 
 
 class Effects:
@@ -239,6 +239,8 @@ def test_human_required_reconciles_manual_merge_and_finishes_same_run(
             WorktreeState.CONVERGENT,
             local_head_sha=HEAD,
             project_state=ProjectState.DONE,
+            pull_requests=(PullRequestObservation(37, URL, "owner/repo", "main", "feat/recovery", HEAD, PullRequestState.MERGED),),
+            merge=MergeObservation(MergeState.MERGED, HEAD, MERGE),
         )
 
     result = service(store, Observer(snapshot), Effects()).resume(37)
@@ -308,6 +310,8 @@ def test_resume_publication_from_dirty_commit_continues_to_completion_with_same_
         if run.phase is ExecutionPhase.PROJECT_DONE_PENDING:
             return RecoveryObservation(
                 WorktreeState.ABSENT,
+                pull_requests=(PullRequestObservation(37, URL, "owner/repo", "main", "feat/recovery", HEAD, PullRequestState.MERGED),),
+                merge=MergeObservation(MergeState.MERGED, HEAD, MERGE),
                 project_state=ProjectState.DONE,
             )
         raise AssertionError(run.phase)
@@ -730,6 +734,7 @@ def test_no_diff_exhausted_is_classified_without_escalation_adapter(tmp_path: Pa
 def test_preparing_existing_worktree_keeps_execution_and_does_not_prepare_again(tmp_path: Path) -> None:
     store = SqliteExecutionStore(tmp_path / "state.db")
     original = create(store)
+    original = store.checkpoint(original.id, summary="Base comprovada antes de criar worktree", base_sha=HEAD)
     effects = Effects()
 
     def snapshot(run: RunRecord) -> RecoveryObservation:
@@ -840,7 +845,7 @@ def test_crash_boundaries_are_reconciled_without_repeating_remote_mutations(tmp_
             ExecutionPhase.GEMINI_REVIEWING,
             ExecutionPhase.PROJECT_DONE_PENDING,
         } else ()
-        if run.phase == ExecutionPhase.MERGE_PENDING:
+        if run.phase in {ExecutionPhase.MERGE_PENDING, ExecutionPhase.PROJECT_DONE_PENDING}:
             pulls = (PullRequestObservation(
                 37, URL, "owner/repo", "main", "feat/recovery", HEAD,
                 PullRequestState.MERGED,
@@ -849,7 +854,7 @@ def test_crash_boundaries_are_reconciled_without_repeating_remote_mutations(tmp_
             ExecutionPhase.WAITING_CI, ExecutionPhase.GEMINI_REVIEWING,
             ExecutionPhase.MERGE_PENDING,
         } else CiObservation()
-        merge = MergeObservation(MergeState.MERGED, HEAD, MERGE) if run.phase == ExecutionPhase.MERGE_PENDING else MergeObservation(MergeState.OPEN)
+        merge = MergeObservation(MergeState.MERGED, HEAD, MERGE) if run.phase in {ExecutionPhase.MERGE_PENDING, ExecutionPhase.PROJECT_DONE_PENDING} else MergeObservation(MergeState.OPEN)
         project = ProjectState.DONE if run.phase == ExecutionPhase.PROJECT_DONE_PENDING else ProjectState.UNKNOWN
         return RecoveryObservation(**common, pull_requests=pulls, ci=ci, merge=merge,
                                    project_state=project)
@@ -988,7 +993,9 @@ def test_legacy_merging_reconciles_existing_merge_without_mutation(tmp_path: Pat
                 merge=MergeObservation(MergeState.MERGED, HEAD, MERGE),
             )
         return RecoveryObservation(
-            WorktreeState.ABSENT, project_state=ProjectState.DONE
+            WorktreeState.ABSENT, project_state=ProjectState.DONE,
+            pull_requests=(PullRequestObservation(37, URL, "owner/repo", "main", "feat/recovery", HEAD, PullRequestState.MERGED),),
+            merge=MergeObservation(MergeState.MERGED, HEAD, MERGE),
         )
 
     result = service(store, Observer(snapshot), effects).resume(37)
@@ -1067,3 +1074,14 @@ def test_human_required_allows_publication_targets_but_not_merge(
     validate_transition(ExecutionPhase.HUMAN_REQUIRED, target)
     with pytest.raises(ValueError, match="Transição de execução inválida"):
         validate_transition(ExecutionPhase.HUMAN_REQUIRED, ExecutionPhase.MERGE_PENDING)
+
+
+def test_resume_recusa_repositorio_divergente_antes_de_checkpoint(tmp_path):
+    store = SqliteExecutionStore(tmp_path / "state.db")
+    original = advance(store, ExecutionPhase.WAITING_CI)
+    record = store.checkpoint(original.id, summary="identidade", repository_identity="outro/repo")
+    effects = Effects()
+    with pytest.raises(ResumeError, match="Repositório"):
+        service(store, Observer(lambda run: (_ for _ in ()).throw(AssertionError("não observar"))), effects).resume(37)
+    assert store.get(record.id) == record
+    assert effects.calls == {}

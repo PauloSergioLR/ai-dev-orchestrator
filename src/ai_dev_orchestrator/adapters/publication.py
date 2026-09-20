@@ -6,12 +6,14 @@ from pathlib import Path
 from typing import Protocol, Sequence
 
 from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner
+from ai_dev_orchestrator.adapters.git import GitWorktreeAdapter
+from ai_dev_orchestrator.infrastructure.redaction import RedactedError
 
 
 GIT_PUBLICATION_TIMEOUT_SECONDS = 30
 
 
-class GitPublicationError(Exception):
+class GitPublicationError(RedactedError):
     """Indica que uma etapa não destrutiva de publicação Git falhou."""
 
 
@@ -22,8 +24,9 @@ class ProcessRunner(Protocol):
 class GitPublicationAdapter:
     """Stageia, commita e envia uma branch sem reescrever histórico."""
 
-    def __init__(self, runner: ProcessRunner | None = None) -> None:
+    def __init__(self, runner: ProcessRunner | None = None, *, expected_repository: str | None = None) -> None:
         self.runner = runner or CommandRunner(timeout=GIT_PUBLICATION_TIMEOUT_SECONDS)
+        self.expected_repository = expected_repository
 
     def commit(self, worktree: str | Path, issue_number: int) -> str:
         return self._commit(worktree, f"feat: implementa issue #{issue_number}")
@@ -50,12 +53,19 @@ class GitPublicationAdapter:
 
     def merge_state(self, worktree: str | Path) -> tuple[str, str]:
         """Confirma branch e ausência de alterações locais antes do merge remoto."""
-        branch = self._run(["git", "branch", "--show-current"], worktree, "obter branch local").stdout.strip()
-        if not branch:
-            raise GitPublicationError("Worktree está em HEAD destacado")
+        identity = self.local_identity(worktree)
         dirty = self._run(["git", "status", "--porcelain", "--untracked-files=all"], worktree, "verificar estado local").stdout
         if dirty.strip():
             raise GitPublicationError("Worktree possui alterações não commitadas")
+        if self.local_identity(worktree) != identity:
+            raise GitPublicationError("Identidade do worktree mudou durante a observação")
+        return identity
+
+    def local_identity(self, worktree: str | Path) -> tuple[str, str]:
+        """Observa branch e HEAD mesmo durante uma implementação com diff pendente."""
+        branch = self._run(["git", "branch", "--show-current"], worktree, "obter branch local").stdout.strip()
+        if not branch:
+            raise GitPublicationError("Worktree está em HEAD destacado")
         return branch, self.current_head(worktree)
 
     def _commit(self, worktree: str | Path, message: str) -> str:
@@ -71,6 +81,8 @@ class GitPublicationAdapter:
         return sha
 
     def push(self, worktree: str |Path, remote_name: str, branch: str) -> None:
+        if self.expected_repository is not None:
+            GitWorktreeAdapter(self.runner).verify_remote_identity(worktree, remote_name, self.expected_repository)
         self._run(["git", "push", "-u", remote_name, branch], worktree, "enviar a branch")
 
     def _run(self, arguments: list[str], worktree: str | Path, operation: str) -> CommandResult:

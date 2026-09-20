@@ -17,8 +17,9 @@ def config(tmp_path: Path, **cleanup: bool) -> OrchestratorConfig:
     )
 
 
-def completed(store: SqliteExecutionStore, branch="work/x", path="C:/work/x", merged=False):
-    run = store.create(46, branch=branch, worktree_path=path, base_ref="main")
+def completed(store: SqliteExecutionStore, branch="work/x", path=None, merged=False):
+    path = path or str(store.database_path.parent / "worktrees" / "x")
+    run = store.create(46, branch=branch, worktree_path=path, base_ref="main", base_sha="a" * 40, repository_identity="o/r")
     for phase in (ExecutionPhase.CODEX_RUNNING, ExecutionPhase.TESTING, ExecutionPhase.COMMIT_PENDING,
                   ExecutionPhase.PUSH_PENDING, ExecutionPhase.PR_PENDING, ExecutionPhase.WAITING_CI,
                   ExecutionPhase.GEMINI_REVIEWING, ExecutionPhase.MERGE_PENDING,
@@ -42,6 +43,9 @@ class FakeGit:
     remote: bool = True
     calls: list[str] = field(default_factory=list)
     registered: bool = True
+    def local_branch_head(self, *_): return "a" * 40 if self.local else None
+    def verify_cleanup_worktree(self, *_): pass
+    def verify_remote_identity(self, *_): pass
     def worktree_is_clean(self, *_): return self.clean
     def remove_worktree(self, *_): self.calls.append("worktree")
     def local_branch_exists(self, *_): return self.local
@@ -65,8 +69,8 @@ class FakeGit:
 
 def test_clean_completed_worktree_is_removed_and_repeated_cleanup_is_safe(tmp_path: Path) -> None:
     store, git = SqliteExecutionStore(tmp_path / "state.db"), FakeGit()
-    worktree = tmp_path / "worktree"
-    worktree.mkdir()
+    worktree = tmp_path / "worktrees" / "worktree"
+    worktree.mkdir(parents=True)
     run = completed(store, path=str(worktree))
     service = CleanupService(config(tmp_path), store, git)
     assert service.cleanup(run.id).status == "DONE"
@@ -77,8 +81,8 @@ def test_clean_completed_worktree_is_removed_and_repeated_cleanup_is_safe(tmp_pa
 
 def test_dirty_or_noncompleted_execution_is_preserved(tmp_path: Path) -> None:
     store, git = SqliteExecutionStore(tmp_path / "state.db"), FakeGit(clean=False)
-    worktree = tmp_path / "dirty-worktree"
-    worktree.mkdir()
+    worktree = tmp_path / "worktrees" / "dirty-worktree"
+    worktree.mkdir(parents=True)
     run = completed(store, path=str(worktree))
     assert CleanupService(config(tmp_path), store, git).cleanup(run.id).status == "PENDING"
     active = store.create(47, branch="work/y", worktree_path="C:/work/y")
@@ -129,8 +133,8 @@ def test_cleanup_failure_keeps_completed_and_does_not_change_duration(tmp_path: 
             raise RuntimeError("Git indisponível")
 
     store, git = SqliteExecutionStore(tmp_path / "state.db"), FailingGit()
-    worktree = tmp_path / "failing-worktree"
-    worktree.mkdir()
+    worktree = tmp_path / "worktrees" / "failing-worktree"
+    worktree.mkdir(parents=True)
     run = completed(store, path=str(worktree))
     before = HistoryService(store).metrics(run).duration
 
@@ -151,7 +155,7 @@ def test_superseded_empty_orphan_has_official_cleanup_but_unknown_content_is_pre
     empty = root / "empty-orphan"
     empty.mkdir()
     run = store.create(
-        80, branch="work/orphan", worktree_path=str(empty), base_ref="main"
+        80, branch="work/orphan", worktree_path=str(empty), base_ref="main", repository_identity="o/r", base_sha="a" * 40
     )
     run = store.supersede(run.id, summary="abandono explícito")
     git = FakeGit(registered=False)
@@ -167,7 +171,7 @@ def test_superseded_empty_orphan_has_official_cleanup_but_unknown_content_is_pre
     evidence = unknown / "preservar.txt"
     evidence.write_text("conteúdo desconhecido", encoding="utf-8")
     other = store.create(
-        81, branch="work/unknown", worktree_path=str(unknown), base_ref="main"
+        81, branch="work/unknown", worktree_path=str(unknown), base_ref="main", repository_identity="o/r", base_sha="a" * 40
     )
     other = store.supersede(other.id, summary="abandono explícito")
     result = CleanupService(config(tmp_path), store, FakeGit(registered=False)).cleanup(

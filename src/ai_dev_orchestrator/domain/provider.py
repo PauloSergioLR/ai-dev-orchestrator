@@ -111,6 +111,8 @@ def classify_process_failure(kind: str | None) -> ProviderFailureKind:
         "OS_ERROR": ProviderFailureKind.LOCAL_TRANSIENT,
         "ENCODING_ERROR": ProviderFailureKind.ENCODING_ERROR,
         "PROCESS_CLEANUP_ERROR": ProviderFailureKind.PROCESS_CLEANUP_ERROR,
+        "OUTPUT_LIMIT": ProviderFailureKind.PROTOCOL_ERROR,
+        "UNSAFE_COMMAND": ProviderFailureKind.PROTOCOL_ERROR,
     }.get(kind, ProviderFailureKind.UNKNOWN)
 
 

@@ -11,6 +11,7 @@ from ai_dev_orchestrator.config import OrchestratorConfig
 from ai_dev_orchestrator.domain.execution import RunRecord, TERMINAL_PHASES
 from ai_dev_orchestrator.domain.project_contract import ProjectContract
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
+from ai_dev_orchestrator.infrastructure.ownership import OwnershipError
 from ai_dev_orchestrator.services.pipeline import configured_contract_overrides
 from ai_dev_orchestrator.services.project_discovery import ProjectCapabilityResolver
 
@@ -72,6 +73,13 @@ class ContractRecoveryService:
     def recover(
         self, issue_number: int, *, expected_fingerprint: str
     ) -> RunRecord:
+        try:
+            with self.store.ownership(issue_number):
+                return self._recover_owned(issue_number, expected_fingerprint=expected_fingerprint)
+        except OwnershipError as error:
+            raise ContractRecoveryError("Outra operação já controla esta Issue") from error
+
+    def _recover_owned(self, issue_number: int, *, expected_fingerprint: str) -> RunRecord:
         preview = self.preview(issue_number)
         if preview.recovered.fingerprint != expected_fingerprint:
             raise ContractRecoveryError(
@@ -79,6 +87,7 @@ class ContractRecoveryService:
             )
         return self.store.checkpoint(
             preview.run.id,
+            expected=preview.run,
             summary=(
                 "Contrato baseline reconstruído explicitamente a partir de base_sha; "
                 "nenhum comando candidato foi executado"
