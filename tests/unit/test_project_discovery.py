@@ -228,7 +228,7 @@ def test_validator_uses_structured_argv_and_gate_cwd(tmp_path: Path) -> None:
     calls: list[tuple[tuple[str, ...], Path]] = []
 
     class Runner:
-        def run(self, arguments, cwd=None):
+        def run(self, arguments, cwd=None, **_kwargs):
             calls.append((tuple(arguments), cwd))
             return CommandResult(0)
 
@@ -243,7 +243,7 @@ def test_validator_uses_structured_argv_and_gate_cwd(tmp_path: Path) -> None:
 
 def test_failed_custom_gate_keeps_sanitized_short_diagnostic(tmp_path: Path) -> None:
     class Runner:
-        def run(self, arguments, cwd=None):
+        def run(self, arguments, cwd=None, **_kwargs):
             return CommandResult(7, stderr="falha")
 
     from ai_dev_orchestrator.domain.project_contract import CommandPlan
@@ -455,6 +455,73 @@ def test_discovery_error_preserves_codex_correction_budget(tmp_path: Path) -> No
     persisted = store.get(run.id)
     assert persisted.phase is ExecutionPhase.HUMAN_REQUIRED
     assert persisted.human_reason == "DISCOVERY_ERROR"
+    assert persisted.local_gate_correction_attempts == 0
+    assert pipeline.codex_executor.resumes == 0
+
+
+def test_local_infrastructure_failure_preserves_codex_correction_budget(
+    tmp_path: Path,
+) -> None:
+    from ai_dev_orchestrator.config import OrchestratorConfig
+    from ai_dev_orchestrator.domain.execution import ExecutionPhase
+    from ai_dev_orchestrator.domain.issue import Issue
+    from ai_dev_orchestrator.domain.worktree import GitWorktree
+    from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
+    from ai_dev_orchestrator.services.pipeline import RunPipeline, RunPipelineError
+    from ai_dev_orchestrator.services.validation import LocalFailureKind
+
+    class BrokenInfrastructure:
+        def validate(self, _path):
+            raise LocalValidationError(
+                "temporário isolado indisponível",
+                kind=LocalFailureKind.LOCAL_INFRASTRUCTURE,
+                correctable=False,
+            )
+
+    class Codex:
+        resumes = 0
+
+        def resume(self, *_args):
+            self.resumes += 1
+            raise AssertionError("infraestrutura não deve consumir correção de código")
+
+    configured = OrchestratorConfig(
+        github={
+            "owner": "acme", "repository": "repo", "project_number": 1,
+            "ready_status": "Ready",
+        },
+        workspace={
+            "repository_path": tmp_path,
+            "worktrees_dir": tmp_path / "worktrees",
+            "base_ref": "main",
+        },
+        execution={"max_attempts": 1, "max_parallel_runs": 1, "auto_merge": False},
+    )
+    store = SqliteExecutionStore(tmp_path / "state-infrastructure.db")
+    run = store.create(
+        96, branch="work/isolation", worktree_path=str(tmp_path), base_ref="main"
+    )
+    run = store.transition(run.id, ExecutionPhase.CODEX_RUNNING, summary="codex")
+    run = store.transition(
+        run.id, ExecutionPhase.TESTING, summary="gates", codex_session_id="session"
+    )
+    pipeline = RunPipeline(
+        configured, object(), object(), object(), object(), Codex(),
+        BrokenInfrastructure(), git_publisher=object(), execution_store=store,
+    )
+    pipeline._execution_id = run.id
+
+    with pytest.raises(RunPipelineError, match="LOCAL_INFRASTRUCTURE"):
+        pipeline._validate_with_recovery(
+            Issue(96, "T", "", "OPEN", "url", (), ()),
+            GitWorktree(tmp_path, tmp_path, "work/isolation", "main"),
+            "session",
+            "fim",
+        )
+
+    persisted = store.get(run.id)
+    assert persisted.phase is ExecutionPhase.HUMAN_REQUIRED
+    assert persisted.human_reason == "LOCAL_INFRASTRUCTURE"
     assert persisted.local_gate_correction_attempts == 0
     assert pipeline.codex_executor.resumes == 0
 
