@@ -169,7 +169,7 @@ def test_gates_locais_preservam_return_code_mesmo_com_saida_cp1252(tmp_path: Pat
     assert "ação" in result.stdout
 
     class GateRunner:
-        def run(self, arguments, cwd=None):
+        def run(self, arguments, cwd=None, **_kwargs):
             return result
 
     with pytest.raises(LocalValidationError, match="quality"):

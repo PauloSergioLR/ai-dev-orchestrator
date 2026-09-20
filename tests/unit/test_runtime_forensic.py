@@ -149,9 +149,13 @@ def test_python_gate_environment_isolated_without_changing_parent_or_other_stack
     assert result.succeeded
     observed = json.loads(result.stdout)
     for name in names:
-        assert observed[name] == (str(tmp_path) if name in {"TMP", "TEMP", "PYTEST_DEBUG_TEMPROOT"} else None)
+        if name in {"TMP", "TEMP"} and os.name != "nt":
+            expected = str(tmp_path / "foreign")
+        else:
+            expected = str(tmp_path) if name in {"TMP", "TEMP", "PYTEST_DEBUG_TEMPROOT"} else None
+        assert observed[name] == expected
         assert os.environ[name] == str(tmp_path / "foreign")
-    assert LocalValidationService._gate_environment(("npm", "test"), str(tmp_path)) is None
+    assert LocalValidationService._gate_environment(("npm", "test"), str(tmp_path)) == dict(os.environ)
     assert "VIRTUAL_ENV" not in environment
 
 

@@ -9,7 +9,11 @@ import pytest
 
 from ai_dev_orchestrator.adapters.publication import GitPublicationAdapter, GitPublicationError
 from ai_dev_orchestrator.infrastructure.process import CommandResult
-from ai_dev_orchestrator.services.validation import LocalValidationError, LocalValidationService
+from ai_dev_orchestrator.services.validation import (
+    LocalFailureKind,
+    LocalValidationError,
+    LocalValidationService,
+)
 from ai_dev_orchestrator.domain.project_contract import CommandPlan
 
 
@@ -25,7 +29,9 @@ class FakeRunner:
     results: list[CommandResult]
     calls: list[tuple[tuple[str, ...], Path | None]] = field(default_factory=list)
 
-    def run(self, arguments: tuple[str, ...], cwd: Path | None = None) -> CommandResult:
+    def run(
+        self, arguments: tuple[str, ...], cwd: Path | None = None, **_kwargs
+    ) -> CommandResult:
         self.calls.append((tuple(arguments), cwd))
         return self.results.pop(0)
 
@@ -61,10 +67,14 @@ def test_uv_gate_does_not_inherit_virtualenv_from_another_checkout(
     foreign_environment = tmp_path.parent / "checkout-principal" / ".venv"
 
     def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        received["command"] = args[0]
         received.update(kwargs)
         return subprocess.CompletedProcess(args[0], 0, b"teste aprovado", b"")
 
     monkeypatch.setenv("VIRTUAL_ENV", str(foreign_environment))
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path.parent / "checkout-principal"))
+    monkeypatch.setenv("PATH", "caminho-preservado")
+    monkeypatch.setenv("PROJECT_AUTH_TOKEN", "preservar")
     monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.resolve_executable", lambda command, *args: command)
     monkeypatch.setattr(
         "ai_dev_orchestrator.infrastructure.process.run_captured", run
@@ -77,7 +87,12 @@ def test_uv_gate_does_not_inherit_virtualenv_from_another_checkout(
 
     assert result[0].succeeded
     assert "VIRTUAL_ENV" not in received["env"]
+    assert "PYTHONPATH" not in received["env"]
+    assert received["env"]["PATH"] == "caminho-preservado"
+    assert received["env"]["PROJECT_AUTH_TOKEN"] == "preservar"
+    assert received["command"] == ["uv", "run", "pytest", "-q"]
     assert os.environ["VIRTUAL_ENV"] == str(foreign_environment)
+    assert os.environ["PYTHONPATH"] == str(tmp_path.parent / "checkout-principal")
 
 
 def test_uv_gate_with_active_preserves_virtualenv(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -87,8 +102,127 @@ def test_uv_gate_with_active_preserves_virtualenv(monkeypatch: pytest.MonkeyPatc
         ("uv", "run", "--active", "pytest", "-q")
     )
 
-    assert environment is None or environment["VIRTUAL_ENV"] == "ambiente-ativo"
+    assert environment["VIRTUAL_ENV"] == "ambiente-ativo"
     assert os.environ["VIRTUAL_ENV"] == "ambiente-ativo"
+
+
+def test_pytest_gate_isolates_external_options_cache_and_temporary_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    inherited_cache = tmp_path / ".pytest_cache"
+    inherited_cache.mkdir()
+    marker = inherited_cache / "estado-antigo"
+    marker.write_text("não remover", encoding="utf-8")
+    monkeypatch.setenv("PYTEST_ADDOPTS", f"--cache-dir={inherited_cache} --invalid-option")
+    monkeypatch.setenv("PYTEST_DEBUG_TEMPROOT", str(tmp_path / "temporario-antigo"))
+    monkeypatch.setenv("TMP", str(tmp_path / "tmp-antigo"))
+    monkeypatch.setenv("TEMP", str(tmp_path / "temp-antigo"))
+    received: dict[str, str] = {}
+    isolated_root: Path | None = None
+
+    class Runner:
+        def run(self, _arguments, cwd=None, *, environment=None):
+            nonlocal isolated_root
+            assert cwd == tmp_path
+            received.update(environment)
+            isolated_root = Path(environment["PYTEST_DEBUG_TEMPROOT"])
+            assert isolated_root.is_dir()
+            if str(inherited_cache) in environment["PYTEST_ADDOPTS"]:
+                return CommandResult(
+                    1, stderr=f"PermissionError: Access is denied: '{inherited_cache}'"
+                )
+            return CommandResult(0)
+
+    plan = CommandPlan("testes", "unit", "Testes", ("uv", "run", "pytest", "-q"))
+
+    result = LocalValidationService(Runner(), (plan,)).validate(tmp_path)
+
+    assert result[0].succeeded
+    assert isolated_root is not None and not isolated_root.exists()
+    assert marker.read_text(encoding="utf-8") == "não remover"
+    assert not list(tmp_path.glob(".orch-gate-*"))
+    assert os.environ["PYTEST_ADDOPTS"].endswith("--invalid-option")
+    assert os.environ["PYTEST_DEBUG_TEMPROOT"] == str(
+        tmp_path / "temporario-antigo"
+    )
+
+
+@pytest.mark.parametrize(
+    ("platform", "isolated_names", "unchanged_names"),
+    [
+        ("nt", ("TMP", "TEMP", "TMPDIR"), ()),
+        ("posix", ("TMPDIR",), ("TMP", "TEMP")),
+    ],
+)
+def test_pytest_temporary_environment_is_platform_specific(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    platform: str,
+    isolated_names: tuple[str, ...],
+    unchanged_names: tuple[str, ...],
+) -> None:
+    for name in ("TMP", "TEMP", "TMPDIR"):
+        monkeypatch.setenv(name, f"original-{name}")
+
+    environment = LocalValidationService._gate_environment(
+        ("python", "-m", "pytest"), tmp_path, platform=platform
+    )
+
+    for name in isolated_names:
+        assert environment[name] == str(tmp_path)
+    for name in unchanged_names:
+        assert environment[name] == f"original-{name}"
+
+
+def test_non_python_gate_preserves_generic_environment_without_pytest_isolation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PATH", "caminho-das-ferramentas")
+    monkeypatch.setenv("PROJECT_AUTH_TOKEN", "credencial-do-projeto")
+    monkeypatch.setenv("PYTEST_ADDOPTS", "--opcao-externa")
+    received: dict[str, str] = {}
+
+    class Runner:
+        def run(self, _arguments, cwd=None, *, environment=None):
+            received.update(environment)
+            return CommandResult(0)
+
+    plan = CommandPlan("frontend", "test", "Frontend", ("npm", "test"))
+
+    LocalValidationService(Runner(), (plan,)).validate(tmp_path)
+
+    assert received["PATH"] == "caminho-das-ferramentas"
+    assert received["PROJECT_AUTH_TOKEN"] == "credencial-do-projeto"
+    assert received["PYTEST_ADDOPTS"] == "--opcao-externa"
+    assert "PYTEST_DEBUG_TEMPROOT" not in received
+    assert not list(tmp_path.glob(".orch-gate-*"))
+
+
+@pytest.mark.parametrize("failure", [
+    "PermissionError: Access is denied", "PermissionError",
+    "OSError: [WinError 32] File in use",
+])
+def test_access_denied_in_controlled_temporary_is_infrastructure_failure(
+    tmp_path: Path, failure: str,
+) -> None:
+    class Runner:
+        def run(self, _arguments, cwd=None, *, environment=None):
+            root = environment["PYTEST_DEBUG_TEMPROOT"]
+            return CommandResult(
+                1,
+                stderr="x" * 600 + f" {failure}: '{root}'",
+            )
+
+    plan = CommandPlan("testes", "unit", "Testes", ("pytest", "-q"))
+
+    with pytest.raises(LocalValidationError) as raised:
+        LocalValidationService(Runner(), (plan,)).validate(tmp_path)
+
+    assert raised.value.kind is LocalFailureKind.LOCAL_INFRASTRUCTURE
+    assert raised.value.correctable is False
+    assert raised.value.result is not None
+    assert "saída truncada" in raised.value.result.diagnostic
+    assert not list(tmp_path.glob(".orch-gate-*"))
 
 
 def test_truncates_large_gate_diagnostic() -> None:

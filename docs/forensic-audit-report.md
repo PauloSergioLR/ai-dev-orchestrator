@@ -1,5 +1,9 @@
 # Auditoria forense e hardening — 20/09/2026
 
+> As seções originais registram o encerramento local da auditoria, antes da
+> publicação. A entrega e a integração posterior com `main` estão documentadas
+> no complemento ao final e no [PR #98](https://github.com/PauloSergioLR/ai-dev-orchestrator/pull/98).
+
 ## Resultado e escopo
 
 As correções reforçam identidade, exclusão concorrente, checkpoints, recuperação,
@@ -249,3 +253,37 @@ Artefatos locais ignorados pelo Git preservam XMLs, wheel/sdist e
 `git diff --stat` completo e verificação do checkout original. Novos arquivos de
 código/documentação têm apenas intent-to-add para aparecer no diff; nenhum conteúdo
 foi staged para commit. O checkout original permanece sem alterações tracked.
+
+## Complemento: entrega e integração com main
+
+A auditoria foi preservada no commit
+`e0783ad2c51c845de5152922f9b8034c5d599cde`, publicado na branch
+`codex/forensic-hardening` e no PR #98. Após a entrega, a integração de
+`main` em `78c28ce48ac2a07f95e46e255fe230121091b1df` exigiu resolver conflitos
+em `validation.py` e `test_publication.py`. O commit original não foi
+reescrito; a integração usa merge de `main` na branch da auditoria.
+
+A resolução preserva o envio explícito do ambiente aos runners, os temporários
+controlados dentro do worktree e os ajustes já presentes em `main`. Combina-os
+com saneamento de venv/PATH, opções e caches Python, preservação do ambiente do
+pai e classificação de falhas antes de truncar o diagnóstico. Os dois motivos
+de falha ambiental permanecem compatíveis; `PermissionError` e `WinError 32`
+no temporário controlado não consomem tentativa de correção de código.
+
+Validação após a integração, no Windows:
+
+- Suíte focada de gates, publicação, descoberta, runtime e adapters: 130 aprovados.
+- Primeira suíte completa: 1.084 aprovados e 3 skips esperados.
+- Suíte final, incluindo duas regressões adicionais de acesso ao temporário:
+  **1.086 aprovados e 3 skips esperados em 61,67 s**.
+- Ruff e verificação de whitespace aprovados; build offline e instalação do
+  pacote fora do checkout aprovados durante a integração.
+- XML final: `.pytest-tmp-audit-dist/merge-final.xml`. Os três skips continuam
+  sendo os dois probes live/opt-in e o teste SIGKILL/lifeline exclusivo POSIX.
+
+Os resultados remotos da matriz Ubuntu/Windows são registrados nos checks e no
+corpo do PR #98, por execução e commit. Eles complementam o retrato local original;
+a limitação residual de contenção POSIX descrita acima permanece documentada.
+O PR permanece aberto para revisão. Esta integração não executa merge do PR,
+retomada da Issue #96, mutação do seu worktree ou SQLite operacional, alteração
+do Project ou ação sobre o PR #97.

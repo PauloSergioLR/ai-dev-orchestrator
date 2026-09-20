@@ -38,6 +38,7 @@ REASONS = {
     "DISCOVERY_ERROR": "Descoberta do contrato operacional falhou",
     "INVALID_GATE": "Gate local inválido foi recusado pelo control plane",
     "MISSING_REQUIRED_ENVIRONMENT": "Ambiente obrigatório do gate está ausente",
+    "LOCAL_INFRASTRUCTURE": "Infraestrutura local impediu a execução do gate",
     "CONTRACT_DRIFT": "Contrato candidato mudou e o gate baseline deixou de ser aplicável",
     "NO_CHANGES": "Provider concluiu sem implementação versionável",
     "BASE_IDENTITY_MISMATCH": "Worktree divergiu do SHA imutável da base",

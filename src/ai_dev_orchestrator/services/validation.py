@@ -13,7 +13,7 @@ import re
 from time import monotonic
 from tempfile import TemporaryDirectory
 from collections.abc import Callable
-from typing import Protocol, Sequence
+from typing import Mapping, Protocol, Sequence
 
 from ai_dev_orchestrator.domain.project_contract import CommandPlan, ProjectContract, RiskClass
 from ai_dev_orchestrator.domain.provider import ProviderFailure, FAILURE_MESSAGES, classify_process_failure
@@ -30,6 +30,7 @@ class LocalFailureKind(StrEnum):
     INVALID_GATE = "INVALID_GATE"
     MISSING_REQUIRED_ENVIRONMENT = "MISSING_REQUIRED_ENVIRONMENT"
     LOCAL_ENVIRONMENT_ERROR = "LOCAL_ENVIRONMENT_ERROR"
+    LOCAL_INFRASTRUCTURE = "LOCAL_INFRASTRUCTURE"
     CONTRACT_DRIFT = "CONTRACT_DRIFT"
 
 
@@ -59,7 +60,10 @@ class LocalProcessFailure(ProviderFailure, LocalValidationError):
 
 
 class ProcessRunner(Protocol):
-    def run(self, arguments: Sequence[str], cwd: str | Path | None = None) -> CommandResult: ...
+    def run(
+        self, arguments: Sequence[str], cwd: str | Path | None = None,
+        *, environment: Mapping[str, str] | None = None,
+    ) -> CommandResult: ...
 
 
 @dataclass(frozen=True)
@@ -113,22 +117,23 @@ class LocalValidationService:
             if self.progress:
                 self.progress(f"Gate local iniciado: {plan.name}")
             started = monotonic()
-            if self.runner is None or isinstance(self.runner, CommandRunner):
-                try:
-                    temporary = TemporaryDirectory(prefix="orch-python-gate-") if self._is_python_gate(plan.argv) else nullcontext(None)
-                    with temporary as gate_temp:
-                        result = (self.runner or CommandRunner(timeout=plan.timeout_seconds)).run(
-                            plan.argv,
-                            cwd=cwd,
-                            environment=self._gate_environment(plan.argv, gate_temp, root),
-                        )
-                except OSError as error:
-                    raise LocalValidationError(
-                        "Não foi possível preparar ou liberar o ambiente temporário do gate",
-                        kind=LocalFailureKind.LOCAL_ENVIRONMENT_ERROR, correctable=False,
-                    ) from error
-            else:
-                result = self.runner.run(plan.argv, cwd=cwd)
+            gate_temp = None
+            try:
+                # O diretório é nosso e fica no worktree, sem depender de TMP herdado.
+                temporary = (
+                    TemporaryDirectory(prefix=".orch-gate-", dir=root)
+                    if self._is_python_gate(plan.argv) else nullcontext(None)
+                )
+                with temporary as gate_temp:
+                    result = (self.runner or CommandRunner(timeout=plan.timeout_seconds)).run(
+                        plan.argv, cwd=cwd,
+                        environment=self._gate_environment(plan.argv, gate_temp, root),
+                    )
+            except OSError as error:
+                raise LocalValidationError(
+                    "Não foi possível preparar ou liberar o ambiente temporário do gate",
+                    kind=LocalFailureKind.LOCAL_ENVIRONMENT_ERROR, correctable=False,
+                ) from error
             duration = monotonic() - started
             if result.failure_kind is not None:
                 kind = classify_process_failure(result.failure_kind)
@@ -154,8 +159,13 @@ class LocalValidationService:
                     re.search(r"(?i)(PermissionError|WinError\s*(?:5|32)|Permission denied|acesso negado)", evidence)
                     and re.search(r"(?i)(\.pytest_cache|pytest-of-|orch-python-gate-|[\\/]temp[\\/]|[\\/]tmp[\\/]|uv[\\/]cache|\.venv)", evidence)
                 )
+                local_infrastructure = self._is_local_infrastructure_failure(
+                    evidence, Path(gate_temp) if gate_temp is not None else None,
+                )
                 kind = (
-                    LocalFailureKind.LOCAL_ENVIRONMENT_ERROR
+                    LocalFailureKind.LOCAL_INFRASTRUCTURE
+                    if local_infrastructure
+                    else LocalFailureKind.LOCAL_ENVIRONMENT_ERROR
                     if environment_failure
                     else
                     LocalFailureKind.MISSING_REQUIRED_ENVIRONMENT
@@ -168,7 +178,7 @@ class LocalValidationService:
                     f"Gate local '{plan.name}' falhou{detail}",
                     result=gate,
                     kind=kind,
-                    correctable=not (missing_environment or environment_failure),
+                    correctable=not (missing_environment or environment_failure or local_infrastructure),
                 )
         return tuple(results)
 
@@ -177,23 +187,27 @@ class LocalValidationService:
         command = Path(arguments[0]).stem.casefold()
         return command in {
             "uv", "uvx", "pytest", "ruff", "tox", "nox", "poetry", "pdm",
-            "hatch", "coverage", "mypy", "pip", "pip3",
+            "hatch", "coverage", "mypy", "pip", "pip3", "py",
         } or re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", command) is not None
 
     @staticmethod
-    def _gate_environment(arguments: Sequence[str], temporary_directory: str | None = None,
-                          worktree: Path | None = None) -> dict[str, str] | None:
+    def _gate_environment(arguments: Sequence[str], temporary_directory: str | Path | None = None,
+                          worktree: Path | None = None, *, platform: str | None = None) -> dict[str, str]:
         """Isola opções, import paths e temporários apenas nos gates Python."""
-        if not LocalValidationService._is_python_gate(arguments):
-            return None
         environment = dict(os.environ)
+        if not LocalValidationService._is_python_gate(arguments):
+            return environment
+        selected_platform = platform or os.name
         for name in (
             "PYTHONPATH", "PYTHONHOME", "PYTHONPYCACHEPREFIX", "PYTEST_ADDOPTS",
             "PYTEST_PLUGINS", "PYTEST_DEBUG_TEMPROOT", "UV_PROJECT_ENVIRONMENT",
             "UV_CACHE_DIR", "PIP_CACHE_DIR", "RUFF_CACHE_DIR", "MYPY_CACHE_DIR",
-            "TMP", "TEMP", "TMPDIR",
+            "TMPDIR",
         ):
             environment.pop(name, None)
+        if selected_platform == "nt":
+            environment.pop("TMP", None)
+            environment.pop("TEMP", None)
         if "--active" not in arguments[1:]:
             active = environment.pop("VIRTUAL_ENV", None)
             if active:
@@ -203,15 +217,53 @@ class LocalValidationService:
                     if Path(value).resolve() not in {active_root, active_root / "Scripts", active_root / "bin"}
                 )
         if temporary_directory is not None:
-            environment.update({name: temporary_directory for name in ("TMP", "TEMP", "TMPDIR", "PYTEST_DEBUG_TEMPROOT")})
-            if any(Path(argument).stem.casefold() == "pytest" for argument in arguments):
+            names = ("TMPDIR", "PYTEST_DEBUG_TEMPROOT")
+            if selected_platform == "nt":
+                names += ("TMP", "TEMP")
+            environment.update({name: str(temporary_directory) for name in names})
+            if LocalValidationService._is_pytest_gate(arguments):
                 cache = (Path(temporary_directory) / "pytest-cache").as_posix()
-                environment["PYTEST_ADDOPTS"] = "-o " + json.dumps("cache_dir=" + cache, ensure_ascii=False)
+                basetemp = (Path(temporary_directory) / "pytest-temp").as_posix()
+                environment["PYTEST_ADDOPTS"] = (
+                    "-o " + json.dumps("cache_dir=" + cache, ensure_ascii=False)
+                    + " " + json.dumps("--basetemp=" + basetemp, ensure_ascii=False)
+                )
         if worktree is not None and "--active" not in arguments[1:]:
-            scripts = worktree / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+            scripts = worktree / ".venv" / ("Scripts" if selected_platform == "nt" else "bin")
             if scripts.is_dir() and scripts.resolve().is_relative_to(worktree.resolve()):
                 environment["PATH"] = str(scripts) + os.pathsep + environment.get("PATH", os.defpath)
-        return environment if environment != dict(os.environ) else None
+        return environment
+
+    @staticmethod
+    def _is_pytest_gate(arguments: Sequence[str]) -> bool:
+        """Reconhece somente invocações explícitas do pytest no comando do projeto."""
+        stems = [Path(argument).stem.casefold() for argument in arguments]
+        if stems[0] == "pytest":
+            return True
+        if stems[0] in {"python", "python3", "py"}:
+            return any(
+                argument == "-m" and stems[index + 1] == "pytest"
+                for index, argument in enumerate(arguments[:-1])
+            )
+        if stems[0] == "uv" and "run" in arguments[1:]:
+            run_index = arguments.index("run")
+            return "pytest" in stems[run_index + 1:]
+        return False
+
+    @staticmethod
+    def _is_local_infrastructure_failure(
+        diagnostic: str, temporary_root: Path | None
+    ) -> bool:
+        """Classifica conservadoramente falha de acesso ao temporário controlado."""
+        if temporary_root is None:
+            return False
+        normalized = diagnostic.casefold().replace("\\", "/")
+        root = temporary_root.as_posix().casefold()
+        denied = re.search(
+            r"access (?:is )?denied|permission denied|permissionerror|acesso negado|winerror\s*(?:5|32)",
+            normalized,
+        )
+        return bool(denied and root in normalized)
 
     @staticmethod
     def _summarize(diagnostic: str) -> str:
