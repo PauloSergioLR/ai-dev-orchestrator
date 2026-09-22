@@ -35,11 +35,14 @@ class FakeRunner:
     results: dict[tuple[str, ...], CommandResult]
 
     def run(self, arguments: list[str], **policies) -> CommandResult:
+        if arguments[:1] == ["git"] and "get-url" in arguments:
+            return CommandResult(0, "https://github.com/a/b.git")
         return self.results[tuple(arguments)]
 
 
 def successful_results() -> dict[tuple[str, ...], CommandResult]:
     return {
+        ("gh", "project", "field-list", "1", "--owner", "a", "--format", "json"): CommandResult(0, json.dumps({"fields": [{"id": "status", "name": "Status", "options": [{"id": str(index), "name": name} for index, name in enumerate(("Ready", "In Progress", "AI Review", "Done"))]}]})),
         ("git", "--version"): CommandResult(0, "git version 2.50.0\n"),
         ("gh", "auth", "status"): CommandResult(0),
         (
@@ -104,7 +107,7 @@ def test_all_checks_are_ok(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
 
 
 def test_command_runner_handles_missing_executable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(shutil, "which", lambda command: None)
+    monkeypatch.setattr(shutil, "which", lambda command, **kwargs: None)
     result = CommandRunner().run(["missing", "--version"])
 
     assert result.returncode is None
@@ -113,7 +116,7 @@ def test_command_runner_handles_missing_executable(monkeypatch: pytest.MonkeyPat
 
 def test_command_runner_handles_failed_process(monkeypatch: pytest.MonkeyPatch) -> None:
     completed = subprocess.CompletedProcess(["tool"], 2, b"", b"falhou")
-    monkeypatch.setattr(shutil, "which", lambda command: command)
+    monkeypatch.setattr(shutil, "which", lambda command, **kwargs: command)
     monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.run_captured", lambda *args, **kwargs: completed)
 
     result = CommandRunner().run(["tool"])
@@ -128,7 +131,7 @@ def test_command_runner_handles_utf8_output_independently_of_system_locale(
     completed = subprocess.CompletedProcess(
         ["tool"], 0, "emoji: 😀".encode(), "漢字".encode()
     )
-    monkeypatch.setattr(shutil, "which", lambda command: command)
+    monkeypatch.setattr(shutil, "which", lambda command, **kwargs: command)
     monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.run_captured", lambda *args, **kwargs: completed)
 
     result = CommandRunner().run(["tool"])
@@ -144,7 +147,7 @@ def test_command_runner_normalizes_utf8_decoding_failure(
     def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         return subprocess.CompletedProcess(args[0], 0, b"\x80", b"")
 
-    monkeypatch.setattr(shutil, "which", lambda command: command)
+    monkeypatch.setattr(shutil, "which", lambda command, **kwargs: command)
     monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.run_captured", run)
 
     result = CommandRunner().run(["tool"], stdout_policy=OutputPolicy.UTF8_STRICT)
@@ -162,7 +165,7 @@ def test_command_runner_handles_timeout(monkeypatch: pytest.MonkeyPatch) -> None
     def timeout(*args: object, **kwargs: object) -> None:
         raise subprocess.TimeoutExpired(["tool"], 5)
 
-    monkeypatch.setattr(shutil, "which", lambda command: command)
+    monkeypatch.setattr(shutil, "which", lambda command, **kwargs: command)
     monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.run_captured", timeout)
     result = CommandRunner().run(["tool"])
 
@@ -177,7 +180,7 @@ def test_command_runner_uses_safe_subprocess_options(monkeypatch: pytest.MonkeyP
         received.update(kwargs)
         return subprocess.CompletedProcess(args[0], 0, b"", b"")
 
-    monkeypatch.setattr(shutil, "which", lambda command: command)
+    monkeypatch.setattr(shutil, "which", lambda command, **kwargs: command)
     monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.run_captured", run)
     CommandRunner(timeout=7).run(["tool", "--version"], input_text=None)
 
@@ -201,7 +204,7 @@ def test_command_runner_forwards_textual_stdin_without_changing_arguments(
         received.update(kwargs)
         return subprocess.CompletedProcess(args[0], 0, b"stdout", b"stderr")
 
-    monkeypatch.setattr(shutil, "which", lambda command: r"C:\\tools\\tool.exe")
+    monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.resolve_executable", lambda command, *args: r"C:\\tools\\tool.exe")
     monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.run_captured", run)
 
     result = CommandRunner(timeout=7).run(arguments, cwd=tmp_path, input_text="texto")
@@ -232,7 +235,7 @@ def test_command_runner_preserves_unicode_stdin_bytes_without_newline_translatio
         received.update(kwargs)
         return subprocess.CompletedProcess(args[0], 0, kwargs["input"], b"")
 
-    monkeypatch.setattr(shutil, "which", lambda command: command)
+    monkeypatch.setattr(shutil, "which", lambda command, **kwargs: command)
     monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.run_captured", run)
 
     result = CommandRunner().run(["tool", "exec", "-"], input_text=payload)
@@ -253,7 +256,7 @@ def test_command_runner_normalizes_utf8_input_encoding_failure(
     def run(*args: object, **kwargs: object) -> None:
         raise UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed")
 
-    monkeypatch.setattr(shutil, "which", lambda command: command)
+    monkeypatch.setattr(shutil, "which", lambda command, **kwargs: command)
     monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.run_captured", run)
 
     result = CommandRunner().run(["tool"], input_text="\ud800")
@@ -266,7 +269,7 @@ def test_command_runner_normalizes_utf8_input_encoding_failure(
 
 def test_command_runner_forwards_explicit_cwd(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     received: dict[str, object] = {}
-    monkeypatch.setattr(shutil, "which", lambda command: command)
+    monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.resolve_executable", lambda command, *args: command)
     monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.run_captured", lambda *args, **kwargs: (received.update(kwargs), subprocess.CompletedProcess(args[0], 0, b"", b""))[1])
     CommandRunner().run(["tool"], cwd=tmp_path)
     assert received["cwd"] == tmp_path
@@ -280,11 +283,11 @@ def test_command_runner_resolves_path_executable_without_changing_arguments(
     shim_path = r"C:\tools\bin\tool.CMD"
     arguments = ["tool", "exec", "--message", "texto com espaços"]
 
-    def which(command: str) -> str:
+    def which(command: str, *args, **kwargs) -> str:
         resolved_commands.append(command)
         return shim_path
 
-    monkeypatch.setattr(shutil, "which", which)
+    monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.resolve_executable", which)
 
     def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         received["arguments"] = args[0]
@@ -322,6 +325,8 @@ def test_reports_incompatible_python(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_doctor_confirms_read_only_github_project_access(tmp_path: Path) -> None:
     runner = FakeRunner({
+        ("gh", "project", "field-list", "1", "--owner", "a", "--format", "json"): CommandResult(0, json.dumps({"fields": [{"id": "status", "name": "Status", "options": [{"id": str(index), "name": name} for index, name in enumerate(("Ready", "In Progress", "AI Review", "Done"))]}]})),
+
         (
             "gh", "project", "item-list", "1", "--owner", "a", "--limit",
             "1000", "--format", "json",
@@ -453,16 +458,16 @@ def test_accepts_antigravity_help_capabilities_from_stderr(tmp_path) -> None:
     assert check.message.startswith("agy 1.1.26;")
 
 
-def test_reports_non_git_directory() -> None:
+def test_reports_non_git_directory(tmp_path: Path) -> None:
     runner = FakeRunner({("git", "rev-parse", "--is-inside-work-tree"): CommandResult(128)})
 
-    check = DoctorService(runner)._check_repository()
+    check = DoctorService(runner, write_valid_config(tmp_path / "orchestrator.toml"))._check_repository()
 
     assert check.status is CheckStatus.ERROR
     assert "não é um repositório Git" in check.message
 
 
-def test_reports_missing_git_remote() -> None:
+def test_reports_missing_git_remote(tmp_path: Path) -> None:
     runner = FakeRunner(
         {
             ("git", "rev-parse", "--is-inside-work-tree"): CommandResult(0, "true"),
@@ -470,10 +475,10 @@ def test_reports_missing_git_remote() -> None:
         }
     )
 
-    check = DoctorService(runner)._check_repository()
+    check = DoctorService(runner, write_valid_config(tmp_path / "orchestrator.toml"))._check_repository()
 
     assert check.status is CheckStatus.ERROR
-    assert "nenhum remote" in check.message
+    assert "remote configurado não existe" in check.message
 
 
 def test_reports_missing_configuration(tmp_path: Path) -> None:

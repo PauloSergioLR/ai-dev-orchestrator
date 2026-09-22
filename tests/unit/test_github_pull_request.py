@@ -53,8 +53,9 @@ def test_rejects_invalid_or_other_repository_url(stdout: str) -> None:
 
 def test_review_data_uses_pagination_and_accepts_renamed_diff() -> None:
     metadata = '{"number":42,"url":"u","baseRefName":"main","headRefName":"f","headRefOid":"' + "a" * 40 + '","changedFiles":1,"files":[{"path":"new.py"}]}'
+    metadata = json.dumps({**json.loads(metadata), "state": "OPEN", "baseRefOid": "c" * 40})
     commits = '[[{"sha":"' + "a" * 40 + '"}],[{"sha":"' + "b" * 64 + '"}]]'
-    value, runner = adapter([CommandResult(0, metadata), CommandResult(0, commits), CommandResult(0, "diff --git a/old.py b/new.py\nsimilarity index 90%")])
+    value, runner = adapter([CommandResult(0, metadata), CommandResult(0, commits), CommandResult(0, "diff --git a/old.py b/new.py\nsimilarity index 90%"), CommandResult(0, metadata)])
     result = value.get_review_data(42)
     assert result["commits"] == ["a" * 40, "b" * 64]
     assert "--paginate" in runner.calls[1] and "--slurp" in runner.calls[1]

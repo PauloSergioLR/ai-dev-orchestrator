@@ -42,7 +42,18 @@ class Inspection:
     inconsistencies: tuple[str, ...]
 
     def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return _safe_tree(asdict(self))
+
+
+def _safe_tree(value):
+    """Inclui diagnósticos aninhados e identidades vindas de bancos históricos."""
+    if isinstance(value, str):
+        return sanitize_diagnostic_text(value)
+    if isinstance(value, dict):
+        return {key: _safe_tree(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_safe_tree(item) for item in value)
+    return value
 
 
 class InspectService:

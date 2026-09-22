@@ -126,6 +126,7 @@ class ProjectInitService:
                         for value in entries
                         if isinstance(value, dict)
                         and isinstance(value.get("number"), int)
+                        and not isinstance(value.get("number"), bool)
                         and value["number"] > 0
                     )
                 except (json.JSONDecodeError, AttributeError):
@@ -134,10 +135,11 @@ class ProjectInitService:
         suggested = None
         for name in ("AGENTS.md", "CONTRIBUTING.md", "README.md"):
             path = root / name
-            if not path.is_file():
+            if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
                 continue
             try:
-                content = path.read_text(encoding="utf-8")[:200_000]
+                with path.open(encoding="utf-8") as stream:
+                    content = stream.read(200_000)
             except (OSError, UnicodeError):
                 continue
             if re.search(
@@ -223,7 +225,7 @@ class ProjectInitService:
 def _parse_github_remote(url: str | None) -> tuple[str | None, str | None]:
     if not url:
         return None, None
-    match = re.search(r"github\.com[/:]([^/]+)/([^/]+?)(?:\.git)?$", url.strip())
+    match = re.fullmatch(r"(?:https://github\.com/|ssh://git@github\.com/|git@github\.com:)([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?", url.strip())
     return (match.group(1), match.group(2)) if match else (None, None)
 
 
@@ -251,91 +253,31 @@ def _parse_model_listing(output: str) -> tuple[str, ...]:
 
 
 def render_toml(config: OrchestratorConfig) -> str:
-    def q(value: object) -> str:
-        return json.dumps(str(value), ensure_ascii=False)
+    """Serializa todos os campos tipados, preservando defaults e overrides customizados."""
+    def value(item: object) -> str:
+        if isinstance(item, Path):
+            return json.dumps(item.as_posix(), ensure_ascii=False)
+        if isinstance(item, str):
+            return json.dumps(item, ensure_ascii=False)
+        if isinstance(item, bool):
+            return str(item).lower()
+        if isinstance(item, (int, float)):
+            return str(item)
+        if isinstance(item, (tuple, list)):
+            return "[" + ", ".join(value(child) for child in item) + "]"
+        if isinstance(item, dict):
+            return "{ " + ", ".join(
+                f"{value(key)} = {value(child)}" for key, child in item.items() if child is not None
+            ) + " }"
+        raise ProjectInitError("Tipo não suportado ao serializar configuração")
 
-    def array(values: tuple[str, ...]) -> str:
-        return "[" + ", ".join(q(value) for value in values) + "]"
-
-    def mapping(values: dict[str, str]) -> str:
-        return "{" + ", ".join(f"{q(key)} = {q(value)}" for key, value in values.items()) + "}"
-
-    required_checks = (
-        f"required_checks = {array(config.ci.required_checks)}\n"
-        if "required_checks" in config.ci.model_fields_set
-        else ""
-    )
-
-    return f"""[github]
-owner = {q(config.github.owner)}
-repository = {q(config.github.repository)}
-project_number = {config.github.project_number}
-ready_status = {q(config.github.ready_status)}
-in_progress_status = {q(config.github.in_progress_status)}
-ai_review_status = {q(config.github.ai_review_status)}
-done_status = {q(config.github.done_status)}
-pull_request_target = {q(config.github.pull_request_target)}
-protected_branches = {array(config.github.protected_branches)}
-status_field_name = {q(config.github.status_field_name)}
-status_mapping = {mapping(config.github.status_mapping)}
-
-[workspace]
-repository_path = {q(config.workspace.repository_path.as_posix())}
-worktrees_dir = {q(config.workspace.worktrees_dir.as_posix())}
-base_branch = {q(config.workspace.base_branch)}
-remote_name = {q(config.workspace.remote_name)}
-
-[providers]
-codex_model = {q(config.providers.codex_model)}
-gemini_model = {q(config.providers.gemini_model)}
-
-[execution]
-max_attempts = {config.execution.max_attempts}
-max_parallel_runs = {config.execution.max_parallel_runs}
-auto_merge = {str(config.execution.auto_merge).lower()}
-merge_timeout_seconds = {config.execution.merge_timeout_seconds}
-max_local_gate_correction_attempts = {config.execution.max_local_gate_correction_attempts}
-
-[state]
-database_path = {q(config.state.database_path.as_posix())}
-
-[ci]
-{required_checks}poll_interval_seconds = {config.ci.poll_interval_seconds}
-timeout_seconds = {config.ci.timeout_seconds}
-auto_discover = {str(config.ci.auto_discover).lower()}
-
-[convergence]
-poll_interval_seconds = {config.convergence.poll_interval_seconds}
-timeout_seconds = {config.convergence.timeout_seconds}
-
-[review]
-provider = {q(config.review.provider)}
-timeout_seconds = {config.review.timeout_seconds}
-max_correction_attempts = {config.review.max_correction_attempts}
-blocking_severities = {array(config.review.blocking_severities)}
-
-[supervisor]
-poll_interval_seconds = {config.supervisor.poll_interval_seconds}
-max_sleep_seconds = {config.supervisor.max_sleep_seconds}
-""" + (
-        f"retry_without_reset_seconds = {config.supervisor.retry_without_reset_seconds}\n"
-        if config.supervisor.retry_without_reset_seconds is not None
-        else ""
-    ) + f"""
-[notifications]
-enabled = {str(config.notifications.enabled).lower()}
-channels = {array(config.notifications.channels)}
-discord_enabled = {str(config.notifications.discord_enabled).lower()}
-telegram_enabled = {str(config.notifications.telegram_enabled).lower()}
-events = {array(config.notifications.events)}
-timeout_seconds = {config.notifications.timeout_seconds}
-retry_seconds = {config.notifications.retry_seconds}
-max_attempts = {config.notifications.max_attempts}
-""" + ("" if not config.project.gates else "\n[project]\n" + "\n".join(
-        "[[project.gates]]\n"
-        f"name = {q(gate.name)}\ncapability = {q(gate.capability)}\n"
-        f"argv = {array(gate.argv)}\ncwd = {q(gate.cwd)}\n"
-        f"timeout_seconds = {gate.timeout_seconds}\nrequired = {str(gate.required).lower()}"
-        for gate in config.project.gates
-    ) + "\n") + """
-"""
+    data = config.model_dump(mode="python")
+    # Ausência de required_checks conserva a descoberta automática do contrato.
+    if "required_checks" not in config.ci.model_fields_set:
+        data["ci"].pop("required_checks", None)
+    sections = []
+    for section, entries in data.items():
+        lines = [f"[{section}]"]
+        lines.extend(f"{key} = {value(item)}" for key, item in entries.items() if item is not None)
+        sections.append("\n".join(lines))
+    return "\n\n".join(sections) + "\n"

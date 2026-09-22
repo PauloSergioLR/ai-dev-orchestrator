@@ -218,6 +218,7 @@ class ProjectCapabilityResolver:
         jobs: list[str] = []
         directory = root / ".github" / "workflows"
         for path in sorted((*directory.glob("*.yml"), *directory.glob("*.yaml"))):
+            self._require_contained_source(root, path)
             try:
                 lines = path.read_text(encoding="utf-8").splitlines()
             except (OSError, UnicodeError):
@@ -280,10 +281,10 @@ class ProjectCapabilityResolver:
                 working = re.match(r"-?\s*working-directory:\s*[\"']?(.+?)[\"']?\s*$", stripped)
                 if working:
                     cwd = working.group(1)
-                run = re.match(r"-?\s*run:\s*[\"']?(.+?)[\"']?\s*$", stripped)
+                run = re.match(r"-?\s*run:\s*(.+?)\s*$", stripped)
                 if not run:
                     continue
-                value = run.group(1)
+                value = self._yaml_command_scalar(run.group(1))
                 commands: list[tuple[str, int]] = []
                 if value in {"|", ">", "|-", ">-"}:
                     run_indent = len(line) - len(line.lstrip())
@@ -431,8 +432,10 @@ class ProjectCapabilityResolver:
         return selected
 
     def _to_plan(self, candidate: _Candidate) -> CommandPlan:
-        risk = self._risk(candidate.name + " " + candidate.command)
         argv = self._parse_argv(candidate.command)
+        risk = self._risk(candidate.command)
+        if risk is RiskClass.SAFE_LOCAL:
+            risk = self._risk(candidate.name)
         capability = "bootstrap" if _BOOTSTRAP_WORDS.search(candidate.name) else self._capability(candidate.name)
         return CommandPlan(
             name=self._slug(candidate.name), capability=capability,
@@ -441,6 +444,20 @@ class ProjectCapabilityResolver:
             confidence=1.0 if candidate.evidence.kind == "official_ci" else 0.8,
             risk_class=risk,
         )
+
+    @staticmethod
+    def _yaml_command_scalar(value: str) -> str:
+        """Remove somente aspas externas YAML; preserva o quoting interno do argv."""
+        if len(value) >= 2 and value[0] == value[-1] == "'":
+            return value[1:-1].replace("''", "'")
+        if len(value) >= 2 and value[0] == value[-1] == '"':
+            try:
+                decoded = json.loads(value)
+            except json.JSONDecodeError:
+                # Subconjuntos YAML não compreendidos permanecem não executáveis.
+                return "${{ YAML scalar unsupported }}"
+            return decoded
+        return value
 
     @staticmethod
     def _parse_argv(command: str) -> tuple[str, ...]:
@@ -465,10 +482,14 @@ class ProjectCapabilityResolver:
     @staticmethod
     def _risk(value: str) -> RiskClass:
         lowered = value.casefold()
-        parts = lowered.split()
-        if parts and Path(parts[0]).name in {
+        try:
+            parts = ProjectCapabilityResolver._parse_argv(lowered)
+        except ContractResolutionError:
+            return RiskClass.UNKNOWN
+        executable = parts[0].replace("\\", "/").rsplit("/", 1)[-1] if parts else ""
+        if executable in {
             "sh", "bash", "zsh", "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe"
-        } and any(part in {"-c", "/c", "-command", "-encodedcommand"} for part in parts[1:]):
+        }:
             return RiskClass.UNKNOWN
         if _REMOTE_WORDS.search(value):
             return RiskClass.REMOTE_MUTATION
@@ -519,6 +540,7 @@ class ProjectCapabilityResolver:
                 for relative in listed.stdout.split("\x00"):
                     path = root / relative
                     if relative and path.is_file():
+                        self._require_contained_source(root, path)
                         yield path
                 return
         for path in root.rglob("*"):
@@ -526,7 +548,14 @@ class ProjectCapabilityResolver:
                 part in _IGNORED_DIRS or part.startswith((".pytest", ".orch"))
                 for part in path.relative_to(root).parts
             ):
+                self._require_contained_source(root, path)
                 yield path
+
+    @staticmethod
+    def _require_contained_source(root: Path, path: Path) -> None:
+        """Links não podem importar comandos de fora do repositório observado."""
+        if not path.resolve().is_relative_to(root.resolve()):
+            raise ContractResolutionError("Evidência do contrato aponta para fora do repositório")
 
     @staticmethod
     def _validate_interpreted(root: Path, plans: tuple[CommandPlan, ...]) -> list[CommandPlan]:

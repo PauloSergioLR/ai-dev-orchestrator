@@ -104,7 +104,7 @@ class CiGate:
             try:
                 snapshot = self.reader.get_ci_snapshot(pull_request_number)
             except Exception as error:
-                raise CiFailureError(
+                raise CiGateError(
                     f"Falha ao consultar a CI do Pull Request #{pull_request_number} "
                     f"para o HEAD esperado {expected_head_sha}: {error}"
                 ) from error
@@ -131,7 +131,7 @@ class CiGate:
             if status is CiStatus.FAILURE:
                 assert failed_check is not None
                 details = f"; detalhes: {failed_check.details_url}" if failed_check.details_url else ""
-                raise CiGateError(
+                raise CiFailureError(
                     f"Check obrigatório '{failed_check.name}' terminou com status "
                     f"'{failed_check.status}' e conclusão '{failed_check.conclusion}' "
                     f"para o HEAD esperado {expected_head_sha}{details}"

@@ -19,6 +19,9 @@ remote_name = "origin"
 
 [providers]
 codex_model = "default"
+codex_timeout_seconds = 7200
+codex_idle_timeout_seconds = 1800
+codex_heartbeat_seconds = 60
 gemini_model = "default"
 
 [code_review_graph]

@@ -101,12 +101,20 @@ def test_remote_commit_is_both_worktree_origin_and_frozen_contract(tmp_path: Pat
     )
     store = SqliteExecutionStore(config.state.database_path)
     world = World()
+
+    class SyntheticRemoteGit(GitWorktreeAdapter):
+        def verify_remote_identity(self, repository, remote_name, expected_repository):
+            # Associação explícita da fixture: Git continua real e restrito ao bare local.
+            assert expected_repository == "acme/repo"
+            for extra in ((), ("--push",)):
+                assert Path(git("remote", "get-url", *extra, "--all", remote_name, cwd=repository)) == remote
+
     pipeline = RunPipeline(
         config,
         world,
         world,
         world,
-        GitWorktreeAdapter(),
+        SyntheticRemoteGit(),
         Codex(),
         execution_store=store,
         resolve_contract_at_start=True,

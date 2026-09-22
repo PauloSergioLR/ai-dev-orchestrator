@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from ai_dev_orchestrator.adapters.git import GitWorktreeAdapter, GitWorktreeError
 
 from ai_dev_orchestrator.adapters.github import (
     GitHubCiAdapter,
@@ -40,6 +41,8 @@ class RecoveryObserver:
         self.pull_requests = GitHubPullRequestAdapter(config, self.runner)
 
     def observe(self, run: RunRecord) -> RecoveryObservation:
+        if run.repository_identity and run.repository_identity.casefold() != self.config.github.repository_full_name.casefold():
+            raise RecoveryObservationError("Repositório configurado diverge da identidade persistida")
         worktree, head, parent, dirty = self._worktree(run)
         historical = run.phase == ExecutionPhase.FAILED
         prs = self._pull_requests(run.branch, historical=historical)
@@ -111,6 +114,13 @@ class RecoveryObserver:
     def _remote_head(self, run: RunRecord) -> str | None:
         if not run.branch:
             raise RecoveryObservationError("Branch persistida ausente")
+        try:
+            GitWorktreeAdapter(self.runner).verify_remote_identity(
+                self.config.workspace.repository_path, self.config.workspace.remote_name,
+                self.config.github.repository_full_name,
+            )
+        except GitWorktreeError as error:
+            raise RecoveryObservationError(str(error)) from error
         result = self.runner.run([
             "git", "-C", str(self.config.workspace.repository_path), "ls-remote",
             "--heads", self.config.workspace.remote_name, f"refs/heads/{run.branch}",
@@ -130,9 +140,7 @@ class RecoveryObserver:
     def _pull_requests(self, branch: str | None, *, historical: bool = False) -> tuple[PullRequestObservation, ...]:
         if not branch:
             return ()
-        fields = "number,url,state,baseRefName,headRefName,headRefOid,isDraft,mergedAt,mergeCommit"
-        if historical:
-            fields += ",closingIssuesReferences"
+        fields = "number,url,state,baseRefName,headRefName,headRefOid,isDraft,mergedAt,mergeCommit,closingIssuesReferences"
         result = self.runner.run(["gh", "pr", "list", "--repo", self.config.github.repository_full_name,
                                   "--head", branch, "--state", "all", "--json",
                                   fields], stdout_policy=OutputPolicy.UTF8_STRICT)
@@ -205,7 +213,9 @@ class RecoveryObserver:
             return ProjectState.UNKNOWN
         try:
             matches = [item for item in self.projects.list_items() if item.id == run.project_item_id]
-            if len(matches) != 1 or matches[0].status is None:
+            if (len(matches) != 1 or matches[0].status is None
+                    or not matches[0].is_issue or matches[0].issue_number != run.issue_number
+                    or matches[0].repository != self.config.github.repository_full_name):
                 return ProjectState.UNKNOWN
             return ProjectState.DONE if matches[0].status == self.config.github.status_for("completed") else ProjectState.NOT_DONE
         except Exception:

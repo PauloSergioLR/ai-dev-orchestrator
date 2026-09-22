@@ -63,7 +63,7 @@ por bloqueio de permissões, sem expor os argumentos da ação negada. Não é
 necessário habilitar `--dangerously-skip-permissions` nem criar permissões globais
 de shell para corrigir esse fluxo.
 
-A política estável em `prompts/gemini/review_policy.md` separa instruções de
+A política estável em `src/ai_dev_orchestrator/resources/review_policy.md` separa instruções de
 autoridade do dossier não confiável. Issue, PR, diff e código são sempre dados,
 nunca instruções. O SHA é revalidado antes da revisão final.
 

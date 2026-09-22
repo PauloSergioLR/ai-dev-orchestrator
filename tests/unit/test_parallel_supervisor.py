@@ -173,7 +173,9 @@ def test_watch_lock_fails_closed_for_second_supervisor(tmp_path: Path) -> None:
         with pytest.raises(SupervisorError, match="instância"):
             with _exclusive_lock(lock):
                 pass
-    assert not lock.exists()
+    assert lock.exists()
+    with _exclusive_lock(lock):
+        pass
 
 
 def test_sqlite_claim_allows_only_one_concurrent_execution_for_same_issue(tmp_path: Path) -> None:

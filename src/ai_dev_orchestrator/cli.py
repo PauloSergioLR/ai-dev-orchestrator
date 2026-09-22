@@ -20,6 +20,8 @@ from ai_dev_orchestrator.infrastructure.database import (
     ExecutionStoreError,
     SqliteExecutionStore,
 )
+from ai_dev_orchestrator.infrastructure.ownership import OwnershipError
+from ai_dev_orchestrator.infrastructure.redaction import sanitize_diagnostic
 from ai_dev_orchestrator.services.resume import ResumeError, ResumeService
 from ai_dev_orchestrator.services.work import WorkError, WorkService, branch_from_title
 from ai_dev_orchestrator.services.init_project import ProjectInitError, ProjectInitService
@@ -28,7 +30,7 @@ from ai_dev_orchestrator.config import OrchestratorConfig
 from ai_dev_orchestrator.adapters.git import GitWorktreeAdapter
 from ai_dev_orchestrator.adapters.github import GitHubIssueAdapter, GitHubIssueError
 from ai_dev_orchestrator.adapters.notifications import EnvironmentNotificationAdapter, missing_environment
-from ai_dev_orchestrator.services.cleanup import CleanupService
+from ai_dev_orchestrator.services.cleanup import CleanupError, CleanupService
 from ai_dev_orchestrator.services.contract_recovery import (
     ContractRecoveryError,
     ContractRecoveryService,
@@ -46,6 +48,7 @@ from ai_dev_orchestrator.services.project_discovery import (
 app = typer.Typer(
     help="Orquestrador local-first de desenvolvimento com IA.",
     add_completion=False,
+    pretty_exceptions_show_locals=False,
 )
 notifications_app = typer.Typer(help="Testa providers externos configurados.")
 app.add_typer(notifications_app, name="notifications")
@@ -131,7 +134,7 @@ def test_notifications() -> None:
     try:
         config = load_config()
     except ConfigurationError as error:
-        typer.echo(f"Erro: {error}", err=True)
+        typer.echo(f"Erro: {sanitize_diagnostic(str(error))}", err=True)
         raise typer.Exit(code=1) from error
     policy = config.notifications
     if not policy.enabled:
@@ -171,7 +174,7 @@ def init_project(
     try:
         found = service.discover(Path.cwd())
     except ProjectInitError as error:
-        typer.echo(f"Erro: {error}", err=True)
+        typer.echo(f"Erro: {sanitize_diagnostic(str(error))}", err=True)
         raise typer.Exit(code=1) from error
     path = found.repository_path / "orchestrator.toml"
     existing = None
@@ -179,7 +182,7 @@ def init_project(
         try:
             existing = load_config(path)
         except ConfigurationError as error:
-            typer.echo(f"Erro: {error}", err=True)
+            typer.echo(f"Erro: {sanitize_diagnostic(str(error))}", err=True)
             raise typer.Exit(code=1) from error
         if existing.workspace.repository_path.resolve() != found.repository_path:
             raise typer.BadParameter(
@@ -391,7 +394,7 @@ def init_project(
         config = OrchestratorConfig(**values)
         service.write(path, config)
     except (ValueError, ProjectInitError) as error:
-        typer.echo(f"Erro: {error}", err=True)
+        typer.echo(f"Erro: {sanitize_diagnostic(str(error))}", err=True)
         raise typer.Exit(code=1) from error
     typer.echo(f"Configuração salva em {path}")
 
@@ -425,7 +428,7 @@ def watch() -> None:
         WorkError,
         SupervisorError,
     ) as error:
-        typer.echo(f"Erro: {error}", err=True)
+        typer.echo(f"Erro: {sanitize_diagnostic(str(error))}", err=True)
         raise typer.Exit(code=1) from error
 
 
@@ -451,7 +454,7 @@ def run(
             raise typer.BadParameter("--branch não pode ser vazia", param_hint="--branch")
         result = RunPipeline.from_config(config).run(issue, selected_branch)
     except (ConfigurationError, GitHubIssueError, RunPipelineError) as error:
-        typer.echo(f"Erro: {error}", err=True)
+        typer.echo(f"Erro: {sanitize_diagnostic(str(error))}", err=True)
         raise typer.Exit(code=1) from error
     _show_run_result(result)
 
@@ -465,8 +468,8 @@ def state(
         record = SqliteExecutionStore(
             load_config().state.database_path
         ).get_latest_for_issue(issue)
-    except (ConfigurationError, ExecutionStoreError) as error:
-        typer.echo(f"Erro: {error}", err=True)
+    except (ConfigurationError, ExecutionStoreError, OwnershipError) as error:
+        typer.echo(f"Erro: {sanitize_diagnostic(str(error))}", err=True)
         raise typer.Exit(code=1) from error
     if record is None:
         typer.echo(f"Nenhuma execução encontrada para a Issue #{issue}.")
@@ -506,8 +509,8 @@ def inspect(
     """Diagnostica uma execução local sem alterar SQLite, providers ou Git."""
     try:
         diagnosis = InspectService.from_database(load_config().state.database_path).inspect(issue)
-    except (ConfigurationError, ExecutionStoreError) as error:
-        typer.echo(f"Erro: {error}", err=True)
+    except (ConfigurationError, ExecutionStoreError, OwnershipError) as error:
+        typer.echo(f"Erro: {sanitize_diagnostic(str(error))}", err=True)
         raise typer.Exit(code=1) from error
     if diagnosis is None:
         typer.echo(f"Nenhuma execução encontrada para a Issue #{issue}.", err=True)
@@ -571,8 +574,8 @@ def history(
     try:
         config = load_config()
         entries = HistoryService(SqliteExecutionStore(config.state.database_path)).list(issue)
-    except (ConfigurationError, ExecutionStoreError) as error:
-        typer.echo(f"Erro: {error}", err=True)
+    except (ConfigurationError, ExecutionStoreError, OwnershipError) as error:
+        typer.echo(f"Erro: {sanitize_diagnostic(str(error))}", err=True)
         raise typer.Exit(code=1) from error
     if not entries:
         typer.echo("Nenhuma execução encontrada.")
@@ -618,8 +621,8 @@ def cleanup(
         result = CleanupService(config, store, GitWorktreeAdapter()).cleanup(
             record.id, quarantine_orphan=quarantine_orphan
         )
-    except (ConfigurationError, ExecutionStoreError) as error:
-        typer.echo(f"Erro: {error}", err=True)
+    except (ConfigurationError, ExecutionStoreError, OwnershipError, CleanupError) as error:
+        typer.echo(f"Erro: {sanitize_diagnostic(str(error))}", err=True)
         raise typer.Exit(code=1) from error
     typer.echo(f"Cleanup {result.status}: {result.detail}")
 
@@ -647,8 +650,8 @@ def recover_contract(
         run = service.recover(
             issue, expected_fingerprint=preview.recovered.fingerprint
         )
-    except (ConfigurationError, ExecutionStoreError, ContractRecoveryError) as error:
-        typer.echo(f"Erro: {error}", err=True)
+    except (ConfigurationError, ExecutionStoreError, ContractRecoveryError, OwnershipError) as error:
+        typer.echo(f"Erro: {sanitize_diagnostic(str(error))}", err=True)
         raise typer.Exit(code=1) from error
     typer.echo(
         f"Contrato recuperado na execução {run.id}: {run.contract_fingerprint}"
@@ -692,7 +695,7 @@ def resume(
             options["resume_publication"] = True
         result = service.resume(issue, **options)
     except (ConfigurationError, ResumeError, ExecutionStoreError) as error:
-        typer.echo(f"Erro: {error}", err=True)
+        typer.echo(f"Erro: {sanitize_diagnostic(str(error))}", err=True)
         raise typer.Exit(code=1) from error
     typer.echo(f"Issue: #{result.issue_number}")
     typer.echo(f"Execução: {result.execution_id}")
@@ -719,8 +722,8 @@ def supersede(
             typer.echo("Supersessão cancelada; nenhuma alteração foi feita.")
             return
         result = service.supersede(issue, reason)
-    except (ConfigurationError, ExecutionStoreError, SupersessionError) as error:
-        typer.echo(f"Erro: {error}", err=True)
+    except (ConfigurationError, ExecutionStoreError, SupersessionError, OwnershipError) as error:
+        typer.echo(f"Erro: {sanitize_diagnostic(str(error))}", err=True)
         raise typer.Exit(code=1) from error
     typer.echo(f"Execução {result.id} supersedida; histórico preservado.")
 
@@ -737,7 +740,7 @@ def work() -> None:
         RunPipelineError,
         WorkError,
     ) as error:
-        typer.echo(f"Erro: {error}", err=True)
+        typer.echo(f"Erro: {sanitize_diagnostic(str(error))}", err=True)
         raise typer.Exit(code=1) from error
     if result is None:
         typer.echo("Nenhuma Issue Ready elegível.")

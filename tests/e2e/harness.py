@@ -129,7 +129,8 @@ class LocalWorld:
 
     def pull_request(self, run: RunRecord, state: PullRequestState) -> PullRequestObservation:
         return PullRequestObservation(
-            1, PR_URL, "acme/repo", "main", run.branch or "", self.remote_head or "", state
+            1, PR_URL, "acme/repo", "main", run.branch or "", self.remote_head or "", state,
+            issue_numbers=(run.issue_number,),
         )
 
 
@@ -172,7 +173,8 @@ def make_service(
 ) -> tuple[SqliteExecutionStore, ResumeService, RunRecord]:
     store = SqliteExecutionStore(database_path or tmp_path / f"e2e-{issue}.db")
     run = store.create(issue, project_item_id=f"item-{issue}", branch=f"work/issue-{issue}",
-                       worktree_path=f"C:/e2e/{issue}", base_ref="main")
+                       worktree_path=str(tmp_path / f"worktree-{issue}"), base_ref="main",
+                       base_sha=world.initial_head, repository_identity="acme/repo")
     policy = RecoveryPolicy("acme/repo", "main", True, 3)
     service = ResumeService(store, WorldObserver(world), RecoveryPlanner(policy), RecoveryExecutor(policy, store, world))
     return store, service, run

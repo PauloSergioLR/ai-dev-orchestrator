@@ -9,6 +9,7 @@ from ai_dev_orchestrator.config import OrchestratorConfig
 from ai_dev_orchestrator.domain.execution import ExecutionPhase, RunRecord
 from ai_dev_orchestrator.domain.recovery import MergeState, PullRequestState, RecoveryObservation
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
+from ai_dev_orchestrator.infrastructure.ownership import OwnershipError
 from ai_dev_orchestrator.services.recovery_observer import RecoveryObservationError, RecoveryObserver
 
 
@@ -95,11 +96,19 @@ class SupersessionService:
         return SupersessionPreview(run, observation.remote_head_sha, pull_request.state)
 
     def supersede(self, issue_number: int, reason: str) -> RunRecord:
+        try:
+            with self.store.ownership(issue_number):
+                return self._supersede_owned(issue_number, reason)
+        except OwnershipError as error:
+            raise SupersessionError("Outra operação já controla esta Issue") from error
+
+    def _supersede_owned(self, issue_number: int, reason: str) -> RunRecord:
         preview = self.preview(issue_number)
         text = reason.strip()
         if not text:
             raise SupersessionError("O motivo da supersessão é obrigatório")
         return self.store.supersede(
             preview.run.id,
+            expected=preview.run,
             summary=("Execução supersedida por decisão humana; motivo: " + text + "; " + preview.evidence),
         )

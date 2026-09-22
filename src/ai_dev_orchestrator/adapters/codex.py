@@ -21,7 +21,8 @@ from ai_dev_orchestrator.domain.provider import (
 )
 
 
-CODEX_TIMEOUT_SECONDS = 30 * 60
+CODEX_TIMEOUT_SECONDS = 2 * 60 * 60
+CODEX_IDLE_TIMEOUT_SECONDS = 30 * 60
 logger = logging.getLogger(__name__)
 
 
@@ -64,9 +65,10 @@ class CodexAdapter:
         model: str = "default",
         code_review_graph_command: tuple[str, ...] = (),
         progress: Callable[[str], None] | None = None,
-        heartbeat_seconds: float = 300,
+        heartbeat_seconds: float = 60,
+        idle_timeout: float = CODEX_IDLE_TIMEOUT_SECONDS,
     ) -> None:
-        self.runner = runner if runner is not None else CommandRunner(timeout=timeout)
+        self.runner = runner if runner is not None else CommandRunner(timeout=timeout, idle_timeout=idle_timeout)
         self.model = model
         self.code_review_graph_command = code_review_graph_command
         self.progress = progress
@@ -143,7 +145,13 @@ class CodexAdapter:
     def _run(self, arguments: list[str], input_text: str, operation: str,
              expected_session: str | None = None) -> tuple[CommandResult, str | None, str]:
         label = "Codex" if operation == "executar" else "Retomada Codex"
-        with heartbeat(label, self.progress, self.heartbeat_seconds):
+        def activity_detail() -> str:
+            if not isinstance(self.runner, CommandRunner):
+                return "atividade de saída indisponível"
+            count, idle_seconds = self.runner.activity.snapshot()
+            return f"saída observada={count} bytes; sem saída há {int(idle_seconds)}s"
+
+        with heartbeat(label, self.progress, self.heartbeat_seconds, detail=activity_detail):
             result = self.runner.run(
                 arguments,
                 input_text=input_text,
@@ -324,15 +332,16 @@ class CodexAdapter:
     @staticmethod
     def _terminal_state(events: list[dict[str, Any]]) -> str:
         """Distingue conclusão, falha e protocolo ambíguo sem usar erros intermediários."""
-        completed = any(event.get("type") == "turn.completed" for event in events)
-        failed = any(event.get("type") == "turn.failed" for event in events)
-        if completed and failed:
-            return "ambiguous"
-        if completed:
-            return "turn.completed"
-        if failed:
-            return "turn.failed"
-        return "none"
+        terminal = "none"
+        for event in events:
+            kind = event.get("type")
+            if kind == "turn.started":
+                terminal = "none"
+            elif kind in {"turn.completed", "turn.failed"}:
+                if terminal not in {"none", kind}:
+                    return "ambiguous"
+                terminal = kind
+        return terminal
 
     @staticmethod
     def _diagnostic_context(events: list[dict[str, Any]], terminal: str,
@@ -363,6 +372,9 @@ class CodexAdapter:
         completed = False
         for event in events:
             has_event = True
+            if event.get("type") == "turn.started":
+                completed = False
+                final_message = None
             if event.get("type") == "thread.started":
                 session_id = cls._required_string(event, "thread_id", "thread.started")
             if event.get("type") == "item.completed":

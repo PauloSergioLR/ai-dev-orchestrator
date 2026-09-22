@@ -10,7 +10,7 @@ import pytest
 from ai_dev_orchestrator.adapters.antigravity import AntigravityAdapter
 from ai_dev_orchestrator.domain.review import ReviewDossier
 from ai_dev_orchestrator.services.review import (
-    REVIEW_PLAN_SCHEMA, STRUCTURED_REVIEW_SCHEMA, build_prompt, parse_review_plan, parse_structured_review,
+    REVIEW_PLAN_SCHEMA, STRUCTURED_REVIEW_SCHEMA, build_prompt, parse_review_plan, parse_structured_review, load_review_policy,
 )
 
 
@@ -52,7 +52,7 @@ def test_installed_cli_reviews_dossier_with_production_policy():
         local_gates=("ruff: SUCCESS", "pytest: SUCCESS", "diff_check: SUCCESS"),
         ci_checks=("test: COMPLETED/SUCCESS",), ci_status="SUCCESS",
     )
-    policy = (Path(__file__).parents[2] / "prompts/gemini/review_policy.md").read_text(encoding="utf-8")
+    policy = load_review_policy()
     with tempfile.TemporaryDirectory(prefix="orch-dossier-", ignore_cleanup_errors=True) as folder:
         plan = parse_review_plan(adapter.invoke(build_prompt(policy, dossier), folder, REVIEW_PLAN_SCHEMA))
         review = parse_structured_review(

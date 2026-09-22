@@ -51,7 +51,7 @@ def pull_request(**changes: object) -> PullRequestObservation:
     values: dict[str, object] = {
         "number": 37, "url": PR_URL, "repository_full_name": POLICY.repository_full_name,
         "base": POLICY.pull_request_base, "head_branch": BRANCH, "head_sha": HEAD,
-        "state": PullRequestState.OPEN,
+        "state": PullRequestState.OPEN, "issue_numbers": (37,),
     }
     values.update(changes)
     return PullRequestObservation(**values)  # type: ignore[arg-type]
@@ -260,8 +260,10 @@ def test_project_done_requires_proven_persisted_merge(record_changes: dict[str, 
     ],
 )
 def test_project_done_runs_only_after_proven_merge(project_state: ProjectState, action: RecoveryAction, next_phase: ExecutionPhase | None) -> None:
-    record = run(ExecutionPhase.PROJECT_DONE_PENDING, project_item_id="item", reviewed_head_sha=HEAD, merged_head_sha=HEAD, merge_commit_sha=OTHER)
-    decision = plan(record, observed(project_state=project_state))
+    record = published_run(ExecutionPhase.PROJECT_DONE_PENDING, project_item_id="item", reviewed_head_sha=HEAD, merged_head_sha=HEAD, merge_commit_sha=OTHER)
+    decision = plan(record, observed(project_state=project_state,
+        pull_requests=(pull_request(state=PullRequestState.MERGED),),
+        merge=MergeObservation(MergeState.MERGED, HEAD, OTHER)))
     assert (decision.action, decision.next_phase) == (action, next_phase)
 
 
@@ -310,3 +312,31 @@ def test_needs_changes_blocks_at_correction_limit() -> None:
 def test_merge_requires_current_pr_ci_head_and_merge_state(snapshot: RecoveryObservation, action: RecoveryAction) -> None:
     record = published_run(ExecutionPhase.MERGE_PENDING, reviewed_head_sha=HEAD, review_verdict="APPROVED")
     assert plan(record, snapshot).action == action
+
+
+def test_recovery_recusa_troca_do_repositorio_configurado():
+    assert plan(run(ExecutionPhase.TESTING, repository_identity="outro/repo"), observed()).action == RecoveryAction.BLOCK
+
+
+@pytest.mark.parametrize("snapshot", [observed(remote_head_sha=HEAD), with_pr()])
+def test_preparacao_recusa_publicacao_inesperada(snapshot):
+    assert plan(run(ExecutionPhase.PREPARING), snapshot).action == RecoveryAction.BLOCK
+
+
+@pytest.mark.parametrize("phase", [ExecutionPhase.PUSH_PENDING, ExecutionPhase.PR_PENDING, ExecutionPhase.WAITING_CI,
+                                  ExecutionPhase.GEMINI_REVIEWING, ExecutionPhase.MERGE_PENDING])
+def test_publicacao_review_e_merge_recusam_worktree_sujo(phase):
+    record = published_run(phase, reviewed_head_sha=HEAD, review_verdict="APPROVED")
+    snapshot = with_pr(has_worktree_changes=True, remote_head_sha=HEAD,
+                       ci=CiObservation(CiState.SUCCESS, HEAD), merge=MergeObservation(MergeState.OPEN))
+    assert plan(record, snapshot).action == RecoveryAction.BLOCK
+
+
+@pytest.mark.parametrize("merge", [MergeObservation(), MergeObservation(MergeState.OPEN),
+    MergeObservation(MergeState.MERGED, OTHER, THIRD), MergeObservation(MergeState.MERGED, HEAD, THIRD)])
+def test_project_done_exige_merge_remoto_atual(merge):
+    record = published_run(ExecutionPhase.PROJECT_DONE_PENDING, project_item_id="item",
+        reviewed_head_sha=HEAD, merged_head_sha=HEAD, merge_commit_sha=OTHER)
+    snapshot = observed(project_state=ProjectState.DONE, merge=merge,
+        pull_requests=(pull_request(state=PullRequestState.MERGED),))
+    assert plan(record, snapshot).action == RecoveryAction.BLOCK

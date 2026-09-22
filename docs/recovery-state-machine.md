@@ -103,10 +103,11 @@ pai imediato do HEAD local. Relações ancestrais arbitrárias não bastam. O fa
 de o worktree estar dirty inclui arquivos novos: a validação de conteúdo cabe
 aos gates do executor, não ao planner.
 
-`PROJECT_DONE_PENDING` somente pode marcar o projeto depois de merge comprovado
-no record: item de projeto, SHA revisado, SHA merged igual ao revisado e commit
-de merge precisam estar presentes. Isso impede marcar Done após uma observação
-incompleta ou após merge não persistido.
+`PROJECT_DONE_PENDING` exige merge persistido e novamente comprovado remotamente:
+o mesmo PR deve estar merged, com o mesmo HEAD e commit de merge. O item do Project
+deve pertencer à mesma Issue e repositório. Para merge interno, o HEAD corresponde
+à review; para merge externo reconciliado, ao HEAD da execução. A indisponibilidade
+da prova bloqueia tanto marcar Done quanto completar um item que já está Done.
 
 Em `HUMAN_REQUIRED`, uma observação inequívoca de PR mergeado com repositório,
 base, branch, número, URL e HEAD esperados, mais merge commit conhecido, substitui
@@ -258,6 +259,34 @@ commit. Sem diff, a mesma sessão recebe uma retomada limitada; o contador e a
 mensagem final sanitizada são persistidos. Ao esgotar o limite, `NO_CHANGES`
 leva a `HUMAN_REQUIRED` sem tentar commit vazio nem criar nova sessão.
 
-Codex e Gemini mantêm timeout finito e emitem início, heartbeat espaçado a cada
-cinco minutos e conclusão. Gates locais anunciam nome e resultado. Essas linhas
-não contêm prompt, JSONL, stderr ou conteúdo do dossier.
+Codex e Gemini mantêm timeout finito e emitem início, heartbeat e conclusão.
+O Codex usa por padrão heartbeat de 60 s, limite total de 7200 s e de silêncio
+de 1800 s, configuráveis em `[providers]`; Gemini mantém heartbeat de 300 s.
+Gates locais anunciam nome e resultado. Essas linhas não contêm prompt, JSONL,
+stderr ou conteúdo do dossier.
+
+## Exclusão concorrente e limpeza conservadora
+
+Pipeline, resume, reconciliação, supersessão, recuperação de contrato e cleanup
+mantêm um lock do kernel por banco e Issue durante efeitos e checkpoints. O lock
+é reentrante apenas na mesma thread. Issues diferentes podem operar em paralelo
+até a capacidade global validada atomicamente no SQLite. O lock de `watch` também
+é liberado pelo kernel após crash. Arquivos `.locks` remanescentes são normais:
+sua existência não indica execução ativa e não devem ser removidos para destravar.
+Todas as instâncias que coordenam o mesmo repositório devem usar o mesmo banco
+local e esta versão do programa; não há coordenação entre bancos independentes.
+
+Identidades já atribuídas não mudam por checkpoint. Alterar HEAD invalida provas
+de CI/review/merge do HEAD anterior. Review, findings e journal são transacionais.
+Uma prova de supersessão ou contrato não é aplicada se o record observado mudou.
+PREPARING exige base imutável e ausência de publicação inesperada. Um PR descoberto
+sem número persistido só é adotado com vínculo exclusivo à Issue da execução.
+
+Cleanup exige repositório, caminho sob `worktrees_dir`, ausência de links/junctions,
+branch e SHA atuais correspondentes ao record. Arquivos não versionados e ignorados
+(inclusive `.venv` e caches) deixam cleanup pendente; conteúdo desconhecido é
+preservado. Exclusão remota compara o SHA no servidor; exclusão local compara o
+SHA em `update-ref` e exige integração ao HEAD local. Se a base local ainda estiver
+atrasada, a branch fica preservada. Merge/cleanup automáticos continuam desativados
+por padrão. Registros antigos sem provas suficientes permanecem bloqueados, sem
+adotar uma identidade por suposição.

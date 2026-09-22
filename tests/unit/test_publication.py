@@ -3,7 +3,6 @@
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
-import shutil
 import subprocess
 
 import pytest
@@ -76,7 +75,7 @@ def test_uv_gate_does_not_inherit_virtualenv_from_another_checkout(
     monkeypatch.setenv("PYTHONPATH", str(tmp_path.parent / "checkout-principal"))
     monkeypatch.setenv("PATH", "caminho-preservado")
     monkeypatch.setenv("PROJECT_AUTH_TOKEN", "preservar")
-    monkeypatch.setattr(shutil, "which", lambda command: command)
+    monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.resolve_executable", lambda command, *args: command)
     monkeypatch.setattr(
         "ai_dev_orchestrator.infrastructure.process.run_captured", run
     )
@@ -199,15 +198,19 @@ def test_non_python_gate_preserves_generic_environment_without_pytest_isolation(
     assert not list(tmp_path.glob(".orch-gate-*"))
 
 
+@pytest.mark.parametrize("failure", [
+    "PermissionError: Access is denied", "PermissionError",
+    "OSError: [WinError 32] File in use",
+])
 def test_access_denied_in_controlled_temporary_is_infrastructure_failure(
-    tmp_path: Path,
+    tmp_path: Path, failure: str,
 ) -> None:
     class Runner:
         def run(self, _arguments, cwd=None, *, environment=None):
             root = environment["PYTEST_DEBUG_TEMPROOT"]
             return CommandResult(
                 1,
-                stderr="x" * 600 + f" PermissionError: Access is denied: '{root}'",
+                stderr="x" * 600 + f" {failure}: '{root}'",
             )
 
     plan = CommandPlan("testes", "unit", "Testes", ("pytest", "-q"))

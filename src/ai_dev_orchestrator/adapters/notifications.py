@@ -1,6 +1,7 @@
 """Canais operacionais; credenciais são lidas do ambiente e não persistidas."""
 
 import json
+import math
 import os
 import smtplib
 import ssl
@@ -9,6 +10,7 @@ from email.message import EmailMessage
 from urllib.error import HTTPError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+from ai_dev_orchestrator.infrastructure.redaction import redact_secrets
 
 REQUIRED_ENV = {
     "email": ("ORCH_SMTP_HOST", "ORCH_SMTP_USER", "ORCH_SMTP_PASSWORD", "ORCH_EMAIL_FROM", "ORCH_EMAIL_TO"),
@@ -73,7 +75,13 @@ class _HttpNotificationProvider(NotificationProvider):
             if error.code != 429:
                 raise ValueError(f"Provider recusou a entrega (HTTP {error.code})") from None
             # Discord e Telegram devolvem Retry-After; tenta uma vez, sempre limitada.
-            retry_after = min(float(error.headers.get("Retry-After", "1")), self.timeout)
+            try:
+                retry_after = float(error.headers.get("Retry-After", "1"))
+            except (ValueError, TypeError):
+                retry_after = 1.0
+            if not math.isfinite(retry_after):
+                retry_after = 1.0
+            retry_after = min(retry_after, self.timeout)
             time.sleep(max(0, retry_after))
             with opener.open(request, timeout=self.timeout) as response:
                 return response.read(65536)
@@ -90,7 +98,7 @@ class DiscordWebhookProvider(_HttpNotificationProvider):
             raise ValueError("Endpoint Discord inválido")
         parts = urlsplit(url)
         url = urlunsplit((parts.scheme, parts.netloc, parts.path, "wait=true", ""))
-        self._post(url, {"content": message, "allowed_mentions": {"parse": []}})
+        self._post(url, {"content": redact_secrets(message), "allowed_mentions": {"parse": []}})
 
 
 class TelegramBotProvider(_HttpNotificationProvider):
@@ -101,10 +109,11 @@ class TelegramBotProvider(_HttpNotificationProvider):
         chat_id = os.environ.get("ORCH_TELEGRAM_CHAT_ID")
         if not token or not chat_id:
             raise ValueError("Configuração de ambiente incompleta")
-        response = self._post("https://api.telegram.org/bot" + token + "/sendMessage", {"chat_id": chat_id, "text": message})
+        response = self._post("https://api.telegram.org/bot" + token + "/sendMessage", {"chat_id": chat_id, "text": redact_secrets(message)})
         try:
-            accepted = json.loads(response).get("ok") is True
-        except json.JSONDecodeError:
+            payload = json.loads(response)
+            accepted = isinstance(payload, dict) and payload.get("ok") is True
+        except (json.JSONDecodeError, UnicodeDecodeError):
             accepted = False
         if not accepted:
             raise ValueError("Entrega Telegram recusada; confira token e chat_id")
@@ -122,7 +131,7 @@ class EnvironmentNotificationAdapter:
             mail = EmailMessage()
             mail["Subject"] = "AI Dev Orchestrator: intervenção humana necessária"
             mail["From"], mail["To"] = env["ORCH_EMAIL_FROM"], env["ORCH_EMAIL_TO"]
-            mail.set_content(message)
+            mail.set_content(redact_secrets(message))
             with smtplib.SMTP(env["ORCH_SMTP_HOST"], int(env.get("ORCH_SMTP_PORT", "587")), timeout=self.timeout) as smtp:
                 smtp.starttls(context=ssl.create_default_context())
                 smtp.login(env["ORCH_SMTP_USER"], env["ORCH_SMTP_PASSWORD"])

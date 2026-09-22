@@ -1,11 +1,12 @@
 """Store SQLite local para checkpoints auditáveis de execuções."""
 
 from __future__ import annotations
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-import re
-import os
 import sqlite3
+from time import monotonic, sleep
+from typing import Iterator
 from uuid import uuid4
 from ai_dev_orchestrator.domain.execution import (
     ExecutionEvent,
@@ -15,6 +16,7 @@ from ai_dev_orchestrator.domain.execution import (
     validate_transition,
 )
 from ai_dev_orchestrator.domain.review import ReviewFinding, ReviewVerdict, StructuredReview
+from ai_dev_orchestrator.infrastructure.redaction import redact_secrets
 
 SCHEMA_VERSION = 6
 _SUMMARY_LIMIT = 500
@@ -39,7 +41,8 @@ class SqliteExecutionStore:
         self.database_path, self.timeout_seconds, self.read_only = database_path, timeout_seconds, read_only
         self._initialize()
 
-    def _connection(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
         if self.read_only:
             connection = sqlite3.connect(
                 f"{self.database_path.resolve().as_uri()}?mode=ro",
@@ -48,10 +51,22 @@ class SqliteExecutionStore:
             )
         else:
             connection = sqlite3.connect(self.database_path, timeout=self.timeout_seconds)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute(f"PRAGMA busy_timeout = {int(self.timeout_seconds * 1000)}")
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute(f"PRAGMA busy_timeout = {int(self.timeout_seconds * 1000)}")
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
+    def ownership(self, issue_number: int):
+        """Exclui efeitos concorrentes da mesma Issue, inclusive entre services."""
+        from ai_dev_orchestrator.infrastructure.ownership import exclusive_ownership
+        database = self.database_path.resolve()
+        return exclusive_ownership(
+            database.with_name(database.name + ".locks") / f"issue-{issue_number}.lock"
+        )
 
     def _initialize(self) -> None:
         try:
@@ -64,7 +79,8 @@ class SqliteExecutionStore:
                 return
             self.database_path.parent.mkdir(parents=True, exist_ok=True)
             with self._connection() as c:
-                c.execute("PRAGMA journal_mode = WAL")
+                self._enable_wal(c)
+                c.execute("BEGIN IMMEDIATE")
                 c.execute(
                     "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)"
                 )
@@ -143,6 +159,20 @@ class SqliteExecutionStore:
                 f"Não foi possível inicializar o banco de estado: {error}"
             ) from error
 
+    def _enable_wal(self, connection: sqlite3.Connection) -> None:
+        """A troca inicial de journal pode retornar BUSY sem respeitar busy_timeout."""
+        deadline = monotonic() + self.timeout_seconds
+        while True:
+            try:
+                connection.execute("PRAGMA journal_mode = WAL")
+                return
+            except sqlite3.OperationalError as error:
+                code = getattr(error, "sqlite_errorcode", 0) & 0xFF
+                remaining = deadline - monotonic()
+                if code not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} or remaining <= 0:
+                    raise
+                sleep(min(0.05, remaining))
+
     def claim_notification(self, execution_id: str, event_key: str, channel: str,
                            *, max_attempts: int, retry_seconds: float) -> bool:
         """Reserva uma tentativa sem repetir efeitos de execução."""
@@ -180,12 +210,31 @@ class SqliteExecutionStore:
                 (execution_id,),
             ))
 
-    def create(self, issue_number: int, **details: object) -> RunRecord:
-        if any(run.issue_number == issue_number for run in self.list_historical_candidates()):
-            raise ActiveExecutionError("Execução histórica transitória exige --recover-failed; novo run recusado")
+    def create(self, issue_number: int, *, max_active_runs: int | None = None, **details: object) -> RunRecord:
         now, execution_id = _now(), str(uuid4())
         try:
             with self._connection() as c:
+                c.execute("BEGIN IMMEDIATE")
+                if max_active_runs is not None:
+                    if max_active_runs < 1:
+                        raise ExecutionStoreError("Limite de execuções ativas deve ser positivo")
+                    active = c.execute("SELECT count(*) FROM executions WHERE terminal = 0").fetchone()[0]
+                    if active >= max_active_runs:
+                        raise ActiveExecutionError("Capacidade de execuções ativas já ocupada; novo run recusado")
+                from ai_dev_orchestrator.domain.historical import is_historical_candidate
+                previous = c.execute(
+                    "SELECT * FROM executions WHERE issue_number = ? AND phase = ?",
+                    (issue_number, ExecutionPhase.FAILED.value),
+                ).fetchall()
+                if any(
+                    row["pull_request_number"] is not None
+                    or row["pull_request_url"] is not None
+                    or is_historical_candidate(_record(row))
+                    for row in previous
+                ):
+                    raise ActiveExecutionError(
+                        "Execução histórica ou publicada exige reconciliação ou supersessão; novo run recusado"
+                    )
                 c.execute(
                     "INSERT INTO executions(id, issue_number, project_item_id, phase, branch, worktree_path, base_ref, base_sha, codex_model, gemini_model, repository_identity, contract_fingerprint, project_contract_json, terminal, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
                     (
@@ -242,13 +291,14 @@ class SqliteExecutionStore:
             if run.phase is ExecutionPhase.FAILED and run.pull_request_number is not None
         )
 
-    def supersede(self, execution_id: str, *, summary: str) -> RunRecord:
+    def supersede(self, execution_id: str, *, summary: str, expected: RunRecord | None = None) -> RunRecord:
         """Encerra auditavelmente um run deliberadamente substituído pelo usuário.
 
         Esta é a única transição para SUPERSEDED. Ela não altera nenhum checkpoint
         de identidade nem faz I/O fora do SQLite.
         """
         current = self.get(execution_id)
+        self._validate_expected(current, expected)
         if current.phase in {ExecutionPhase.COMPLETED, ExecutionPhase.SUPERSEDED}:
             raise ExecutionStoreError("Execução concluída ou já supersedida não pode ser abandonada")
         try:
@@ -427,9 +477,11 @@ class SqliteExecutionStore:
         *,
         summary: str,
         head_sha: str | None = None,
+        expected: RunRecord | None = None,
         **updates: object,
     ) -> RunRecord:
         current = self.get(execution_id)
+        self._validate_expected(current, expected)
         try:
             validate_transition(current.phase, phase)
         except ValueError as error:
@@ -492,6 +544,7 @@ class SqliteExecutionStore:
             raise ExecutionStoreError(
                 f"Campos de execução inválidos: {', '.join(sorted(invalid))}"
             )
+        self._validate_identity(current, updates)
         self._validate_models(current, updates)
         if "provider_final_message" in updates and updates["provider_final_message"] is not None:
             updates["provider_final_message"] = _sanitize(str(updates["provider_final_message"]))
@@ -558,10 +611,12 @@ class SqliteExecutionStore:
         *,
         summary: str,
         head_sha: str | None = None,
+        expected: RunRecord | None = None,
         **updates: object,
     ) -> RunRecord:
         """Registra informação nova sem avançar a fase do control plane."""
         current = self.get(execution_id)
+        self._validate_expected(current, expected)
         allowed = {
             "project_item_id",
             "branch",
@@ -620,6 +675,7 @@ class SqliteExecutionStore:
             raise ExecutionStoreError(
                 "A sessão Codex não pode ser trocada dentro da mesma execução"
             )
+        self._validate_identity(current, updates)
         self._validate_models(current, updates)
         if "provider_final_message" in updates and updates["provider_final_message"] is not None:
             updates["provider_final_message"] = _sanitize(str(updates["provider_final_message"]))
@@ -666,6 +722,27 @@ class SqliteExecutionStore:
         return self.get(execution_id)
 
     @staticmethod
+    def _validate_expected(current: RunRecord, expected: RunRecord | None) -> None:
+        if expected is not None and expected != current:
+            raise ExecutionStoreError("Execução mudou desde a prova observada")
+
+    @staticmethod
+    def _validate_identity(current: RunRecord, updates: dict[str, object]) -> None:
+        for field in (
+            "repository_identity", "project_item_id", "branch", "worktree_path",
+            "base_ref", "base_sha", "pull_request_number", "pull_request_url",
+        ):
+            value = getattr(current, field)
+            if value is not None and field in updates and updates[field] != value:
+                raise ExecutionStoreError(f"Identidade persistida não pode ser alterada: {field}")
+        if ("current_head_sha" in updates and current.current_head_sha is not None
+                and updates["current_head_sha"] != current.current_head_sha):
+            # Evidência do HEAD anterior nunca acompanha um novo commit.
+            for field in ("ci_head_sha", "reviewed_head_sha", "review_verdict",
+                          "merge_commit_sha", "merged_head_sha", "merge_origin"):
+                updates[field] = None
+
+    @staticmethod
     def _validate_models(current: RunRecord, updates: dict[str, object]) -> None:
         if current.codex_start_attempted and updates.get("codex_start_attempted", True) is not True:
             raise ExecutionStoreError("O início da primeira chamada Codex não pode ser apagado")
@@ -681,6 +758,7 @@ class SqliteExecutionStore:
         """Persiste veredito, findings e evento em uma única transação."""
         try:
             with self._connection() as c:
+                c.execute("BEGIN IMMEDIATE")
                 row = c.execute("SELECT * FROM executions WHERE id = ?", (execution_id,)).fetchone()
                 if row is None:
                     raise ExecutionStoreError("Execução persistida não encontrada")
@@ -769,20 +847,7 @@ def _sanitize(value: str) -> str:
 
 
 def _redact_secrets(value: str) -> str:
-    for name, secret in os.environ.items():
-        if any(part in name.upper() for part in ("TOKEN", "PASSWORD", "SECRET", "WEBHOOK")) and secret:
-            value = value.replace(secret, "[redigido]")
-    value = value.replace("\n", " ")
-    value = re.sub(
-        r"(?i)(authorization)\s*[:=]\s*(?:\S+\s+)?\S+",
-        r"\1=[redigido]",
-        value,
-    )
-    return re.sub(
-        r"(?i)(token|password|secret|webhook)\s*[:=]\s*\S+",
-        r"\1=[redigido]",
-        value,
-    )
+    return redact_secrets(value).replace("\n", " ").replace("\r", " ")
 
 
 def sanitize_diagnostic_text(value: str | None) -> str | None:

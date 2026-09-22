@@ -49,6 +49,10 @@ class RecoveryExecutor:
         self.policy, self.store, self.effects = policy, store, effects
 
     def execute(self, run: RunRecord, decision: RecoveryDecision, observation: RecoveryObservation) -> RunRecord:
+        with self.store.ownership(run.issue_number):
+            return self._execute_owned(run, decision, observation)
+
+    def _execute_owned(self, run: RunRecord, decision: RecoveryDecision, observation: RecoveryObservation) -> RunRecord:
         current = self.store.get(run.id)
         if current != run:
             raise RecoveryExecutionError("Execução mudou desde o planejamento")
@@ -57,8 +61,12 @@ class RecoveryExecutor:
         self._validate_action_phase(run, decision)
         action = decision.action
         if action == RecoveryAction.PREPARE_WORKTREE:
+            expected_head = run.base_sha or run.current_head_sha
+            self._required(expected_head, "Base SHA")
             head = self.effects.prepare_worktree(run)
             self._required(head, "HEAD inicial")
+            if head != expected_head:
+                raise RecoveryExecutionError("HEAD inicial diverge da base persistida")
             return self.store.transition(run.id, ExecutionPhase.CODEX_RUNNING, summary=decision.reason, current_head_sha=head, head_sha=head)
         if action == RecoveryAction.ADVANCE_PHASE:
             if decision.next_phase is None:
@@ -66,6 +74,9 @@ class RecoveryExecutor:
             updates: dict[str, object] = {}
             if run.phase == ExecutionPhase.PREPARING and decision.next_phase == ExecutionPhase.CODEX_RUNNING:
                 self._required(observation.local_head_sha, "HEAD local")
+                if (observation.has_worktree_changes
+                        or observation.local_head_sha != (run.base_sha or run.current_head_sha)):
+                    raise RecoveryExecutionError("Worktree inicial diverge da base persistida")
                 updates["current_head_sha"] = observation.local_head_sha
             return self.store.transition(run.id, decision.next_phase, summary=decision.reason, **updates)
         if action == RecoveryAction.START_CODEX:
@@ -212,6 +223,10 @@ class RecoveryExecutor:
                 raise RecoveryExecutionError("Pull Request já possui identidade persistida")
             pr = self.effects.create_pull_request(run) if action == RecoveryAction.CREATE_PULL_REQUEST else self._observed_pr(run, observation)
             self._validate_pr(run, pr)
+            if (action == RecoveryAction.ADOPT_PULL_REQUEST
+                    and run.pull_request_number is None
+                    and pr.issue_numbers != (run.issue_number,)):
+                raise RecoveryExecutionError("Pull Request não comprova vínculo exclusivo com a Issue")
             mark_ai_review = getattr(self.effects, "mark_project_ai_review", None)
             updates: dict[str, object] = {
                 "pull_request_number": pr.number,

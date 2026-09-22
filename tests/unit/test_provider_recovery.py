@@ -258,7 +258,9 @@ def test_supervisor_atravessa_backoff_e_para_no_limite(tmp_path, monkeypatch):
     assert sleeps == [30, 60, 120] and work.calls == 4
     assert store.get(run.id).phase == Phase.HUMAN_REQUIRED
     assert len(store.list_history()) == 1
-    assert not cfg.state.database_path.with_suffix(".watch.lock").exists()
+    from ai_dev_orchestrator.services.supervisor import _exclusive_lock
+    with _exclusive_lock(cfg.state.database_path.with_suffix(".watch.lock")):
+        pass
 
 
 def test_politica_de_quota_nao_contorna_bloqueio_auth(tmp_path):

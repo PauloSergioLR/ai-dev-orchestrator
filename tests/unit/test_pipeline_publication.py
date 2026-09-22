@@ -133,7 +133,7 @@ def test_reviewer_runs_after_ci_with_two_fresh_worktree_invocations(tmp_path: Pa
     class ReviewReader:
         def get_review_data(self, number: int):
             fakes.events.append("dossier")
-            return {"number": 20, "url": "https://github.com/acme/repo/pull/20", "baseRefName": "release", "headRefName": "feat/publicar", "headRefOid": "a" * 40, "commits": ["a" * 40], "files": ["src/config.py"], "diff": "diff --git a/src/config.py b/src/config.py\n+x"}
+            return {"number": 20, "state": "OPEN", "url": "https://github.com/acme/repo/pull/20", "baseRefName": "release", "headRefName": "feat/publicar", "headRefOid": "a" * 40, "commits": ["a" * 40], "files": ["src/config.py"], "diff": "diff --git a/src/config.py b/src/config.py\n+x"}
 
     class Reviewer:
         def __init__(self): self.calls = []
@@ -161,7 +161,7 @@ def test_reviewer_rejects_head_changed_after_final_invocation(tmp_path: Path) ->
         def get_review_data(self, number: int):
             self.calls += 1
             sha = "a" * 40 if self.calls < 3 else "b" * 40
-            return {"number": 20, "url": "u", "baseRefName": "release", "headRefName": "feat/publicar", "headRefOid": sha, "commits": ["a" * 40], "files": ["src/config.py"], "diff": "diff --git a/src/config.py b/src/config.py\n+x"}
+            return {"number": 20, "state": "OPEN", "url": "https://github.com/acme/repo/pull/20", "baseRefName": "release", "headRefName": "feat/publicar", "headRefOid": sha, "commits": ["a" * 40], "files": ["src/config.py"], "diff": "diff --git a/src/config.py b/src/config.py\n+x"}
 
     class Reviewer:
         def invoke(self, prompt: str, cwd: Path, schema: dict):

@@ -56,6 +56,9 @@ class RecoveryEffects:
         self.config = config
         self.worktrees = GitWorktreeAdapter()
         self.codex = CodexAdapter(
+            timeout=config.providers.codex_timeout_seconds,
+            idle_timeout=config.providers.codex_idle_timeout_seconds,
+            heartbeat_seconds=config.providers.codex_heartbeat_seconds,
             model=config.providers.codex_model,
             code_review_graph_command=(
                 config.code_review_graph.command
@@ -65,7 +68,7 @@ class RecoveryEffects:
         )
         self.graph_integrator = CodeReviewGraphIntegrator(config.code_review_graph)
         self.validation = LocalValidationService(progress=emit_progress)
-        self.publication = GitPublicationAdapter()
+        self.publication = GitPublicationAdapter(expected_repository=config.github.repository_full_name)
         self.issues = GitHubIssueAdapter(config)
         self.pull_requests = GitHubPullRequestAdapter(config)
         self.projects = projects if projects is not None else GitHubProjectStatusAdapter(config)
@@ -79,13 +82,13 @@ class RecoveryEffects:
         self.convergence = ConvergencePoller(config.convergence)
 
     def prepare_worktree(self, run: RunRecord) -> str:
-        if not run.branch or not run.worktree_path or not run.base_ref:
+        if not run.branch or not run.worktree_path or not run.base_ref or not (run.base_sha or run.current_head_sha):
             raise ValueError("Identidade do worktree ausente")
         worktree = self.worktrees.create_worktree(
             self.config.workspace.repository_path,
             run.branch,
             run.worktree_path,
-            run.base_sha or run.base_ref,
+            run.base_sha or run.current_head_sha,
         )
         return self.publication.current_head(worktree.path)
 

@@ -25,6 +25,8 @@ class RecoveryPlanner:
         self.policy = policy
 
     def plan(self, run: RunRecord, observed: RecoveryObservation) -> RecoveryDecision:
+        if run.repository_identity and run.repository_identity.casefold() != self.policy.repository_full_name.casefold():
+            return self._block("Repositório configurado diverge da identidade persistida.")
         return self._for_phase(run, observed)
 
     @staticmethod
@@ -100,12 +102,17 @@ class RecoveryPlanner:
         if not self._has_complete_pr_identity(run):
             return self._block("Identidade persistida do Pull Request está parcial.")
         if phase == ExecutionPhase.PREPARING:
+            if observed.remote_head_sha or observed.pull_requests or run.pull_request_number:
+                return self._block("Preparação possui publicação inesperada; identidade exige reconciliação explícita.")
+            expected_head = run.base_sha or run.current_head_sha
+            if not expected_head:
+                return self._block("Base SHA não foi persistida; preparação exige prova imutável.")
             if observed.worktree_state == WorktreeState.DIVERGENT:
                 return self._block("Worktree divergente do estado persistido.")
             if observed.worktree_state == WorktreeState.ABSENT:
                 return self._decision(RecoveryAction.PREPARE_WORKTREE, "Worktree ainda não existe.")
-            if observed.local_head_sha is None:
-                return self._block("Worktree convergente sem HEAD local observado.")
+            if observed.has_worktree_changes or observed.local_head_sha != expected_head:
+                return self._block("Worktree inicial contém alterações ou HEAD diferente da base persistida.")
             return self._decision(RecoveryAction.ADVANCE_PHASE, "Worktree já está convergente.", ExecutionPhase.CODEX_RUNNING)
         if phase != ExecutionPhase.PROJECT_DONE_PENDING and observed.worktree_state != WorktreeState.CONVERGENT:
             return self._block("Worktree não está convergente para esta fase.")
@@ -122,6 +129,8 @@ class RecoveryPlanner:
             run.current_head_sha is None or observed.local_head_sha != run.current_head_sha
         ):
             return self._block("HEAD local diverge do checkpoint persistido.")
+        if phase in published_phases and observed.has_worktree_changes:
+            return self._block("Worktree publicado contém alterações não commitadas.")
         pr_required_phases = {
             ExecutionPhase.WAITING_CI,
             ExecutionPhase.GEMINI_REVIEWING,
@@ -230,6 +239,8 @@ class RecoveryPlanner:
             return self._decision(RecoveryAction.CREATE_PULL_REQUEST, "Nenhum Pull Request foi observado.")
         if self._single_valid_pull_request(run, observed, head) is None:
             return self._block("Pull Request ambíguo ou com identidade divergente.")
+        if run.pull_request_number is None and observed.pull_requests[0].issue_numbers != (run.issue_number,):
+            return self._block("Pull Request sem vínculo exclusivo comprovado com a Issue desta execução.")
         return self._decision(RecoveryAction.ADOPT_PULL_REQUEST, "Pull Request convergente já existe.", ExecutionPhase.WAITING_CI)
 
     def _ci(self, run: RunRecord, observed: RecoveryObservation) -> RecoveryDecision:
@@ -325,6 +336,16 @@ class RecoveryPlanner:
             return self._block("Merge persistido não está comprovado para atualizar o projeto.")
         if observed.project_state == ProjectState.UNKNOWN:
             return self._block("Estado do projeto é desconhecido.")
+        pull_request = self._single_valid_pull_request(run, observed, run.merged_head_sha, allow_merged=True)
+        if (
+            run.pull_request_number is None
+            or pull_request is None
+            or pull_request.state != PullRequestState.MERGED
+            or observed.merge.state != MergeState.MERGED
+            or observed.merge.merged_head_sha != run.merged_head_sha
+            or observed.merge.merge_commit_sha != run.merge_commit_sha
+        ):
+            return self._block("Merge remoto atual não comprova o checkpoint persistido do projeto.")
         if observed.project_state == ProjectState.NOT_DONE:
             return self._decision(RecoveryAction.MARK_PROJECT_DONE, "Item do projeto ainda não está Done.")
         return self._decision(RecoveryAction.COMPLETE, "Item do projeto já está Done.", ExecutionPhase.COMPLETED)

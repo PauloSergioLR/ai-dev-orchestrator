@@ -6,7 +6,7 @@ import pytest
 
 from ai_dev_orchestrator.config import CiConfig
 from ai_dev_orchestrator.domain.ci import CiStatus, PullRequestCiSnapshot, StatusCheck
-from ai_dev_orchestrator.services.ci_gate import CiGate, CiGateError, classify_required_checks
+from ai_dev_orchestrator.services.ci_gate import CiFailureError, CiGate, CiGateError, classify_required_checks
 
 
 SHA = "a" * 40
@@ -106,9 +106,21 @@ def test_polls_after_immediate_query_and_returns_success_without_extra_sleep() -
 def test_failure_stops_immediately_and_includes_check_details() -> None:
     reader = Reader([PullRequestCiSnapshot(SHA, (check(conclusion="FAILURE"),))])
     clock = FakeTime()
-    with pytest.raises(CiGateError, match=r"test.*FAILURE.*ci.example"):
+    with pytest.raises(CiFailureError, match=r"test.*FAILURE.*ci.example"):
         gate(reader, clock).wait(42, SHA)
     assert reader.calls == [42]
+    assert clock.sleeps == []
+
+
+def test_erro_de_consulta_nao_autoriza_correcao_de_codigo() -> None:
+    class UnavailableReader:
+        def get_ci_snapshot(self, number):
+            raise TimeoutError("resposta perdida")
+
+    clock = FakeTime()
+    with pytest.raises(CiGateError) as raised:
+        gate(UnavailableReader(), clock).wait(42, SHA)
+    assert not isinstance(raised.value, CiFailureError)
     assert clock.sleeps == []
 
 

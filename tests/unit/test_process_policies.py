@@ -1,7 +1,6 @@
 """Regressões Windows/Linux da fronteira de bytes, texto humano e protocolo."""
 
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -16,7 +15,7 @@ from ai_dev_orchestrator.domain.project_contract import CommandPlan
 
 
 def process(monkeypatch, stdout, stderr=b"", code=0):
-    monkeypatch.setattr(shutil, "which", lambda name: name)
+    monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.resolve_executable", lambda name, *args: name)
     monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.run_captured", lambda *a, **kw: subprocess.CompletedProcess(a[0], code, stdout, stderr))
 
 
@@ -118,7 +117,7 @@ def test_limpeza_nao_comprovada_nunca_vira_timeout_retentavel(monkeypatch):
         FAILURE_POLICY, FailureDisposition, classify_process_failure,
     )
 
-    monkeypatch.setattr(shutil, "which", lambda name: name)
+    monkeypatch.setattr("ai_dev_orchestrator.infrastructure.process.resolve_executable", lambda name, *args: name)
 
     def run(*args, **kwargs):
         raise ProcessCleanupError(args[0], 1, output=b"parcial", stderr=b"")

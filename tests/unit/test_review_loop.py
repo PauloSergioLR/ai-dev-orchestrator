@@ -351,8 +351,16 @@ def test_prevalidation_failure_blocks_correction_commit_and_push(tmp_path: Path)
     assert fakes.events.count("push:feat/review-loop") == 1
 
 
-def test_changed_local_head_blocks_correction_publication(tmp_path: Path) -> None:
-    fakes = LoopFakes(local_head="c" * 40)
+def test_changed_local_head_blocks_correction_publication(tmp_path: Path, monkeypatch) -> None:
+    fakes = LoopFakes()
+    resume = fakes.resume
+
+    def changed_head(*args):
+        result = resume(*args)
+        fakes.local_head = SHA_C
+        return result
+
+    monkeypatch.setattr(fakes, "resume", changed_head)
 
     with pytest.raises(RunPipelineError, match="HEAD local divergiu"):
         pipeline(tmp_path, fakes).run(31, "feat/review-loop")
@@ -462,7 +470,34 @@ def test_divergent_ci_head_prevents_any_merge(tmp_path: Path) -> None:
 def test_divergent_local_head_prevents_any_merge(tmp_path: Path) -> None:
     fakes = LoopFakes(rejected_reviews=0, merge_local_head=SHA_B)
 
-    with pytest.raises(RunPipelineError, match="Auto-merge recusado"):
+    with pytest.raises(RunPipelineError, match="HEAD local divergiu"):
         pipeline(tmp_path, fakes, auto_merge=True).run(31, "feat/review-loop")
 
     assert fakes.merge_calls == []
+
+
+@pytest.mark.parametrize("boundary", ["provider", "gates"])
+def test_pipeline_recusa_head_alterado_antes_do_commit_inicial(tmp_path, monkeypatch, boundary):
+    fakes = LoopFakes(rejected_reviews=0)
+    method = "execute" if boundary == "provider" else "validate"
+    original = getattr(fakes, method)
+
+    def alter_head(*args):
+        result = original(*args)
+        fakes.local_head = SHA_C
+        return result
+
+    monkeypatch.setattr(fakes, method, alter_head)
+    with pytest.raises(RunPipelineError, match="HEAD local divergiu"):
+        pipeline(tmp_path, fakes).run(31, "feat/review-loop")
+    assert "commit-inicial" not in fakes.events
+    assert "criar-pr" not in fakes.events
+
+
+def test_ausencia_de_diff_sem_store_tem_limite_finito(tmp_path, monkeypatch):
+    fakes = LoopFakes()
+    monkeypatch.setattr(fakes, "has_changes", lambda _path: False, raising=False)
+    with pytest.raises(RunPipelineError, match="limite explícito atingido"):
+        pipeline(tmp_path, fakes).run(31, "feat/review-loop")
+    assert len(fakes.resume_prompts) == 1
+    assert "commit-inicial" not in fakes.events

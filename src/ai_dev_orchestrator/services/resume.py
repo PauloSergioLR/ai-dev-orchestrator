@@ -14,6 +14,7 @@ from ai_dev_orchestrator.domain.recovery import (
 )
 from ai_dev_orchestrator.config import OrchestratorConfig
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
+from ai_dev_orchestrator.infrastructure.ownership import OwnershipError
 from ai_dev_orchestrator.services.recovery_executor import RecoveryExecutor
 from ai_dev_orchestrator.services.recovery_planner import RecoveryPlanner
 from ai_dev_orchestrator.domain.execution import ExecutionPhase
@@ -80,6 +81,17 @@ class ResumeService:
                resume_local_gates: bool = False,
                resume_publication: bool = False) -> ResumeResult:
         try:
+            with self.store.ownership(issue_number):
+                return self._resume_owned(
+                    issue_number, retry_provider=retry_provider, recover_failed=recover_failed,
+                    resume_local_gates=resume_local_gates, resume_publication=resume_publication,
+                )
+        except OwnershipError as error:
+            raise ResumeError("Outra operação já controla esta Issue") from error
+
+    def _resume_owned(self, issue_number: int, *, retry_provider: bool, recover_failed: bool,
+                      resume_local_gates: bool, resume_publication: bool) -> ResumeResult:
+        try:
             result = self._resume(issue_number, retry_provider=retry_provider, recover_failed=recover_failed,
                                   resume_local_gates=resume_local_gates,
                                   resume_publication=resume_publication)
@@ -103,6 +115,13 @@ class ResumeService:
 
     def reconcile_external_merge(self, issue_number: int) -> ResumeResult:
         """Retoma HUMAN_REQUIRED somente após prova inequívoca de merge externo."""
+        try:
+            with self.store.ownership(issue_number):
+                return self._reconcile_owned(issue_number)
+        except OwnershipError as error:
+            raise ResumeError("Outra operação já controla esta Issue") from error
+
+    def _reconcile_owned(self, issue_number: int) -> ResumeResult:
         run = self.store.get_active_for_issue(issue_number)
         if run is None or run.phase is not ExecutionPhase.HUMAN_REQUIRED:
             raise ResumeError("Reconciliação externa exige execução HUMAN_REQUIRED ativa")
@@ -122,6 +141,7 @@ class ResumeService:
             latest = self.store.get_latest_for_issue(issue_number)
             if latest is None:
                 raise ResumeError(f"Nenhuma execução ativa para a Issue #{issue_number}")
+            self._validate_models(latest)
             if recover_failed:
                 from ai_dev_orchestrator.services.historical_recovery import recover_historical
                 if ((self.codex_model is not None and latest.codex_model != self.codex_model)
@@ -133,6 +153,7 @@ class ResumeService:
                     raise ResumeError(f"Recovery histórico bloqueado: {error}") from error
             else:
                 raise ResumeError(f"A execução da Issue #{issue_number} já é terminal; use --recover-failed para reconciliar falha transitória")
+        self._validate_models(run)
         if run.phase in TERMINAL_PHASES:
             raise ResumeError(f"A execução da Issue #{issue_number} já é terminal")
         if run.phase is ExecutionPhase.HUMAN_REQUIRED:
@@ -325,6 +346,7 @@ class ResumeService:
         return self.store.transition(
             run.id,
             target,
+            expected=run,
             summary=(
                 "Retomada explícita de publicação autorizada após observação segura: "
                 f"{decision.action.value}"
@@ -332,6 +354,8 @@ class ResumeService:
         )
 
     def _validate_models(self, run: RunRecord) -> None:
+        if run.repository_identity and run.repository_identity.casefold() != self.planner.policy.repository_full_name.casefold():
+            raise ResumeError("Repositório configurado diverge da identidade persistida")
         if (
             (self.codex_model is not None and run.codex_model != self.codex_model)
             or (self.gemini_model is not None and run.gemini_model != self.gemini_model)
@@ -373,6 +397,7 @@ class ResumeService:
         return self.store.transition(
             run.id,
             ExecutionPhase.PROJECT_DONE_PENDING,
+            expected=run,
             summary="Merge externo reconciliado por identidade remota completa",
             merged_head_sha=merge.merged_head_sha,
             merge_commit_sha=merge.merge_commit_sha,
