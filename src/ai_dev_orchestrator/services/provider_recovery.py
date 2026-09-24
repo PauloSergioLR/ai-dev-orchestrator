@@ -53,7 +53,7 @@ def record_provider_failure(store, execution_id: str, failure: ProviderFailure) 
     } else "provider"
     detail = (f"{kind.value}: {FAILURE_MESSAGES[kind]} "
               f"(exit={failure.returncode}, fonte={source}, tentativa={attempts})")
-    if kind in {ProviderFailureKind.UNKNOWN, ProviderFailureKind.PROTOCOL_ERROR}:
+    if kind == ProviderFailureKind.UNKNOWN or kind.value.startswith("PROTOCOL_"):
         diagnostic = sanitized_diagnostic_context(failure.diagnostic_context)
         if diagnostic is not None:
             detail += f"; diagnóstico={diagnostic}"

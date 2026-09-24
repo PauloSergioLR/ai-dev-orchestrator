@@ -47,6 +47,9 @@ class RecoveryEffects(Protocol):
 class RecoveryExecutor:
     def __init__(self, policy: RecoveryPolicy, store: SqliteExecutionStore, effects: RecoveryEffects) -> None:
         self.policy, self.store, self.effects = policy, store, effects
+        bind_store = getattr(effects, "bind_execution_store", None)
+        if bind_store is not None:
+            bind_store(store)
 
     def execute(self, run: RunRecord, decision: RecoveryDecision, observation: RecoveryObservation) -> RunRecord:
         with self.store.ownership(run.issue_number):

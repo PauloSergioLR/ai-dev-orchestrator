@@ -18,6 +18,11 @@ class ProviderFailureKind(StrEnum):
     EXECUTABLE_MISSING = "EXECUTABLE_MISSING"
     LOCAL_TRANSIENT = "LOCAL_TRANSIENT"
     PROTOCOL_ERROR = "PROTOCOL_ERROR"
+    PROTOCOL_MALFORMED_RESPONSE = "PROTOCOL_MALFORMED_RESPONSE"
+    PROTOCOL_SCHEMA_MISMATCH = "PROTOCOL_SCHEMA_MISMATCH"
+    PROTOCOL_HEAD_MISMATCH = "PROTOCOL_HEAD_MISMATCH"
+    PROTOCOL_CLI_INCOMPATIBLE = "PROTOCOL_CLI_INCOMPATIBLE"
+    PROTOCOL_SEMANTIC_INVALID = "PROTOCOL_SEMANTIC_INVALID"
     MALFORMED_JSON = "MALFORMED_JSON"
     ENCODING_ERROR = "ENCODING_ERROR"
     PROCESS_CLEANUP_ERROR = "PROCESS_CLEANUP_ERROR"
@@ -59,6 +64,12 @@ FAILURE_POLICY = {
     ProviderFailureKind.MODEL_UNAVAILABLE: FailureDisposition.INTERVENTION,
     ProviderFailureKind.UNKNOWN: FailureDisposition.INTERVENTION,
     ProviderFailureKind.PROTOCOL_ERROR: FailureDisposition.INTERVENTION,
+    # O retry de protocolo exige checkpoint do review; nunca é um retry genérico.
+    ProviderFailureKind.PROTOCOL_MALFORMED_RESPONSE: FailureDisposition.INTERVENTION,
+    ProviderFailureKind.PROTOCOL_SCHEMA_MISMATCH: FailureDisposition.INTERVENTION,
+    ProviderFailureKind.PROTOCOL_HEAD_MISMATCH: FailureDisposition.INTERVENTION,
+    ProviderFailureKind.PROTOCOL_CLI_INCOMPATIBLE: FailureDisposition.INTERVENTION,
+    ProviderFailureKind.PROTOCOL_SEMANTIC_INVALID: FailureDisposition.INTERVENTION,
     ProviderFailureKind.MALFORMED_JSON: FailureDisposition.INTERVENTION,
     ProviderFailureKind.ENCODING_ERROR: FailureDisposition.INTERVENTION,
     ProviderFailureKind.PROCESS_CLEANUP_ERROR: FailureDisposition.INTERVENTION,
@@ -85,16 +96,40 @@ FAILURE_MESSAGES = {
     ProviderFailureKind.MODEL_UNAVAILABLE: "Modelo indisponível; intervenção necessária",
     ProviderFailureKind.UNKNOWN: "Falha desconhecida; saída omitida",
     ProviderFailureKind.PROTOCOL_ERROR: "Contrato do protocolo inválido",
+    ProviderFailureKind.PROTOCOL_MALFORMED_RESPONSE: "Resposta estruturada malformada",
+    ProviderFailureKind.PROTOCOL_SCHEMA_MISMATCH: "Resposta incompatível com o schema estrito",
+    ProviderFailureKind.PROTOCOL_HEAD_MISMATCH: "SHA revisado diverge do HEAD esperado",
+    ProviderFailureKind.PROTOCOL_CLI_INCOMPATIBLE: "CLI/configuração incompatível com o schema estruturado",
+    ProviderFailureKind.PROTOCOL_SEMANTIC_INVALID: "Resposta estruturada semanticamente inválida",
     ProviderFailureKind.MALFORMED_JSON: "JSON/JSONL inválido",
     ProviderFailureKind.ENCODING_ERROR: "Encoding UTF-8 inválido",
     ProviderFailureKind.PROCESS_CLEANUP_ERROR: "Timeout sem prova de encerramento da árvore de processos; retry bloqueado",
 }
 
 
+_PROTOCOL_DIAGNOSTIC_CODES = frozenset({
+    "ENVELOPE_INVALID_JSON", "ENVELOPE_NOT_OBJECT", "ENVELOPE_INVALID_STATUS",
+    "ENVELOPE_NON_SUCCESS", "SUCCESS_WITHOUT_STRUCTURED_OUTPUT",
+    "STRUCTURED_OUTPUT_NOT_OBJECT", "JSON_INVALID", "JSON_DUPLICATE_KEY",
+    "JSON_OVERSIZED", "JSON_NON_FINITE_NUMBER", "SCHEMA_MISSING_FIELDS",
+    "SCHEMA_EXTRA_FIELDS", "SCHEMA_INVALID_ENUM", "SCHEMA_INVALID_TYPE",
+    "SCHEMA_INVALID_VALUE", "HEAD_MISMATCH", "APPROVED_WITH_BLOCKING_FINDING",
+    "CLI_CAPABILITY_MISSING", "CLI_SCHEMA_INCOMPATIBLE", "CLI_PREFLIGHT_FAILED",
+    "SUCCESS_WITH_ERROR", "DENIED_ACTIONS",
+})
+
+
+def sanitized_protocol_diagnostic(code: object) -> str | None:
+    """Persiste somente códigos internos fixos, sem campos ou valores do provider."""
+    return f"protocol={code}" if isinstance(code, str) and code in _PROTOCOL_DIAGNOSTIC_CODES else None
+
+
 def sanitized_diagnostic_context(value: object) -> str | None:
     """Aceita somente o resumo de protocolo sem conteúdo fornecido pela CLI."""
     if not isinstance(value, str):
         return None
+    if value.startswith("protocol="):
+        return sanitized_protocol_diagnostic(value.removeprefix("protocol="))
     pattern = (
         r"events=[A-Za-z0-9_.-]+(?:,[A-Za-z0-9_.-]+)*(?:,\+\d+)?; "
         r"terminal=(?:turn\.completed|turn\.failed|ambiguous|none); "

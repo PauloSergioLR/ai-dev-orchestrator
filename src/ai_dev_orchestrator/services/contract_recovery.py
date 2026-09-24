@@ -99,10 +99,11 @@ class ContractRecoveryService:
         )
 
     def _resolve_from_base(self, base_sha: str) -> ProjectContract:
-        root = self.config.workspace.worktrees_dir
-        root.mkdir(parents=True, exist_ok=True)
-        parent = Path(mkdtemp(prefix=".contract-recovery-", dir=root))
-        snapshot = parent / "snapshot"
+        # No Windows, o diretório do gate já pode estar perto do limite aceito
+        # pelo Git para os metadados de worktree. O temp do sistema mantém este
+        # snapshot efêmero curto, aleatório e separado do worktree corrente.
+        parent = Path(mkdtemp(prefix="orch-cr-"))
+        snapshot = parent / "w"
         created = False
         try:
             self.worktrees.create_detached_worktree(

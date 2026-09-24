@@ -147,6 +147,9 @@ class RunRecord:
     ci_head_sha: str | None = None
     reviewed_head_sha: str | None = None
     review_verdict: str | None = None
+    review_checkpoint_json: str | None = None
+    review_protocol_retry_attempts: int = 0
+    review_protocol_retry_head_sha: str | None = None
     correction_attempts: int = 0
     merge_commit_sha: str | None = None
     merged_head_sha: str | None = None

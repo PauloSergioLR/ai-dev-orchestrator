@@ -50,7 +50,10 @@ class NeverResume:
         raise AssertionError("não existe run anterior")
 
 
-def test_remote_commit_is_both_worktree_origin_and_frozen_contract(tmp_path: Path) -> None:
+def test_remote_commit_is_both_worktree_origin_and_frozen_contract(
+    short_git_tmp_path: Path,
+) -> None:
+    tmp_path = short_git_tmp_path
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
     author = tmp_path / "author"

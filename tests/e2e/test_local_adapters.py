@@ -79,8 +79,8 @@ def test_codex_falhas_locais_sao_reproduziveis(result: CommandResult, expected, 
 
 @pytest.mark.parametrize("payload, expected", [
     ({"status": "SUCCESS", "structured_output": {"verdict": "APPROVED"}}, None),
-    ({"status": "SUCCESS"}, ProviderFailureKind.PROTOCOL_ERROR),
-    ("{inválido", ProviderFailureKind.MALFORMED_JSON),
+    ({"status": "SUCCESS"}, ProviderFailureKind.PROTOCOL_MALFORMED_RESPONSE),
+    ("{inválido", ProviderFailureKind.PROTOCOL_MALFORMED_RESPONSE),
     ({"status": "ERROR", "error": {"code": "RATE_LIMIT", "message": "rate limit"}}, ProviderFailureKind.TRANSIENT_RATE_LIMIT),
 ])
 def test_antigravity_fail_closed_para_contrato_e_quota(payload, expected) -> None:

@@ -929,7 +929,8 @@ def test_protocol_failure_in_review_retries_only_same_head(tmp_path: Path, failu
             raise AntigravityError(failure_message)
 
     failed_effects = ProtocolFailureEffects()
-    with pytest.raises(ResumeError, match="PROTOCOL_ERROR"):
+    classification = "PROTOCOL_SEMANTIC_INVALID" if failure_message == "denied_actions" else "PROTOCOL_ERROR"
+    with pytest.raises(ResumeError, match=classification):
         service(store, Observer(lambda _run: snapshot), failed_effects).resume(37)
 
     preserved = store.get(original.id)

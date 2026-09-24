@@ -11,6 +11,7 @@ from typing import Any, Protocol
 
 from ai_dev_orchestrator.domain.ci import CiResult, CiStatus
 from ai_dev_orchestrator.domain.issue import Issue
+from ai_dev_orchestrator.domain.provider import ProviderFailureKind, sanitized_protocol_diagnostic
 from ai_dev_orchestrator.domain.review import FindingSeverity, ReviewDossier, ReviewFinding, ReviewPlan, ReviewVerdict, StructuredReview
 from ai_dev_orchestrator.services.validation import GateResult
 from ai_dev_orchestrator.services.code_review_graph import GRAPH_INSTRUCTION
@@ -18,6 +19,20 @@ from ai_dev_orchestrator.services.code_review_graph import GRAPH_INSTRUCTION
 
 class ReviewError(Exception):
     """A revisão não contém evidência estruturalmente segura."""
+
+
+class ReviewProtocolError(ReviewError):
+    """Falha classificada sem persistir campos, valores ou saída bruta do provider."""
+
+    def __init__(self, message: str, classification: ProviderFailureKind,
+                 diagnostic_code: str) -> None:
+        super().__init__(message)
+        self.classification = classification
+        self.diagnostic_context = sanitized_protocol_diagnostic(diagnostic_code)
+
+
+def _schema_error(message: str, code: str) -> ReviewProtocolError:
+    return ReviewProtocolError(message, ProviderFailureKind.PROTOCOL_SCHEMA_MISMATCH, code)
 
 
 def load_review_policy() -> str:
@@ -149,66 +164,105 @@ def build_checklists(files: tuple[str, ...]) -> tuple[str, ...]:
 def _json_object(output: str, kind: str) -> dict[str, Any]:
     # O contrato de review é pequeno; uma resposta arbitrária não pode esgotar memória.
     if len(output) > 1_048_576:
-        raise ReviewError(f"JSON do {kind} excede o limite de 1 MiB")
+        raise ReviewProtocolError(f"JSON do {kind} excede o limite de 1 MiB",
+                                  ProviderFailureKind.PROTOCOL_MALFORMED_RESPONSE, "JSON_OVERSIZED")
 
     def unique_object(pairs):
         result = {}
         for key, value in pairs:
             if key in result:
-                raise ReviewError(f"JSON do {kind} contém chave duplicada")
+                raise ReviewProtocolError(f"JSON do {kind} contém chave duplicada",
+                                          ProviderFailureKind.PROTOCOL_MALFORMED_RESPONSE, "JSON_DUPLICATE_KEY")
             result[key] = value
         return result
 
+    def reject_constant(_value):
+        raise ReviewProtocolError(f"JSON do {kind} contém número inválido",
+                                  ProviderFailureKind.PROTOCOL_MALFORMED_RESPONSE, "JSON_NON_FINITE_NUMBER")
+
     try:
-        value = json.loads(output, object_pairs_hook=unique_object)
-    except (json.JSONDecodeError, RecursionError) as error:
-        raise ReviewError(f"JSON inválido retornado pelo {kind}") from error
+        value = json.loads(output, object_pairs_hook=unique_object, parse_constant=reject_constant)
+    except (ValueError, RecursionError) as error:
+        raise ReviewProtocolError(f"JSON inválido retornado pelo {kind}",
+                                  ProviderFailureKind.PROTOCOL_MALFORMED_RESPONSE, "JSON_INVALID") from error
     if not isinstance(value, dict):
-        raise ReviewError(f"JSON do {kind} deve ser objeto")
+        raise _schema_error(f"JSON do {kind} deve ser objeto", "STRUCTURED_OUTPUT_NOT_OBJECT")
     return value
 
 
+def _check_fields(data: dict, required: set[str], allowed: set[str], kind: str) -> None:
+    if required - set(data):
+        raise _schema_error(f"JSON do {kind} tem campos obrigatórios ausentes", "SCHEMA_MISSING_FIELDS")
+    if set(data) - allowed:
+        raise _schema_error(f"JSON do {kind} tem campos inesperados", "SCHEMA_EXTRA_FIELDS")
+
+
 def _strings(value: Any, field: str) -> tuple[str, ...]:
-    if not isinstance(value, list) or not all(isinstance(x, str) and x.strip() for x in value):
-        raise ReviewError(f"Campo '{field}' do plano é inválido")
+    if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+        raise _schema_error(f"Campo '{field}' do plano é inválido", "SCHEMA_INVALID_TYPE")
+    if not all(x.strip() for x in value):
+        raise _schema_error(f"Campo '{field}' do plano é inválido", "SCHEMA_INVALID_VALUE")
     return tuple(value)
 
 
 def parse_review_plan(output: str) -> ReviewPlan:
     data = _json_object(output, "planner")
     fields = _PLAN_FIELDS
-    if set(data) != set(fields):
-        raise ReviewError("JSON do planner tem campos inesperados ou ausentes")
+    _check_fields(data, set(fields), set(fields), "planner")
     return ReviewPlan(*(_strings(data[field], field) for field in fields))
 
 
 def parse_structured_review(output: str, expected_sha: str, blocking: tuple[str, ...]) -> StructuredReview:
     data = _json_object(output, "reviewer")
-    if set(data) != {"verdict", "findings", "reviewed_head_sha", "summary"}:
-        raise ReviewError("JSON do reviewer tem campos inesperados ou ausentes")
+    # Divergência explícita de identidade prevalece sobre defeitos de formato.
+    reviewed_sha = data.get("reviewed_head_sha")
+    if ((isinstance(reviewed_sha, str) and reviewed_sha != expected_sha)
+            or not re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", expected_sha)):
+        raise ReviewProtocolError("SHA revisado diverge do HEAD esperado",
+                                  ProviderFailureKind.PROTOCOL_HEAD_MISMATCH, "HEAD_MISMATCH")
+    # Contradição semântica inequívoca nunca recebe retry por defeito de formato.
+    raw_findings = data.get("findings")
+    if data.get("verdict") == ReviewVerdict.APPROVED.value and isinstance(raw_findings, list) and any(
+        isinstance(item, dict) and isinstance(item.get("severity"), str)
+        and item["severity"] in blocking for item in raw_findings
+    ):
+        raise ReviewProtocolError("APPROVED não pode conter finding bloqueante",
+                                  ProviderFailureKind.PROTOCOL_SEMANTIC_INVALID, "APPROVED_WITH_BLOCKING_FINDING")
+    fields = {"verdict", "findings", "reviewed_head_sha", "summary"}
+    _check_fields(data, fields, fields, "reviewer")
+    if not isinstance(data["verdict"], str):
+        raise _schema_error("Verdict do reviewer deve ser texto", "SCHEMA_INVALID_TYPE")
     try:
         verdict = ReviewVerdict(data["verdict"])
     except (TypeError, ValueError) as error:
-        raise ReviewError("Verdict do reviewer é desconhecido") from error
-    if data["reviewed_head_sha"] != expected_sha or not re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", expected_sha):
-        raise ReviewError("SHA revisado diverge do HEAD esperado")
-    if not isinstance(data["summary"], str) or not data["summary"].strip() or not isinstance(data["findings"], list):
-        raise ReviewError("Resumo ou findings do reviewer são inválidos")
+        raise _schema_error("Verdict do reviewer é desconhecido", "SCHEMA_INVALID_ENUM") from error
+    if not isinstance(data["reviewed_head_sha"], str):
+        raise _schema_error("SHA revisado deve ser texto", "SCHEMA_INVALID_TYPE")
+    if not isinstance(data["summary"], str) or not isinstance(data["findings"], list):
+        raise _schema_error("Resumo ou findings do reviewer são inválidos", "SCHEMA_INVALID_TYPE")
+    if not data["summary"].strip():
+        raise _schema_error("Resumo do reviewer é vazio", "SCHEMA_INVALID_VALUE")
     findings: list[ReviewFinding] = []
     for item in data["findings"]:
-        if not isinstance(item, dict) or set(item) - {"severity", "title", "description", "path", "line", "criterion"} or not {"severity", "title", "description"} <= set(item):
-            raise ReviewError("Finding do reviewer é inválido")
+        if not isinstance(item, dict):
+            raise _schema_error("Finding do reviewer deve ser objeto", "SCHEMA_INVALID_TYPE")
+        _check_fields(item, {"severity", "title", "description"},
+                      {"severity", "title", "description", "path", "line", "criterion"}, "finding")
+        if not isinstance(item["severity"], str):
+            raise _schema_error("Severidade deve ser texto", "SCHEMA_INVALID_TYPE")
         try:
             severity = FindingSeverity(item["severity"])
         except (TypeError, ValueError) as error:
-            raise ReviewError("Severidade desconhecida") from error
-        if (not all(isinstance(item[k], str) and item[k].strip() for k in ("title", "description"))
-                or any(item.get(k) is not None and (not isinstance(item[k], str) or not item[k]) for k in ("path", "criterion"))
-                or (item.get("line") is not None and (isinstance(item["line"], bool) or not isinstance(item["line"], int) or item["line"] <= 0))):
-            raise ReviewError("Finding do reviewer é inválido")
+            raise _schema_error("Severidade desconhecida", "SCHEMA_INVALID_ENUM") from error
+        if (not all(isinstance(item[k], str) for k in ("title", "description"))
+                or any(item.get(k) is not None and not isinstance(item[k], str) for k in ("path", "criterion"))
+                or (item.get("line") is not None and (isinstance(item["line"], bool) or not isinstance(item["line"], int)))):
+            raise _schema_error("Finding do reviewer tem tipo inválido", "SCHEMA_INVALID_TYPE")
+        if (not all(item[k].strip() for k in ("title", "description"))
+                or any(item.get(k) is not None and not item[k] for k in ("path", "criterion"))
+                or (item.get("line") is not None and item["line"] <= 0)):
+            raise _schema_error("Finding do reviewer tem valor inválido", "SCHEMA_INVALID_VALUE")
         findings.append(ReviewFinding(severity, item["title"], item["description"], item.get("path"), item.get("line"), item.get("criterion")))
-    if verdict is ReviewVerdict.APPROVED and any(f.severity.value in blocking for f in findings):
-        raise ReviewError("APPROVED não pode conter finding bloqueante")
     return StructuredReview(verdict, tuple(findings), expected_sha, data["summary"])
 
 
