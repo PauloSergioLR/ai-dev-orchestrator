@@ -12,6 +12,7 @@ from typing import Any
 from ai_dev_orchestrator.domain.provider import (
     ProviderFailure, ProviderFailureKind, classify_provider_text, FAILURE_MESSAGES,
     FAILURE_PRECEDENCE, reliable_retry_at, classify_process_failure,
+    sanitized_diagnostic_context, sanitized_protocol_diagnostic,
 )
 from ai_dev_orchestrator.infrastructure.process import CommandRunner, OutputPolicy
 from ai_dev_orchestrator.infrastructure.heartbeat import heartbeat
@@ -21,9 +22,27 @@ class AntigravityError(ProviderFailure):
     """Falha controlada na invocação headless do provider."""
 
     def __init__(self, message: str, classification=ProviderFailureKind.PROTOCOL_ERROR,
-                 returncode=None, source="protocolo") -> None:
+                 returncode=None, source="protocolo", diagnostic_context=None) -> None:
         super().__init__("gemini", classification, message, datetime.now(timezone.utc),
-                         returncode=returncode, diagnostic_source=source)
+                         returncode=returncode, diagnostic_source=source,
+                         diagnostic_context=sanitized_diagnostic_context(diagnostic_context))
+
+
+def _protocol_error(kind: ProviderFailureKind, code: str, message: str,
+                    returncode: int | None = None) -> AntigravityError:
+    return AntigravityError(message, kind, returncode,
+                           diagnostic_context=sanitized_protocol_diagnostic(code))
+
+
+def _cli_schema_incompatible(detail: str) -> bool:
+    """Reconhece rejeição explícita do contrato; nunca persiste o texto da CLI."""
+    return bool(re.search(
+        r"(?i)(?:unknown|unrecognized|unsupported|invalid) (?:option|argument|flag)"
+        r"[^\r\n]*(?:--json-schema|--output-format|--input-format|--sandbox|--disable-slash-commands|--print-timeout)"
+        r"|(?:invalid|unsupported|incompatible) (?:json[ -])?schema"
+        r"|(?:json[ -])?schema (?:is )?(?:invalid|unsupported|incompatible)",
+        detail,
+    ))
 
 
 class AntigravityAdapter:
@@ -48,8 +67,14 @@ class AntigravityAdapter:
             if result.error:
                 self._process_failure(result)
             if not result.succeeded:
-                raise AntigravityError(
-                    f"Antigravity {flag} retornou código {result.returncode}; saída omitida"
+                kind = classify_provider_text("\n".join((result.stderr, result.stdout)))
+                if kind is not ProviderFailureKind.UNKNOWN:
+                    raise ProviderFailure("gemini", kind, FAILURE_MESSAGES[kind], datetime.now(timezone.utc),
+                                          returncode=result.returncode, diagnostic_source="CLI")
+                raise _protocol_error(
+                    ProviderFailureKind.PROTOCOL_CLI_INCOMPATIBLE, "CLI_PREFLIGHT_FAILED",
+                    f"Antigravity {flag} retornou código {result.returncode}; saída omitida",
+                    result.returncode,
                 )
             outputs.append("\n".join((result.stdout, result.stderr)))
         required = {
@@ -61,7 +86,8 @@ class AntigravityAdapter:
         declared = set(re.findall(r"(?<![\w-])--[a-z][a-z-]*(?![\w-])", outputs[1]))
         missing = sorted(required - declared)
         if missing:
-            raise AntigravityError(
+            raise _protocol_error(
+                ProviderFailureKind.PROTOCOL_CLI_INCOMPATIBLE, "CLI_CAPABILITY_MISSING",
                 "CLI incompatível com review estruturado; flags ausentes: "
                 + ", ".join(missing)
             )
@@ -102,15 +128,37 @@ class AntigravityAdapter:
             if kind is not ProviderFailureKind.UNKNOWN:
                 raise ProviderFailure("gemini", kind, FAILURE_MESSAGES[kind], datetime.now(timezone.utc),
                                       returncode=result.returncode, diagnostic_source="CLI")
+            if _cli_schema_incompatible(detail):
+                raise _protocol_error(
+                    ProviderFailureKind.PROTOCOL_CLI_INCOMPATIBLE, "CLI_SCHEMA_INCOMPATIBLE",
+                    FAILURE_MESSAGES[ProviderFailureKind.PROTOCOL_CLI_INCOMPATIBLE], result.returncode,
+                )
             raise AntigravityError(
                 f"Antigravity retornou código {result.returncode}; saída omitida",
                 ProviderFailureKind.UNKNOWN, result.returncode,
             )
+        def malformed(code, message):
+            return _protocol_error(ProviderFailureKind.PROTOCOL_MALFORMED_RESPONSE,
+                                   code, message, result.returncode)
+
+        def unique_object(pairs):
+            value = {}
+            for key, item in pairs:
+                if key in value:
+                    raise malformed("JSON_DUPLICATE_KEY", "Antigravity retornou JSON com chave duplicada")
+                value[key] = item
+            return value
+
+        def reject_constant(_value):
+            raise malformed("JSON_NON_FINITE_NUMBER", "Antigravity retornou número incompatível com JSON")
+
+        if len(result.stdout) > 1_048_576:
+            raise malformed("JSON_OVERSIZED", "Envelope do Antigravity excede o limite de 1 MiB")
         try:
-            envelope = json.loads(result.stdout)
-        except json.JSONDecodeError as error:
-            raise AntigravityError("Antigravity retornou envelope JSON inválido",
-                                   ProviderFailureKind.MALFORMED_JSON, result.returncode) from error
+            envelope = json.loads(result.stdout, object_pairs_hook=unique_object,
+                                  parse_constant=reject_constant)
+        except (ValueError, RecursionError) as error:
+            raise malformed("ENVELOPE_INVALID_JSON", "Antigravity retornou envelope JSON inválido") from error
         if isinstance(envelope, dict) and envelope.get("status") != "SUCCESS":
             failure = envelope.get("error")
             if isinstance(failure, str):
@@ -120,31 +168,61 @@ class AntigravityAdapter:
                         "gemini", kind, FAILURE_MESSAGES[kind], datetime.now(timezone.utc),
                         returncode=result.returncode, diagnostic_source="JSON"
                     )
+                if _cli_schema_incompatible(failure):
+                    raise _protocol_error(
+                        ProviderFailureKind.PROTOCOL_CLI_INCOMPATIBLE, "CLI_SCHEMA_INCOMPATIBLE",
+                        FAILURE_MESSAGES[ProviderFailureKind.PROTOCOL_CLI_INCOMPATIBLE], result.returncode,
+                    )
             if isinstance(failure, dict):
                 mapping = {"RATE_LIMIT": ProviderFailureKind.TRANSIENT_RATE_LIMIT, "QUOTA_EXCEEDED": ProviderFailureKind.TERMINAL_QUOTA, "AUTH_ERROR": ProviderFailureKind.AUTH_ERROR, "NETWORK_ERROR": ProviderFailureKind.NETWORK_ERROR, "MODEL_UNAVAILABLE": ProviderFailureKind.MODEL_UNAVAILABLE}
                 kind = mapping.get(str(failure.get("code", "")).upper(), ProviderFailureKind.UNKNOWN)
                 textual = classify_provider_text(str(failure.get("message", "")))
                 kind = next(k for k in FAILURE_PRECEDENCE if k in {kind, textual})
+                if kind is ProviderFailureKind.UNKNOWN and (
+                    str(failure.get("code", "")).upper() in {"INVALID_SCHEMA", "UNSUPPORTED_SCHEMA", "SCHEMA_ERROR", "CLI_INCOMPATIBLE"}
+                    or _cli_schema_incompatible(str(failure.get("message", "")))
+                ):
+                    raise _protocol_error(
+                        ProviderFailureKind.PROTOCOL_CLI_INCOMPATIBLE, "CLI_SCHEMA_INCOMPATIBLE",
+                        FAILURE_MESSAGES[ProviderFailureKind.PROTOCOL_CLI_INCOMPATIBLE], result.returncode,
+                    )
                 retry_at = reliable_retry_at(failure.get("retry_at"))
                 raise ProviderFailure("gemini", kind, FAILURE_MESSAGES[kind], datetime.now(timezone.utc), retry_at,
                                       returncode=result.returncode, diagnostic_source="JSON")
-        if not isinstance(envelope, dict) or envelope.get("status") != "SUCCESS":
-            raise AntigravityError("Antigravity não retornou status SUCCESS")
+        if not isinstance(envelope, dict):
+            raise malformed("ENVELOPE_NOT_OBJECT", "Envelope do Antigravity deve ser objeto")
+        if envelope.get("status") != "SUCCESS":
+            if envelope.get("status") == "ERROR":
+                raise _protocol_error(
+                    ProviderFailureKind.PROTOCOL_SEMANTIC_INVALID, "ENVELOPE_NON_SUCCESS",
+                    "Antigravity não retornou status SUCCESS", result.returncode,
+                )
+            raise malformed("ENVELOPE_INVALID_STATUS", "Antigravity não retornou status SUCCESS")
         if envelope.get("error"):
-            raise AntigravityError("Antigravity retornou SUCCESS com erro; saída omitida")
+            raise _protocol_error(
+                ProviderFailureKind.PROTOCOL_SEMANTIC_INVALID, "SUCCESS_WITH_ERROR",
+                "Antigravity retornou SUCCESS com erro; saída omitida", result.returncode,
+            )
         if "denied_actions" in envelope and envelope["denied_actions"] != []:
             # A CLI pode encerrar com SUCCESS após negar comandos em headless.
             # Mesmo um objeto estruturado não prova que a revisão foi concluída.
-            raise AntigravityError(
+            raise _protocol_error(
+                ProviderFailureKind.PROTOCOL_SEMANTIC_INVALID, "DENIED_ACTIONS",
                 "Antigravity retornou denied_actions: revisão incompleta por "
                 "bloqueio de permissões. O reviewer headless deve analisar o dossier "
-                "sem executar comandos; nenhuma aprovação foi registrada"
+                "sem executar comandos; nenhuma aprovação foi registrada", result.returncode,
             )
         structured_output = envelope.get("structured_output")
+        if "structured_output" not in envelope:
+            raise malformed(
+                "SUCCESS_WITHOUT_STRUCTURED_OUTPUT",
+                "Falha do contrato estruturado do reviewer: Antigravity retornou SUCCESS sem structured_output",
+            )
         if not isinstance(structured_output, dict):
-            raise AntigravityError(
+            raise _protocol_error(
+                ProviderFailureKind.PROTOCOL_SCHEMA_MISMATCH, "STRUCTURED_OUTPUT_NOT_OBJECT",
                 "Falha do contrato estruturado do reviewer: Antigravity retornou "
-                "SUCCESS sem structured_output compatível"
+                "SUCCESS sem structured_output compatível", result.returncode,
             )
         return json.dumps(structured_output)
 

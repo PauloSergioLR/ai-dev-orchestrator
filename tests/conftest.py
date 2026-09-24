@@ -4,10 +4,18 @@ import os
 from pathlib import Path
 import socket
 import subprocess
+from tempfile import TemporaryDirectory
 
 import pytest
 
 from ai_dev_orchestrator.infrastructure import process
+
+
+@pytest.fixture
+def short_git_tmp_path():
+    """Mantém repositórios Git de teste abaixo do limite de path do Windows."""
+    with TemporaryDirectory(prefix="orch-git-") as directory:
+        yield Path(directory)
 
 
 @pytest.fixture(autouse=True)

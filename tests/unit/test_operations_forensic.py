@@ -24,7 +24,8 @@ def git(repository: Path, *arguments: str) -> str:
     return result.stdout.decode("utf-8").strip()
 
 
-def test_exclusao_git_condicionada_preserva_branch_avancada(tmp_path):
+def test_exclusao_git_condicionada_preserva_branch_avancada(short_git_tmp_path):
+    tmp_path = short_git_tmp_path
     repo, remote = tmp_path / "repo", tmp_path / "remote.git"
     repo.mkdir()
     remote.mkdir()

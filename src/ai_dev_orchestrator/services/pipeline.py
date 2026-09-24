@@ -35,13 +35,9 @@ from ai_dev_orchestrator.services.convergence import (
 from ai_dev_orchestrator.services.review import (
     CorrectionContextBuilder,
     ContextBuilder,
+    ReviewProtocolError,
     PullRequestReviewReader,
-    REVIEW_PLAN_SCHEMA,
-    STRUCTURED_REVIEW_SCHEMA,
-    build_checklists,
     build_prompt,
-    parse_review_plan,
-    parse_structured_review,
     load_review_policy,
     untrusted_json,
 )
@@ -63,7 +59,7 @@ from ai_dev_orchestrator.domain.base_ref import PreparedBase
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore, sanitize_diagnostic_text
 from ai_dev_orchestrator.infrastructure.ownership import OwnershipError
 from ai_dev_orchestrator.infrastructure.redaction import sanitize_diagnostic
-from ai_dev_orchestrator.domain.provider import ProviderFailure
+from ai_dev_orchestrator.domain.provider import ProviderFailure, ProviderFailureKind
 from ai_dev_orchestrator.domain.project_contract import CommandPlan, ProjectContract, SourceEvidence
 from ai_dev_orchestrator.services.project_discovery import ProjectCapabilityResolver
 from ai_dev_orchestrator.services.validation import LocalFailureKind, LocalValidationError
@@ -874,55 +870,59 @@ class RunPipeline:
         prior_findings: tuple[ReviewFinding, ...],
     ) -> StructuredReview:
         assert self.review_reader is not None and self.reviewer is not None
-        if self._uses_graph():
-            try:
-                self.graph_integrator.ensure_antigravity_mcp()
-            except Exception as error:
-                logger.warning(
-                    "MCP CRG do Antigravity indisponível; review seguirá pelo dossier: %s",
-                    str(error)[:500],
-                )
-        self._prepare_graph(worktree.path)
+        from ai_dev_orchestrator.services.review_protocol import ReviewProtocolSession
+
         context_builder = ContextBuilder(
             self.review_reader, worktree.path,
             expected_url=pull_request.url,
             expected_base=self.config.github.pull_request_base,
             expected_branch=worktree.branch,
         )
-        self._ensure_local_identity(worktree, head_sha, clean=True)
-        dossier = context_builder.build(
-            issue, pull_request.number, head_sha, gates, ci_result, prior_findings
-        )
-        policy = load_review_policy()
-        plan = parse_review_plan(
-            self.reviewer.invoke(
-                build_prompt(
-                    policy, dossier,
-                    blocking_severities=self.config.review.blocking_severities,
-                    use_code_review_graph=self._uses_graph(),
-                    graph_repository=worktree.path,
-                ),
-                worktree.path, REVIEW_PLAN_SCHEMA
+
+        def ensure_identity():
+            context_builder.ensure_head_is_current(pull_request.number, head_sha)
+            try:
+                self._ensure_local_identity(worktree, head_sha, clean=True)
+            except RunPipelineError as error:
+                raise ReviewProtocolError(
+                    "Identidade local divergiu durante a revisão",
+                    ProviderFailureKind.PROTOCOL_HEAD_MISMATCH, "HEAD_MISMATCH",
+                ) from error
+
+        def prepare_prompt():
+            if self._uses_graph():
+                try:
+                    self.graph_integrator.ensure_antigravity_mcp()
+                except Exception as error:
+                    logger.warning(
+                        "MCP CRG do Antigravity indisponível; review seguirá pelo dossier: %s",
+                        str(error)[:500],
+                    )
+            self._prepare_graph(worktree.path)
+            self._ensure_local_identity(worktree, head_sha, clean=True)
+            dossier = context_builder.build(
+                issue, pull_request.number, head_sha, gates, ci_result, prior_findings
             )
+            return build_prompt(
+                load_review_policy(), dossier,
+                blocking_severities=self.config.review.blocking_severities,
+                use_code_review_graph=self._uses_graph(), graph_repository=worktree.path,
+            )
+
+        session = ReviewProtocolSession(
+            self.reviewer, store=getattr(self, "execution_store", None),
+            execution_id=getattr(self, "_execution_id", None),
+            identity={"head_sha": head_sha, "pull_request_number": pull_request.number,
+                      "pull_request_url": pull_request.url, "branch": worktree.branch,
+                      "base": self.config.github.pull_request_base, "worktree": str(worktree.path)},
+            blocking=self.config.review.blocking_severities,
+            configuration={
+                "model": getattr(getattr(self.config, "providers", None), "gemini_model", "default"),
+                "executable": getattr(self.config.review, "executable", "agy"),
+                "graph": self._uses_graph(),
+            },
         )
-        context_builder.ensure_head_is_current(pull_request.number, head_sha)
-        review = parse_structured_review(
-            self.reviewer.invoke(
-                build_prompt(
-                    policy, dossier, plan, build_checklists(dossier.changed_files),
-                    blocking_severities=self.config.review.blocking_severities,
-                    use_code_review_graph=self._uses_graph(),
-                    graph_repository=worktree.path,
-                ),
-                worktree.path,
-                STRUCTURED_REVIEW_SCHEMA,
-            ),
-            head_sha,
-            self.config.review.blocking_severities,
-        )
-        context_builder.ensure_head_is_current(pull_request.number, head_sha)
-        self._ensure_local_identity(worktree, head_sha, clean=True)
-        return review
+        return session.run(prepare_prompt, ensure_identity)
 
     def _run_review_loop(
         self,

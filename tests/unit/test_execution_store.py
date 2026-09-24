@@ -1,5 +1,6 @@
 """Testes locais da persistência SQLite de execuções."""
 
+import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -29,7 +30,7 @@ def test_creates_versioned_schema_and_reopens_without_losing_record(
     assert reopened.get(created.id).branch == "feat/state"
     with sqlite3.connect(path) as connection:
         assert (
-            connection.execute("SELECT version FROM schema_version").fetchone()[0] == 6
+            connection.execute("SELECT version FROM schema_version").fetchone()[0] == 7
         )
 
 
@@ -71,6 +72,90 @@ def test_concurrent_transitions_cannot_overwrite_same_checkpoint(tmp_path: Path)
     events = SqliteExecutionStore(path).events(created.id)
     assert len(events) == 2
     assert events[-1].phase is ExecutionPhase.CODEX_RUNNING
+
+
+def test_review_protocol_checkpoint_survives_restart_without_consuming_corrections(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "protocol.db"
+    store = SqliteExecutionStore(path)
+    run = store.create(96, branch="work/review-protocol")
+    head = "a" * 40
+    for phase in (
+        ExecutionPhase.CODEX_RUNNING,
+        ExecutionPhase.TESTING,
+        ExecutionPhase.COMMIT_PENDING,
+        ExecutionPhase.PUSH_PENDING,
+        ExecutionPhase.PR_PENDING,
+        ExecutionPhase.WAITING_CI,
+    ):
+        store.transition(run.id, phase, summary="Preparação do review")
+    checkpoint = json.dumps(
+        {"head_sha": head, "dossier": "Evidências sanitizadas\nGates concluídos"},
+        ensure_ascii=False,
+    )
+    store.transition(
+        run.id, ExecutionPhase.GEMINI_REVIEWING, summary="Review preparado",
+        current_head_sha=head, pull_request_number=97,
+        review_checkpoint_json=checkpoint,
+        review_protocol_retry_attempts=0,
+        review_protocol_retry_head_sha=head,
+        correction_attempts=2,
+    )
+    attempted = store.checkpoint(
+        run.id, summary="Retry de protocolo reservado", head_sha=head,
+        review_protocol_retry_attempts=1,
+    )
+
+    reopened = SqliteExecutionStore(path)
+    restored = reopened.get(run.id)
+
+    assert restored == attempted
+    assert restored.phase is ExecutionPhase.GEMINI_REVIEWING
+    assert restored.pull_request_number == 97
+    assert restored.current_head_sha == head
+    assert restored.reviewed_head_sha is None
+    assert restored.review_checkpoint_json == checkpoint
+    assert restored.review_protocol_retry_attempts == 1
+    assert restored.review_protocol_retry_head_sha == head
+    assert restored.correction_attempts == 2
+    assert reopened.review_findings(run.id) == ()
+    assert reopened.events(run.id) == store.events(run.id)
+
+
+@pytest.mark.parametrize("legacy_version", [1, 2, 3, 4, 5, 6])
+def test_migrates_review_protocol_checkpoint_without_changing_legacy_execution(
+    tmp_path: Path, legacy_version: int,
+) -> None:
+    path = tmp_path / "legacy-protocol.db"
+    store = SqliteExecutionStore(path)
+    run = store.create(96, branch="work/legacy-review")
+    previous = store.checkpoint(
+        run.id, summary="Identidade preservada", current_head_sha="a" * 40,
+        pull_request_number=97, correction_attempts=2, provider_retry_attempts=3,
+    )
+    events = store.events(run.id)
+    # Remove somente as colunas novas no banco temporário para reproduzir o legado.
+    with sqlite3.connect(path) as connection:
+        for column in (
+            "review_checkpoint_json", "review_protocol_retry_attempts",
+            "review_protocol_retry_head_sha",
+        ):
+            connection.execute(f"ALTER TABLE executions DROP COLUMN {column}")
+        connection.execute("UPDATE schema_version SET version = ?", (legacy_version,))
+
+    reopened = SqliteExecutionStore(path)
+    restored = reopened.get(run.id)
+
+    assert restored == previous
+    assert restored.review_checkpoint_json is None
+    assert restored.review_protocol_retry_attempts == 0
+    assert restored.review_protocol_retry_head_sha is None
+    assert restored.provider_retry_attempts == 3
+    assert restored.correction_attempts == 2
+    assert reopened.events(run.id) == events
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 7
 
 
 def test_refuses_two_active_executions_and_keeps_ordered_journal(
@@ -133,11 +218,16 @@ def test_records_structured_review_atomically_and_redacts_findings(tmp_path: Pat
     push = store.transition(commit.id, ExecutionPhase.PUSH_PENDING, summary="Push")
     pr = store.transition(push.id, ExecutionPhase.PR_PENDING, summary="PR")
     ci = store.transition(pr.id, ExecutionPhase.WAITING_CI, summary="CI")
-    review_run = store.transition(ci.id, ExecutionPhase.GEMINI_REVIEWING, summary="Review")
+    review_run = store.transition(
+        ci.id, ExecutionPhase.GEMINI_REVIEWING, summary="Review",
+        review_protocol_retry_attempts=1, review_protocol_retry_head_sha="a" * 40,
+    )
     review = StructuredReview(ReviewVerdict.REJECTED, (ReviewFinding(FindingSeverity.HIGH, "token=abc", "password=abc"),), "a" * 40, "x")
     recorded = store.record_review(review_run.id, review, "Review persistida")
     findings = store.review_findings(recorded.id, "a" * 40)
     assert recorded.review_verdict == "REJECTED"
+    assert recorded.review_protocol_retry_attempts == 1
+    assert recorded.review_protocol_retry_head_sha == "a" * 40
     assert findings[0].title.endswith("[redigido]")
     assert "abc" not in findings[0].description
 
@@ -173,7 +263,7 @@ def test_migrates_schema_v1_preserving_execution_and_journal(tmp_path: Path) -> 
     assert store.get_active_for_issue(37).id == execution_id
     assert [event.sequence for event in store.events(execution_id)] == [1, 2]
     with sqlite3.connect(path) as connection:
-        assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 6
+        assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 7
         assert connection.execute("SELECT name FROM sqlite_master WHERE name = 'review_findings'").fetchone()
 
 

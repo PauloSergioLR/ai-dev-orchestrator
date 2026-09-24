@@ -177,6 +177,7 @@ def test_pytest_temporary_environment_is_platform_specific(
 def test_non_python_gate_preserves_generic_environment_without_pytest_isolation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    monkeypatch.delenv("PYTEST_DEBUG_TEMPROOT", raising=False)
     monkeypatch.setenv("PATH", "caminho-das-ferramentas")
     monkeypatch.setenv("PROJECT_AUTH_TOKEN", "credencial-do-projeto")
     monkeypatch.setenv("PYTEST_ADDOPTS", "--opcao-externa")

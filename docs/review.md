@@ -76,11 +76,31 @@ anteriores entram no dossier como histórico estruturado. As variáveis
 `ORCH_REVIEW__...` seguem o mesmo mapeamento. Não há merge automático, mudança
 para `Done` ou cleanup nesta etapa.
 
-Falha de protocolo mantém a execução em `GEMINI_REVIEWING`, sem review persistida
-nem merge. Após corrigir a instalação/configuração, `orch watch` pode repetir
-o reviewer para a mesma execução, sessão Codex, worktree, PR e HEAD, sujeito às
-revalidações normais. Não é necessário editar o SQLite. O watch pode continuar
-outros efeitos configurados após a aprovação; não é um comando de diagnóstico.
+Falhas estruturais transitórias têm **um único retry automático por HEAD**,
+compartilhado pelo planner e pela análise final. `PROTOCOL_MALFORMED_RESPONSE`
+(por exemplo, envelope JSON inválido ou SUCCESS sem structured output) e
+`PROTOCOL_SCHEMA_MISMATCH` (campos ausentes/extras, enum ou tipo inválido) podem
+usar esse retry. A segunda falha exige `HUMAN_REQUIRED`, mantendo a fase
+interrompida `GEMINI_REVIEWING`. Não há fallback para markdown ou texto livre.
+
+`PROTOCOL_HEAD_MISMATCH`, `PROTOCOL_CLI_INCOMPATIBLE` e
+`PROTOCOL_SEMANTIC_INVALID` exigem intervenção imediata. Isso inclui SHA diferente,
+CLI sem flags/schema compatíveis, `denied_actions` e APPROVED com finding
+bloqueante. Auth, quota, network e modelo mantêm sua política própria de recovery.
+
+O checkpoint guarda a entrada preparada e sanitizada, incluindo dossier,
+evidências e, quando validado, review plan. O retry envia exatamente o mesmo
+prompt, com o mesmo execution_id, PR e HEAD. Não executa Codex, gates, publicação,
+preparação de graph ou nova espera de CI. Identidades local e remota continuam
+sendo verificadas antes e depois de cada chamada. Mudanças de configuração ou
+schema durante a retomada bloqueiam o reaproveitamento do checkpoint.
+
+`review_protocol_retry_attempts` é separado de correções e reviews; não consome
+`review.max_correction_attempts`. O orçamento é reservado antes do retry e
+preservado após restart. Uma interrupção com chamada ainda em andamento exige
+intervenção, pois não é possível provar se ela terminou. Erros ficam no histórico
+como classificação e códigos fixos sanitizados (`protocol=...`), sem stdout,
+stderr, nomes de campos arbitrários ou valores rejeitados do provider.
 
 O teste `tests/integration/test_antigravity_live.py` é opt-in via
 `ORCH_TEST_ANTIGRAVITY_LIVE=1`: valida os schemas e uma revisão sintética usando

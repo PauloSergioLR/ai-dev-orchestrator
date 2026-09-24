@@ -18,7 +18,7 @@ from ai_dev_orchestrator.domain.execution import (
 from ai_dev_orchestrator.domain.review import ReviewFinding, ReviewVerdict, StructuredReview
 from ai_dev_orchestrator.infrastructure.redaction import redact_secrets
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 _SUMMARY_LIMIT = 500
 
 
@@ -90,7 +90,7 @@ class SqliteExecutionStore:
                         "INSERT INTO schema_version(version) VALUES (?)",
                         (SCHEMA_VERSION,),
                     )
-                elif row["version"] in {1, 2, 3, 4, 5}:
+                elif row["version"] in {1, 2, 3, 4, 5, 6}:
                     c.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
                 elif row["version"] != SCHEMA_VERSION:
                     raise SchemaVersionError(
@@ -136,6 +136,9 @@ class SqliteExecutionStore:
                     "no_changes_attempts": "INTEGER NOT NULL DEFAULT 0",
                     "provider_final_message": "TEXT",
                     "merge_origin": "TEXT",
+                    "review_checkpoint_json": "TEXT",
+                    "review_protocol_retry_attempts": "INTEGER NOT NULL DEFAULT 0",
+                    "review_protocol_retry_head_sha": "TEXT",
                 }
                 for name, declaration in additions.items():
                     if name not in existing_columns:
@@ -507,6 +510,9 @@ class SqliteExecutionStore:
             "ci_head_sha",
             "reviewed_head_sha",
             "review_verdict",
+            "review_checkpoint_json",
+            "review_protocol_retry_attempts",
+            "review_protocol_retry_head_sha",
             "correction_attempts",
             "merge_commit_sha",
             "merged_head_sha",
@@ -630,6 +636,9 @@ class SqliteExecutionStore:
             "ci_head_sha",
             "reviewed_head_sha",
             "review_verdict",
+            "review_checkpoint_json",
+            "review_protocol_retry_attempts",
+            "review_protocol_retry_head_sha",
             "correction_attempts",
             "merge_commit_sha",
             "merged_head_sha",

@@ -14,7 +14,8 @@ from ai_dev_orchestrator.adapters.github import (
 from ai_dev_orchestrator.adapters.antigravity import AntigravityAdapter
 from ai_dev_orchestrator.adapters.publication import GitPublicationAdapter
 from ai_dev_orchestrator.config import OrchestratorConfig
-from ai_dev_orchestrator.domain.execution import RunRecord
+from ai_dev_orchestrator.domain.execution import ExecutionStore, RunRecord
+from ai_dev_orchestrator.domain.issue import Issue
 from ai_dev_orchestrator.domain.recovery import (
     CiObservation, CiState, MergeObservation, MergeState, PullRequestObservation,
     PullRequestState,
@@ -46,7 +47,7 @@ class ProjectStatusWriter(Protocol):
 
 
 class RecoveryEffects:
-    """Ponte de alto nível; não decide próximas ações nem persiste checkpoints."""
+    """Ponte de alto nível; delega o checkpoint de review ao mesmo pipeline."""
 
     def __init__(
         self,
@@ -54,6 +55,7 @@ class RecoveryEffects:
         projects: "ProjectStatusWriter | None" = None,
     ) -> None:
         self.config = config
+        self.execution_store: ExecutionStore | None = None
         self.worktrees = GitWorktreeAdapter()
         self.codex = CodexAdapter(
             timeout=config.providers.codex_timeout_seconds,
@@ -80,6 +82,10 @@ class RecoveryEffects:
             progress=emit_progress,
         )
         self.convergence = ConvergencePoller(config.convergence)
+
+    def bind_execution_store(self, store: ExecutionStore) -> None:
+        """Compartilha com o reviewer o checkpoint durável usado pelo executor."""
+        self.execution_store = store
 
     def prepare_worktree(self, run: RunRecord) -> str:
         if not run.branch or not run.worktree_path or not run.base_ref or not (run.base_sha or run.current_head_sha):
@@ -215,15 +221,24 @@ class RecoveryEffects:
     def review_head(self, run: RunRecord, prior_findings: tuple[ReviewFinding, ...]) -> StructuredReview:
         if not run.pull_request_number or not run.pull_request_url or not run.current_head_sha:
             raise ValueError("Identidade de review incompleta")
-        issue = self.issues.get_issue(run.issue_number)
+        cached = bool(
+            run.review_checkpoint_json
+            and run.review_protocol_retry_head_sha == run.current_head_sha
+        )
+        issue = (
+            Issue(run.issue_number, "Review persistido", "", "OPEN", "", (), ())
+            if cached else self.issues.get_issue(run.issue_number)
+        )
         contract = self._contract(run) if run.project_contract_json else None
-        gates = self._validate(run)
-        ci_result = self._wait_ci_result(run)
+        gates = () if cached else self._validate(run)
+        ci_result = None if cached else self._wait_ci_result(run)
         pipeline = RunPipeline(self.config, self.issues, self.projects, self.projects,
                                self.worktrees, self.codex, self.validation, self.publication,
                                self.pull_requests, self.pull_requests, self.pull_requests,
                                self.reviewer, self.pull_requests, project_contract=contract,
+                               execution_store=getattr(self, "execution_store", None),
                                graph_integrator=getattr(self, "graph_integrator", None))
+        pipeline._execution_id = run.id
         worktree = GitWorktree(self.config.workspace.repository_path, Path(run.worktree_path or ""), run.branch or "", run.base_ref or "")
         pull = PullRequest(run.pull_request_number, run.pull_request_url, issue.title, self.config.github.pull_request_base, run.branch or "")
         return pipeline._review_head(issue, worktree, pull, run.current_head_sha, gates, ci_result, prior_findings)
