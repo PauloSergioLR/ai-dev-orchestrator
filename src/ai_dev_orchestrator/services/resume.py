@@ -14,6 +14,8 @@ from ai_dev_orchestrator.domain.recovery import (
 )
 from ai_dev_orchestrator.config import OrchestratorConfig
 from ai_dev_orchestrator.infrastructure.database import SqliteExecutionStore
+from ai_dev_orchestrator.infrastructure.codex_runtime import effective_executable
+from ai_dev_orchestrator.infrastructure.process import CommandRunner
 from ai_dev_orchestrator.infrastructure.ownership import OwnershipError
 from ai_dev_orchestrator.services.recovery_executor import RecoveryExecutor
 from ai_dev_orchestrator.services.recovery_planner import RecoveryPlanner
@@ -154,6 +156,7 @@ class ResumeService:
             else:
                 raise ResumeError(f"A execução da Issue #{issue_number} já é terminal; use --recover-failed para reconciliar falha transitória")
         self._validate_models(run)
+        run = self._record_codex_identity_change(run)
         if run.phase in TERMINAL_PHASES:
             raise ResumeError(f"A execução da Issue #{issue_number} já é terminal")
         if run.phase is ExecutionPhase.HUMAN_REQUIRED:
@@ -247,6 +250,30 @@ class ResumeService:
                 return self._result(run)
             if decision.action.value == "WAIT_FOR_CI" and run.phase.value == "WAITING_CI":
                 return self._result(run)
+
+    def _record_codex_identity_change(self, run: RunRecord) -> RunRecord:
+        """Anota mudança observável da CLI sem impedir a retomada da mesma sessão."""
+        if not run.codex_executable_path and not run.codex_cli_version:
+            return run
+        current_path = effective_executable()
+        current_version = None
+        if current_path and not current_path.casefold().endswith((".cmd", ".bat")):
+            result = CommandRunner(timeout=5).run([current_path, "--version"])
+            if result.succeeded:
+                current_version = result.stdout.strip() or None
+        changes = []
+        if run.codex_executable_path and current_path != run.codex_executable_path:
+            changes.append(f"caminho {run.codex_executable_path} → {current_path or 'indisponível'}")
+        if run.codex_cli_version and current_version and current_version != run.codex_cli_version:
+            changes.append(f"versão {run.codex_cli_version} → {current_version}")
+        if not changes:
+            return run
+        return self.store.checkpoint(
+            run.id,
+            summary="Aviso: identidade do Codex mudou desde a chamada anterior ("
+            + "; ".join(changes)
+            + "); retomada continuará na mesma execução e sessão",
+        )
 
     @staticmethod
     def _result(run: RunRecord) -> ResumeResult:

@@ -15,6 +15,7 @@ from ai_dev_orchestrator.infrastructure.process import (
     CommandResult, CommandRunner, OutputPolicy,
 )
 from ai_dev_orchestrator.infrastructure.heartbeat import heartbeat
+from ai_dev_orchestrator.infrastructure.codex_runtime import effective_executable, global_codex_settings
 from ai_dev_orchestrator.domain.provider import (
     ProviderFailure, ProviderFailureKind, classify_provider_text,
     FAILURE_MESSAGES, FAILURE_PRECEDENCE, reliable_retry_at, textual_retry_at, classify_process_failure,
@@ -43,6 +44,10 @@ class CodexExecution:
     stdout: str
     stderr: str
     succeeded: bool
+    executable_path: str | None = None
+    cli_version: str | None = None
+    model_source: str = "codex-default"
+    reasoning_effort: str | None = None
 
 
 class ProcessRunner(Protocol):
@@ -68,6 +73,7 @@ class CodexAdapter:
         heartbeat_seconds: float = 60,
         idle_timeout: float = CODEX_IDLE_TIMEOUT_SECONDS,
     ) -> None:
+        self._uses_default_runner = runner is None
         self.runner = runner if runner is not None else CommandRunner(timeout=timeout, idle_timeout=idle_timeout)
         self.model = model
         self.code_review_graph_command = code_review_graph_command
@@ -81,6 +87,9 @@ class CodexAdapter:
         arguments.extend(self._mcp_arguments(path))
         if self.model != "default":
             arguments.extend(["--model", self.model])
+        executable_path, cli_version, model_source, reasoning_effort = self._runtime_metadata()
+        if self._uses_default_runner and executable_path:
+            arguments[0] = executable_path
         result, session_id, final_message = self._run([*arguments, "-"], prompt, "executar")
         assert session_id is not None
         return CodexExecution(
@@ -89,6 +98,10 @@ class CodexAdapter:
             stdout=result.stdout,
             stderr=result.stderr,
             succeeded=True,
+            executable_path=executable_path,
+            cli_version=cli_version,
+            model_source=model_source,
+            reasoning_effort=reasoning_effort,
         )
 
     def resume(
@@ -102,6 +115,9 @@ class CodexAdapter:
         arguments.extend(self._mcp_arguments(path))
         if self.model != "default":
             arguments.extend(["--model", self.model])
+        executable_path, cli_version, model_source, reasoning_effort = self._runtime_metadata()
+        if self._uses_default_runner and executable_path:
+            arguments[0] = executable_path
         result, returned_session_id, final_message = self._run(
             [*arguments, "resume", session_id, "-"],
             prompt,
@@ -120,7 +136,26 @@ class CodexAdapter:
             stdout=result.stdout,
             stderr=result.stderr,
             succeeded=True,
+            executable_path=executable_path,
+            cli_version=cli_version,
+            model_source=model_source,
+            reasoning_effort=reasoning_effort,
         )
+
+    def _runtime_metadata(self) -> tuple[str | None, str | None, str, str | None]:
+        """Coleta metadados locais depois da chamada; falhas não alteram o provider."""
+        executable = effective_executable()
+        version = None
+        if executable and self._uses_default_runner:
+            try:
+                result = CommandRunner(timeout=5).run([executable, "--version"])
+                if result.succeeded:
+                    version = result.stdout.strip() or None
+            except (OSError, ValueError):
+                pass
+        source = "orchestrator" if self.model != "default" else "codex-default"
+        reasoning_effort = global_codex_settings()[1] if self.model == "default" else None
+        return executable, version, source, reasoning_effort
 
     def _mcp_arguments(self, worktree: Path) -> list[str]:
         """Escopa o MCP CRG ao worktree sem depender de configuração global."""

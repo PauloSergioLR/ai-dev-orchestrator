@@ -261,6 +261,11 @@ def test_inspect_json_exibe_review_e_nao_altera_sqlite(monkeypatch, tmp_path: Pa
     path = tmp_path / "state.db"
     store = SqliteExecutionStore(path)
     run = _reviewing_run(store)
+    run = store.checkpoint(
+        run.id, summary="CLI Codex", codex_executable_path="C:/Codex/codex.exe",
+        codex_cli_version="codex 1.2.3", codex_model_source="orchestrator",
+        codex_reasoning_effort="high",
+    )
     store.record_review(run.id, StructuredReview(
         ReviewVerdict.REJECTED,
         (ReviewFinding(FindingSeverity.HIGH, "Falha de autenticação", "não deve aparecer", "src/Authorization: Basic segredo-de-teste.py", 12, "segurança"),),
@@ -276,10 +281,18 @@ def test_inspect_json_exibe_review_e_nao_altera_sqlite(monkeypatch, tmp_path: Pa
     output = json.loads(result.output)
     assert output["execution_id"] == run.id
     assert output["review"]["verdict"] == "REJECTED"
+    assert output["codex_runtime"] == {
+        "executable_path": "C:/Codex/codex.exe", "cli_version": "codex 1.2.3",
+        "model_source": "orchestrator", "reasoning_effort": "high",
+    }
     assert output["findings"] == [{"severity": "HIGH", "title": "Falha de autenticação", "path": "src/Authorization: [redigido]", "line": 12, "criterion": "segurança"}]
     with sqlite3.connect(path) as connection:
         after = connection.execute("SELECT phase, updated_at FROM executions").fetchall(), connection.execute("SELECT COUNT(*) FROM execution_events").fetchone()
     assert after == before
+    human = runner.invoke(app, ["inspect", "--issue", "64"])
+    assert human.exit_code == 0
+    assert "C:/Codex/codex.exe" in human.output
+    assert "codex 1.2.3" in human.output
 
 
 def test_inspect_json_exposes_sanitized_truncated_gate_diagnostic(monkeypatch, tmp_path: Path) -> None:

@@ -527,6 +527,13 @@ def _show_inspection(diagnosis: Inspection) -> None:
     typer.echo(f"Fase: {diagnosis.phase} | terminal: {'sim' if diagnosis.terminal else 'não'}")
     typer.echo(f"Branch: {diagnosis.branch or '-'} | worktree: {diagnosis.worktree_path or '-'} | base: {diagnosis.base_ref or '-'}")
     typer.echo(f"Sessão Codex: {diagnosis.codex_session_id or '-'} | modelos: Codex={diagnosis.models['codex']}, Gemini={diagnosis.models['gemini']}")
+    runtime = diagnosis.codex_runtime
+    typer.echo(
+        "Codex runtime: executável={executable_path} | versão={cli_version} | "
+        "origem do modelo={model_source} | reasoning effort={reasoning_effort}".format(
+            **{key: value or '-' for key, value in runtime.items()}
+        )
+    )
     pr = diagnosis.pull_request
     typer.echo(f"PR: #{pr['number'] or '-'} | URL: {pr['url'] or '-'}")
     heads = diagnosis.heads

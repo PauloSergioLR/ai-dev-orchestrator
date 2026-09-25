@@ -35,6 +35,7 @@ from ai_dev_orchestrator.infrastructure.database import (
     sanitize_diagnostic_text,
 )
 from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner
+from ai_dev_orchestrator.infrastructure.codex_runtime import codex_candidates, global_codex_settings
 from ai_dev_orchestrator.services.review import (
     REVIEW_PLAN_SCHEMA,
     STRUCTURED_REVIEW_SCHEMA,
@@ -91,7 +92,7 @@ class DoctorService:
 
     def diagnose(self, *, deep: bool = False, state: bool = False) -> list[DoctorCheck]:
         """Executa todas as verificações obrigatórias do comando doctor."""
-        codex_cli = self._check_command("Codex CLI", ["codex", "--version"])
+        codex_cli = self._check_codex_identity()
         github_cli = self._check_github_cli()
         local_permissions = self._check_local_permissions()
         checks = [
@@ -102,6 +103,7 @@ class DoctorService:
             self._check_antigravity_cli(),
             self._check_repository(),
             self._check_configuration(),
+            self._check_codex_model_source(),
             self._check_github_project(github_cli),
             self._summarize_local_permissions(codex_cli, local_permissions),
             *local_permissions,
@@ -115,6 +117,70 @@ class DoctorService:
         if state:
             checks.append(self._check_state_consistency())
         return checks
+
+    def _check_codex_identity(self) -> DoctorCheck:
+        """Mostra o comando escolhido pelo PATH e compara candidatos sem abrir provider."""
+        candidates = codex_candidates()
+        if not candidates:
+            return DoctorCheck("Codex CLI", CheckStatus.ERROR, "codex não encontrado no PATH")
+        reports: list[str] = []
+        versions: list[str | None] = []
+        for index, candidate in enumerate(candidates):
+            # O CommandRunner recusa scripts batch do Windows por segurança; nesses
+            # casos, caminho e origem seguem visíveis, mas a versão fica indisponível.
+            command = ["codex", "--version"] if index == 0 else [candidate.path, "--version"]
+            try:
+                result = self.runner.run(command)
+                version = result.stdout.strip() if result.succeeded else None
+            except Exception:
+                # Falha isolada de candidato secundário nunca derruba o diagnóstico.
+                version = None
+            versions.append(version)
+            label = "usado" if index == 0 else f"candidato {index + 1}"
+            display_path = candidate.path if index == 0 else self._compact_codex_path(candidate.path)
+            reports.append(
+                f"{label}: {display_path} ({candidate.origin}; versão {version or 'indisponível'})"
+            )
+        selected = versions[0]
+        status = CheckStatus.OK if selected else CheckStatus.ERROR
+        message = reports[0]
+        if len(candidates) > 1:
+            message += f"; aviso: {len(candidates)} candidatos no PATH"
+            if selected and any(version and version != selected for version in versions[1:]):
+                message += "; versões divergentes entre candidatos"
+            if len(reports) > 1:
+                message += "; outros: " + "; ".join(reports[1:])
+        return DoctorCheck("Codex CLI", status, message)
+
+    @staticmethod
+    def _compact_codex_path(path: str) -> str:
+        """Preserva os segmentos úteis de candidatos secundários."""
+        normalized = path.replace("/", "\\")
+        parts = [part for part in normalized.split("\\") if part]
+        if len(parts) <= 3:
+            return path
+        return "…\\" + "\\".join(parts[-3:])
+
+    def _check_codex_model_source(self) -> DoctorCheck:
+        try:
+            config = load_config(self.config_path)
+        except ConfigurationError as error:
+            return DoctorCheck("Codex model selection", CheckStatus.WARNING, self._safe_message(error))
+        model = config.providers.codex_model
+        if model != "default":
+            return DoctorCheck(
+                "Codex model selection", CheckStatus.OK,
+                f"{model}; origem: orchestrator.toml",
+            )
+        global_model, effort, source = global_codex_settings()
+        detail = "delegado ao Codex CLI/configuração global"
+        if global_model:
+            detail += f"; model={global_model}"
+        if effort:
+            detail += f"; model_reasoning_effort={effort}"
+        if source and (global_model or effort):
+            detail += "; chaves lidas de config.toml"
+        return DoctorCheck("Codex model selection", CheckStatus.OK, detail)
 
     def _check_local_permissions(self) -> list[DoctorCheck]:
         """Prova escrita local sem iniciar provider nem alterar caminhos definitivos."""
