@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from ai_dev_orchestrator.adapters.codex import CodexAdapter
@@ -38,14 +39,15 @@ def _touch(path: Path) -> str:
 
 
 def test_one_candidate_and_known_windows_shims(tmp_path: Path) -> None:
-    exe = _touch(tmp_path / "official" / "codex.exe")
+    executable = _touch(tmp_path / "official" / "codex")
     shim_cmd = _touch(tmp_path / "Volta" / "bin" / "codex.cmd")
     shim_exe = _touch(tmp_path / "npm" / "codex.exe")
-    assert codex_candidates(str(exe)) == ()  # PATH espera diretórios.
-    candidates = codex_candidates(str(Path(exe).parent))
-    assert [candidate.path for candidate in candidates] == [exe]
-    assert codex_candidates(str(Path(shim_cmd).parent))[0].path == shim_cmd
-    assert codex_candidates(str(Path(shim_exe).parent))[0].path == shim_exe
+    assert codex_candidates(executable) == ()  # PATH espera diretórios.
+    candidates = codex_candidates(str(Path(executable).parent))
+    assert [candidate.path for candidate in candidates] == [executable]
+    if os.name == "nt":
+        assert codex_candidates(str(Path(shim_cmd).parent))[0].path == shim_cmd
+        assert codex_candidates(str(Path(shim_exe).parent))[0].path == shim_exe
 
 
 def test_doctor_lists_multiple_candidates_and_version_divergence(monkeypatch, tmp_path: Path) -> None:
