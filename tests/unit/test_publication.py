@@ -222,15 +222,62 @@ def test_access_denied_in_controlled_temporary_is_infrastructure_failure(
     assert raised.value.kind is LocalFailureKind.LOCAL_INFRASTRUCTURE
     assert raised.value.correctable is False
     assert raised.value.result is not None
-    assert "saída truncada" in raised.value.result.diagnostic
+    assert "saída intermediária truncada" in raised.value.result.diagnostic
     assert not list(tmp_path.glob(".orch-gate-*"))
 
 
-def test_truncates_large_gate_diagnostic() -> None:
-    runner = FakeRunner([CommandResult(1, stderr="x" * 1000)])
+def test_gate_diagnostic_keeps_short_output_unchanged() -> None:
+    from ai_dev_orchestrator.services.validation import LocalValidationService
 
-    with pytest.raises(LocalValidationError, match="saída truncada"):
-        LocalValidationService(runner, PLANS).validate(Path.cwd())
+    assert LocalValidationService._summarize("falha curta — caminho C:\\projeto\\teste.py") == (
+        "falha curta — caminho C:\\projeto\\teste.py"
+    )
+
+
+def test_gate_diagnostic_truncation_preserves_prefix_and_suffix_within_limit() -> None:
+    from ai_dev_orchestrator.services.validation import (
+        MAX_GATE_DIAGNOSTIC_CHARACTERS,
+        LocalValidationService,
+    )
+
+    diagnostic = "início do gate\n" + ("intermediário " * 100) + "Traceback final: AssertionError: causa real"
+    summarized = LocalValidationService._summarize(diagnostic)
+
+    assert summarized.startswith("início do gate ")
+    assert "... [saída intermediária truncada] ..." in summarized
+    assert summarized.endswith("Traceback final: AssertionError: causa real")
+    assert len(summarized) <= MAX_GATE_DIAGNOSTIC_CHARACTERS
+
+
+def test_gate_diagnostic_preserves_pytest_short_summary_at_end() -> None:
+    from ai_dev_orchestrator.services.validation import LocalValidationService
+
+    diagnostic = "============================= test session starts =============================\n" + (
+        "coletando testes... saída extensa\n" * 100
+    ) + "短い Unicode — Windows\r\n= short test summary info =\r\nFAILED tests/test_auth.py::test_token - AssertionError"
+
+    summarized = LocalValidationService._summarize(diagnostic)
+
+    assert summarized.startswith("============================= test session starts")
+    assert "saída intermediária truncada" in summarized
+    assert summarized.endswith("FAILED tests/test_auth.py::test_token - AssertionError")
+
+
+def test_gate_diagnostic_redacts_secrets_before_selecting_prefix_and_suffix(monkeypatch) -> None:
+    from ai_dev_orchestrator.services.validation import LocalValidationService
+
+    monkeypatch.setenv("ISSUE_TEST_TOKEN", "token-sintetico-secreto")
+    diagnostic = (
+        "token-sintetico-secreto" + "x" * 315
+        + "token-sintetico-secreto" + "y" * 180
+        + "token-sintetico-secreto" + "z" * 20
+    )
+
+    summarized = LocalValidationService._summarize(diagnostic)
+
+    assert "token-sintetico-secreto" not in summarized
+    assert summarized.count("[redigido]") == 3
+    assert len(summarized) <= 500
 
 
 def test_publication_stages_validates_commits_and_pushes_without_force() -> None:
