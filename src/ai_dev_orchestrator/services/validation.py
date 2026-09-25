@@ -18,7 +18,7 @@ from typing import Mapping, Protocol, Sequence
 from ai_dev_orchestrator.domain.project_contract import CommandPlan, ProjectContract, RiskClass
 from ai_dev_orchestrator.domain.provider import ProviderFailure, FAILURE_MESSAGES, classify_process_failure
 from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner
-from ai_dev_orchestrator.infrastructure.database import sanitize_diagnostic_text
+from ai_dev_orchestrator.infrastructure.redaction import redact_secrets
 
 MAX_GATE_DIAGNOSTIC_CHARACTERS = 500
 
@@ -267,9 +267,11 @@ class LocalValidationService:
 
     @staticmethod
     def _summarize(diagnostic: str) -> str:
-        was_truncated = len(diagnostic) > MAX_GATE_DIAGNOSTIC_CHARACTERS
-        diagnostic = sanitize_diagnostic_text(diagnostic) or ""
-        if not was_truncated and len(diagnostic) <= MAX_GATE_DIAGNOSTIC_CHARACTERS:
+        diagnostic = redact_secrets(diagnostic).replace("\r", " ").replace("\n", " ")
+        if len(diagnostic) <= MAX_GATE_DIAGNOSTIC_CHARACTERS:
             return diagnostic
-        suffix = "… [saída truncada]"
-        return diagnostic[: MAX_GATE_DIAGNOSTIC_CHARACTERS - len(suffix)] + suffix
+        marker = " ... [saída intermediária truncada] ... "
+        retained = MAX_GATE_DIAGNOSTIC_CHARACTERS - len(marker)
+        prefix_length = retained // 2
+        suffix_length = retained - prefix_length
+        return diagnostic[:prefix_length] + marker + diagnostic[-suffix_length:]

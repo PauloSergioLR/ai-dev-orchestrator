@@ -282,6 +282,33 @@ def test_inspect_json_exibe_review_e_nao_altera_sqlite(monkeypatch, tmp_path: Pa
     assert after == before
 
 
+def test_inspect_json_exposes_sanitized_truncated_gate_diagnostic(monkeypatch, tmp_path: Path) -> None:
+    from ai_dev_orchestrator.services.validation import LocalValidationService
+
+    path = tmp_path / "state.db"
+    store = SqliteExecutionStore(path)
+    run = store.create(101)
+    diagnostic = LocalValidationService._summarize(
+        "início relevante\n" + "saída intermediária " * 100
+        + "\nFAILED tests/test_issue.py::test_causa - AssertionError"
+    )
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE executions SET gate_results_json = ? WHERE id = ?",
+            (json.dumps([{"name": "pytest", "diagnostic": diagnostic}]), run.id),
+        )
+    monkeypatch.setattr("ai_dev_orchestrator.cli.load_config", lambda: SimpleNamespace(state=SimpleNamespace(database_path=path)))
+
+    result = runner.invoke(app, ["inspect", "--issue", "101", "--json"])
+
+    assert result.exit_code == 0
+    gate_diagnostic = json.loads(result.output)["gates"][0]["diagnostic"]
+    assert gate_diagnostic.startswith("início relevante ")
+    assert "saída intermediária truncada" in gate_diagnostic
+    assert gate_diagnostic.endswith("FAILED tests/test_issue.py::test_causa - AssertionError")
+    assert len(gate_diagnostic) <= 500
+
+
 def test_inspect_sinaliza_campos_parciais_e_redige_segredos(monkeypatch, tmp_path: Path) -> None:
     path = tmp_path / "state.db"
     store = SqliteExecutionStore(path)
