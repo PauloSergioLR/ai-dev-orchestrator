@@ -544,6 +544,10 @@ class RunPipeline:
             "Sessão Codex iniciada",
             codex_session_id=execution.session_id,
             provider_final_message=execution.final_message,
+            codex_executable_path=execution.executable_path,
+            codex_cli_version=execution.cli_version,
+            codex_model_source=execution.model_source,
+            codex_reasoning_effort=execution.reasoning_effort,
         )
         self._ensure_local_identity(worktree, initial_head)
         if (

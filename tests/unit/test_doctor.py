@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 
 from ai_dev_orchestrator.cli import app
 from ai_dev_orchestrator.infrastructure.process import CommandResult, CommandRunner, OutputPolicy
+from ai_dev_orchestrator.infrastructure.codex_runtime import CodexCandidate
 from ai_dev_orchestrator.services.doctor import (
     CheckScope,
     CheckStatus,
@@ -94,6 +95,10 @@ def test_all_checks_are_ok(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
             "[project]\n[[project.gates]]\n"
             "name = 'official-check'\nargv = ['tools/validate.exe']\n"
         )
+    monkeypatch.setattr(
+        "ai_dev_orchestrator.services.doctor.codex_candidates",
+        lambda: (CodexCandidate(str(tmp_path / "codex"), "fixture"),),
+    )
 
     checks = DoctorService(
         FakeRunner(successful_results()), config_path

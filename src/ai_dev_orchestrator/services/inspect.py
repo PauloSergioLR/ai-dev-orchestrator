@@ -24,6 +24,7 @@ class Inspection:
     base_ref: str | None
     codex_session_id: str | None
     models: dict[str, str]
+    codex_runtime: dict[str, str | None]
     pull_request: dict[str, Any]
     heads: dict[str, str | None]
     review: dict[str, Any]
@@ -89,6 +90,12 @@ class InspectService:
             base_ref=record.base_ref,
             codex_session_id=record.codex_session_id,
             models={"codex": record.codex_model, "gemini": record.gemini_model},
+            codex_runtime={
+                "executable_path": _safe(record.codex_executable_path),
+                "cli_version": _safe(record.codex_cli_version),
+                "model_source": _safe(record.codex_model_source),
+                "reasoning_effort": _safe(record.codex_reasoning_effort),
+            },
             pull_request={"number": record.pull_request_number, "url": _safe(record.pull_request_url)},
             heads={"current": record.current_head_sha, "ci": record.ci_head_sha,
                    "reviewed": record.reviewed_head_sha, "merged": record.merged_head_sha,

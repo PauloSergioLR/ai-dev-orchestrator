@@ -159,6 +159,10 @@ class RunRecord:
     human_at: str | None = None
     last_error: str | None = None
     codex_model: str = "default"
+    codex_executable_path: str | None = None
+    codex_cli_version: str | None = None
+    codex_model_source: str | None = None
+    codex_reasoning_effort: str | None = None
     gemini_model: str = "default"
     quota_provider: str | None = None
     quota_classification: str | None = None
